@@ -162,7 +162,14 @@ pub fn build(b: *std.Build) void {
         ci_step.dependOn(&models_check.step);
     }
 
+    const blob_module = b.createModule(.{
+        .root_source_file = b.path("adapters/bgfx/blob.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
+    const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
@@ -172,6 +179,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
+    test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
@@ -695,6 +703,20 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         .{ .profile = "spirv", .platform = "android", .tag = "spirv" },
         .{ .profile = "300_es", .platform = "android", .tag = "essl" },
     };
+    const computes = [_][]const u8{"cs_nv12_to_rgba"};
+    for (computes) |compute_name| {
+        const run = b.addRunArtifact(shaderc_exe);
+        run.addArg("-f");
+        run.addFileArg(b.path(b.fmt("adapters/bgfx/shaders/{s}.sc", .{compute_name})));
+        run.addArg("-o");
+        const out_name = b.fmt("{s}.spirv.bin", .{compute_name});
+        const out = run.addOutputFileArg(out_name);
+        run.addArgs(&.{ "--type", "compute", "--platform", "android", "-p", "spirv" });
+        run.addArg("-i");
+        run.addDirectoryArg(b.path(".vendor/bgfx/src"));
+        _ = wf.addCopyFile(out, out_name);
+        source.appendSlice(b.allocator, b.fmt("pub const {s}_spirv = @embedFile(\"{s}\");\n", .{ compute_name, out_name })) catch @panic("oom");
+    }
     for (shaders) |shader| {
         for (profiles) |profile| {
             const run = b.addRunArtifact(shaderc_exe);
