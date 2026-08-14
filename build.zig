@@ -218,6 +218,35 @@ pub fn build(b: *std.Build) void {
     };
     addIosStep(b, optimize);
 
+    // The web core: the same export layer compiled to wasm32 with every ck_
+    // symbol visible to the embedder.
+    const wasm_step = b.step("wasm", "Build the camerakit core for the web");
+    {
+        const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+        const math_wasm = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = wasm_target, .optimize = .ReleaseSmall });
+        const graph_wasm = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = wasm_target, .optimize = .ReleaseSmall });
+        const render_wasm = b.createModule(.{
+            .root_source_file = b.path("adapters/bgfx/render_stub.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{.{ .name = "math", .module = math_wasm }},
+        });
+        const abi_wasm = b.createModule(.{
+            .root_source_file = b.path("core/abi/abi.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{
+                .{ .name = "graph", .module = graph_wasm },
+                .{ .name = "math", .module = math_wasm },
+                .{ .name = "render", .module = render_wasm },
+            },
+        });
+        const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
+        camerakit_wasm.entry = .disabled;
+        camerakit_wasm.rdynamic = true;
+        wasm_step.dependOn(&b.addInstallArtifact(camerakit_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
+    }
+
     const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
     if (have_render_stack and gltf_module != null and target.result.os.tag == .macos) {
         const bgfx_lib = buildBgfxLib(b, target, optimize);

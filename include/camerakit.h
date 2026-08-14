@@ -39,6 +39,12 @@ extern "C" {
 /* Any-thread. Compare the high 16 bits against CK_ABI_MAJOR. */
 uint32_t ck_abi_version(void);
 
+/* Any-thread. Scratch allocation inside the module for embedders that
+ * cannot address its memory directly, the wasm host in particular. Free
+ * with the same size. */
+void *ck_alloc(size_t size);
+void ck_free(void *ptr, size_t size);
+
 typedef enum ck_status {
     CK_OK = 0,
     CK_ERROR_INVALID_ARGUMENT = 1,
@@ -109,7 +115,8 @@ typedef struct ck_frame_desc {
 } ck_frame_desc;
 
 /* The render surface a shell hands the engine: an NSWindow, CAMetalLayer,
- * ANativeWindow, or canvas handle per platform. Layout: 16 bytes. */
+ * ANativeWindow, or canvas handle per platform. Layout: 16 bytes on 64-bit
+ * targets, 12 on wasm32. */
 typedef struct ck_renderer_desc {
     void *native_window_handle;
     uint32_t width;
@@ -176,6 +183,11 @@ void ck_session_destroy(ck_session *session);
  * objects must outlive the next rendered frame. */
 ck_status ck_session_submit_frame(ck_session *session, const ck_frame_desc *desc, const ck_frame_planes *planes);
 
+/* Any-thread, pure. Writes the YCbCr to RGB conversion for a standard and
+ * range as one column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).
+ * out_matrix holds 16 floats. */
+ck_status ck_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix);
+
 /* Graph thread. Reports one finished frame: measured whole-pipeline time
  * plus current thermal pressure. Returns the degradation level in effect
  * for the next frame. */
@@ -189,7 +201,7 @@ _Static_assert(sizeof(ck_frame_desc) == 32, "ck_frame_desc layout is frozen");
 _Static_assert(sizeof(ck_landmarks) == 24, "ck_landmarks layout is frozen");
 _Static_assert(sizeof(ck_engine_config) == 8, "ck_engine_config layout is frozen");
 _Static_assert(sizeof(ck_session_config) == 8, "ck_session_config layout is frozen");
-_Static_assert(sizeof(ck_renderer_desc) == 16, "ck_renderer_desc layout is frozen");
+_Static_assert(sizeof(ck_renderer_desc) == (sizeof(void *) == 8 ? 16 : 12), "ck_renderer_desc layout is frozen");
 _Static_assert(sizeof(ck_frame_planes) == 32, "ck_frame_planes layout is frozen");
 #endif
 

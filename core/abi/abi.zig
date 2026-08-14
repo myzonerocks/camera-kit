@@ -20,8 +20,9 @@ pub const abi_minor: u16 = 2;
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
 // symbolization machinery drags in loader interfaces mobile platforms do
-// not export. A panic prints the message and traps.
-pub const panic = std.debug.simple_panic;
+// not export. A panic prints the message and traps; freestanding wasm has
+// nowhere to print, so it traps directly.
+pub const panic = if (builtin.os.tag == .freestanding) std.debug.no_panic else std.debug.simple_panic;
 
 pub const Status = enum(c_int) {
     ok = 0,
@@ -82,7 +83,7 @@ comptime {
     std.debug.assert(@offsetOf(Landmarks, "timestamp_us") == 16);
     std.debug.assert(@sizeOf(EngineConfig) == 8);
     std.debug.assert(@sizeOf(SessionConfig) == 8);
-    std.debug.assert(@sizeOf(RendererDesc) == 16);
+    std.debug.assert(@sizeOf(RendererDesc) == if (@sizeOf(usize) == 8) 16 else 12);
     std.debug.assert(@sizeOf(FramePlanes) == 32);
     std.debug.assert(@offsetOf(FramePlanes, "planes") == 8);
 }
@@ -185,6 +186,21 @@ fn thermalFromC(value: c_int) graph.degrade.ThermalState {
     };
 }
 
+/// Allocates from the engine allocator for embedders that cannot address
+/// module memory themselves, the wasm host being the one that matters.
+/// Pair every allocation with ck_free of the same size.
+export fn ck_alloc(size: usize) ?[*]u8 {
+    if (size == 0) return null;
+    const slice = abiAllocator().alloc(u8, size) catch return null;
+    return slice.ptr;
+}
+
+export fn ck_free(ptr: ?[*]u8, size: usize) void {
+    const p = ptr orelse return;
+    if (size == 0) return;
+    abiAllocator().free(p[0..size]);
+}
+
 export fn ck_abi_version() u32 {
     return (@as(u32, abi_major) << 16) | abi_minor;
 }
@@ -284,6 +300,34 @@ export fn ck_session_submit_frame(session: ?*Session, desc: ?*const FrameDesc, p
     return .ok;
 }
 
+/// Writes the YCbCr to RGB conversion for a standard and range as one
+/// column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).xyz. Shells
+/// that own their GPU pipeline, the web shell today, get their color math
+/// from the core instead of hardcoding it.
+export fn ck_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_matrix: ?*[16]f32) Status {
+    const out = out_matrix orelse return .invalid_argument;
+    const standard: math.color.Standard = switch (color_standard) {
+        0 => .bt601,
+        1 => .bt709,
+        2 => .bt2020,
+        else => return .invalid_argument,
+    };
+    const range: math.color.Range = switch (color_range) {
+        0 => .video,
+        1 => .full,
+        else => return .invalid_argument,
+    };
+    const m = math.color.yuvToRgb(standard, range).homogeneous();
+    var index: usize = 0;
+    inline for (0..4) |col| {
+        inline for (0..4) |row| {
+            out[index] = m.cols[col][row];
+            index += 1;
+        }
+    }
+    return .ok;
+}
+
 export fn ck_session_report_frame(session: ?*Session, frame_time_us: u32, thermal: c_int) c_int {
     const s = session orelse return 0;
     _ = s.controller.step(.{ .frame_time_us = frame_time_us, .thermal = thermalFromC(thermal) });
@@ -296,6 +340,15 @@ export fn ck_session_degrade_level(session: ?*const Session) c_int {
 }
 
 const t = std.testing;
+
+test "alloc and free round-trip through the abi allocator" {
+    const p = ck_alloc(64) orelse return error.TestUnexpectedResult;
+    p[0] = 0xa5;
+    p[63] = 0x5a;
+    ck_free(p, 64);
+    try t.expect(ck_alloc(0) == null);
+    ck_free(null, 16);
+}
 
 test "abi version packs major and minor" {
     try t.expectEqual((@as(u32, abi_major) << 16) | abi_minor, ck_abi_version());
@@ -355,6 +408,16 @@ test "frame submission without a renderer reports it" {
     const planes: FramePlanes = .{ .plane_count = 2, .reserved = 0, .planes = .{ 1, 2, 0 } };
     try t.expectEqual(Status.renderer_unavailable, ck_session_submit_frame(session, &desc, &planes));
     try t.expectEqual(Status.renderer_unavailable, ck_engine_render_frame(engine, session));
+}
+
+test "color conversion export writes the homogeneous matrix" {
+    var out: [16]f32 = undefined;
+    try t.expectEqual(Status.ok, ck_color_yuv_to_rgb(1, 0, &out));
+    const direct = math.color.yuvToRgb(.bt709, .video).homogeneous();
+    try t.expectEqual(direct.cols[0][0], out[0]);
+    try t.expectEqual(direct.cols[3][2], out[14]);
+    try t.expectEqual(Status.invalid_argument, ck_color_yuv_to_rgb(9, 0, &out));
+    try t.expectEqual(Status.invalid_argument, ck_color_yuv_to_rgb(0, 9, null));
 }
 
 test "rotation and mirror decode from the flags field" {

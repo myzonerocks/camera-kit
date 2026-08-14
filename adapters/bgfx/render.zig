@@ -154,12 +154,7 @@ const nv12_fragment_msl =
 
 /// The affine color conversion as one homogeneous matrix for the shader.
 pub fn yuvTransform(conversion: math.color.Conversion) math.Mat4 {
-    var m = math.Mat4.identity;
-    inline for (0..3) |col| {
-        m.cols[col] = math.vec.vec4From3(conversion.matrix.cols[col], 0.0);
-    }
-    m.cols[3] = math.vec.vec4From3(conversion.offset, 1.0);
-    return m;
+    return conversion.homogeneous();
 }
 
 pub const InitOptions = struct {
