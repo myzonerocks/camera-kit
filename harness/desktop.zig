@@ -4,6 +4,7 @@
 //! adapters; nothing merges on a promise here.
 
 const std = @import("std");
+const blobs = @import("shader_blobs");
 const graph = @import("graph");
 const math = @import("math");
 const gltf = @import("gltf");
@@ -34,102 +35,6 @@ const checker_png = [_]u8{
     0xbf, 0x41, 0x50, 0xd7, 0xe9, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
     0x60, 0x82,
 };
-
-// Metal shader blobs in the exact binary layout bgfx parses: magic VSH/FSH
-// version 11, in/out hashes, the uniform table, then MSL source the driver
-// compiles at load. The lens shader toolchain replaces this hand assembly
-// when it lands; the format itself is what shaderc emits.
-const ShaderUniform = struct {
-    name: []const u8,
-    kind: u8,
-    num: u8,
-    reg_index: u16,
-    reg_count: u16,
-};
-
-fn buildShaderBlob(gpa: std.mem.Allocator, kind: u8, uniforms: []const ShaderUniform, source: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    try out.appendSlice(gpa, &.{ kind, 'S', 'H', 11 });
-    try out.appendSlice(gpa, &(.{0} ** 8)); // input and output hashes
-    var scratch: [4]u8 = undefined;
-    std.mem.writeInt(u16, scratch[0..2], @intCast(uniforms.len), .little);
-    try out.appendSlice(gpa, scratch[0..2]);
-    for (uniforms) |u| {
-        try out.append(gpa, @intCast(u.name.len));
-        try out.appendSlice(gpa, u.name);
-        try out.append(gpa, u.kind);
-        try out.append(gpa, u.num);
-        std.mem.writeInt(u16, scratch[0..2], u.reg_index, .little);
-        try out.appendSlice(gpa, scratch[0..2]);
-        std.mem.writeInt(u16, scratch[0..2], u.reg_count, .little);
-        try out.appendSlice(gpa, scratch[0..2]);
-        try out.appendSlice(gpa, &.{ 0, 0, 0, 0 }); // texInfo, texFormat
-    }
-    std.mem.writeInt(u32, &scratch, @intCast(source.len), .little);
-    try out.appendSlice(gpa, &scratch);
-    try out.appendSlice(gpa, source);
-    try out.append(gpa, 0);
-    return out.toOwnedSlice(gpa);
-}
-
-const vertex_msl =
-    \\#include <metal_stdlib>
-    \\#include <simd/simd.h>
-    \\
-    \\using namespace metal;
-    \\
-    \\struct _Global
-    \\{
-    \\    float4x4 u_modelViewProj;
-    \\};
-    \\
-    \\struct xlatMtlMain_out
-    \\{
-    \\    float2 _entryPointOutput_v_texcoord0 [[user(locn0)]];
-    \\    float4 gl_Position [[position]];
-    \\};
-    \\
-    \\struct xlatMtlMain_in
-    \\{
-    \\    float3 a_position [[attribute(0)]];
-    \\    float2 a_texcoord0 [[attribute(1)]];
-    \\};
-    \\
-    \\vertex xlatMtlMain_out xlatMtlMain(xlatMtlMain_in in [[stage_in]], constant _Global& _mtl_u [[buffer(0)]])
-    \\{
-    \\    xlatMtlMain_out out = {};
-    \\    out.gl_Position = _mtl_u.u_modelViewProj * float4(in.a_position, 1.0);
-    \\    out._entryPointOutput_v_texcoord0 = in.a_texcoord0;
-    \\    return out;
-    \\}
-    \\
-;
-
-const fragment_msl =
-    \\#include <metal_stdlib>
-    \\#include <simd/simd.h>
-    \\
-    \\using namespace metal;
-    \\
-    \\struct xlatMtlMain_out
-    \\{
-    \\    float4 bgfx_FragData0 [[color(0)]];
-    \\};
-    \\
-    \\struct xlatMtlMain_in
-    \\{
-    \\    float2 v_texcoord0 [[user(locn0)]];
-    \\};
-    \\
-    \\fragment xlatMtlMain_out xlatMtlMain(xlatMtlMain_in in [[stage_in]], texture2d<float> s_texColor [[texture(0)]], sampler s_texColorSampler [[sampler(0)]])
-    \\{
-    \\    xlatMtlMain_out out = {};
-    \\    out.bgfx_FragData0 = s_texColor.sample(s_texColorSampler, in.v_texcoord0);
-    \\    return out;
-    \\}
-    \\
-;
 
 // A complete GLB built in memory: one quad with texcoords, indices, and the
 // checkerboard PNG as its embedded base color texture. The same container
@@ -372,16 +277,8 @@ pub fn main(init_args: std.process.Init) !u8 {
     );
     const sampler_uniform = c.bgfx_create_uniform("s_texColor", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
 
-    const vs_blob = try buildShaderBlob(gpa, 'V', &.{
-        .{ .name = "u_modelViewProj", .kind = 0x04, .num = 1, .reg_index = 0, .reg_count = 4 },
-    }, vertex_msl);
-    defer gpa.free(vs_blob);
-    const fs_blob = try buildShaderBlob(gpa, 'F', &.{
-        .{ .name = "s_texColorSampler", .kind = 0x11, .num = 1, .reg_index = 0xffff, .reg_count = 1 },
-        .{ .name = "s_texColorTexture", .kind = 0x11, .num = 1, .reg_index = 0xffff, .reg_count = 1 },
-        .{ .name = "s_texColor", .kind = 0x10, .num = 0, .reg_index = 0, .reg_count = 0 },
-    }, fragment_msl);
-    defer gpa.free(fs_blob);
+    const vs_blob = blobs.vs_preview_metal;
+    const fs_blob = blobs.fs_preview_rgba_metal;
     const vsh = c.bgfx_create_shader(c.bgfx_copy(vs_blob.ptr, @intCast(vs_blob.len)));
     const fsh = c.bgfx_create_shader(c.bgfx_copy(fs_blob.ptr, @intCast(fs_blob.len)));
     const program = c.bgfx_create_program(vsh, fsh, true);
