@@ -24,10 +24,17 @@ pub fn build(b: *std.Build) void {
     const gate_step = b.step("gate", "Run the source-tracked gate (-- --staged | --tree | --commit-msg <file> | --log <range>)");
     gate_step.dependOn(&run_gate.step);
 
+    const math_module = b.createModule(.{
+        .root_source_file = b.path("core/math/math.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
-    const run_gate_tests = b.addRunArtifact(gate_tests);
+    const math_tests = b.addTest(.{ .root_module = math_module });
     const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&run_gate_tests.step);
+    test_step.dependOn(&b.addRunArtifact(gate_tests).step);
+    test_step.dependOn(&b.addRunArtifact(math_tests).step);
 }
 
 // The pinned toolchain is the only toolchain: .zigversion is the single place
