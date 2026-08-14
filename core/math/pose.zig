@@ -6,7 +6,7 @@
 const std = @import("std");
 const scalar = @import("scalar.zig");
 const vec = @import("vec.zig");
-const mat = @import("mat.zig");
+const matrix = @import("matrix.zig");
 const quat = @import("quat.zig");
 
 const Vec3 = vec.Vec3;
@@ -36,7 +36,7 @@ pub const Pose = struct {
         return p.rot.rotate(point) + p.pos;
     }
 
-    pub fn toMat4(p: Pose) mat.Mat4 {
+    pub fn toMat4(p: Pose) matrix.Mat4 {
         var m = p.rot.toMat4();
         m.cols[3] = vec.vec4From3(p.pos, 1.0);
         return m;
