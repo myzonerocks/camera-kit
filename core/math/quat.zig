@@ -5,7 +5,7 @@
 const std = @import("std");
 const scalar = @import("scalar.zig");
 const vec = @import("vec.zig");
-const mat = @import("mat.zig");
+const matrix = @import("matrix.zig");
 
 const Vec3 = vec.Vec3;
 const Vec4 = vec.Vec4;
@@ -82,7 +82,7 @@ pub const Quat = struct {
         return .{ .v = vec.normalize(a.v * vec.splat(Vec4, wa) + bv * vec.splat(Vec4, wb)) };
     }
 
-    pub fn toMat3(q: Quat) mat.Mat3 {
+    pub fn toMat3(q: Quat) matrix.Mat3 {
         const x = q.v[0];
         const y = q.v[1];
         const z = q.v[2];
@@ -106,7 +106,7 @@ pub const Quat = struct {
         } };
     }
 
-    pub fn toMat4(q: Quat) mat.Mat4 {
+    pub fn toMat4(q: Quat) matrix.Mat4 {
         const m3 = q.toMat3();
         return .{ .cols = .{
             vec.vec4From3(m3.cols[0], 0.0),
@@ -117,7 +117,7 @@ pub const Quat = struct {
     }
 
     /// Extracts a rotation from an orthonormal 3x3 basis.
-    pub fn fromMat3(m: mat.Mat3) Quat {
+    pub fn fromMat3(m: matrix.Mat3) Quat {
         const trace = m.cols[0][0] + m.cols[1][1] + m.cols[2][2];
         if (trace > 0.0) {
             const s = @sqrt(trace + 1.0) * 2.0;
