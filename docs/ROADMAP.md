@@ -6,7 +6,7 @@ completeness and merges as a single squash PR.
 - [x] Repo scaffold: pinned toolchain, source gate, hooks, CI
 - [x] Math: SIMD vectors, matrices, quaternions, poses, color conversion
 - [x] Frame graph: nodes, typed edges, cached schedule, pooled textures and buffers, the degradation ladder
-- [ ] C ABI: camerakit.h, the ck_ exports, the ABI diff gate
+- [x] C ABI: camerakit.h, the ck_ exports, the ABI diff gate
 - [ ] Render and assets: bgfx backend node, glTF loading
 - [ ] Tracking and beauty: MediaPipe and GPUPixel behind C shims, model fetching against a tracked lock
 - [ ] Lens format: the .glens spec, runtime, validator, reference lenses, fuzzers

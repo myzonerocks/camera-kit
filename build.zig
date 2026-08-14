@@ -50,15 +50,53 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(camerakit_lib);
 
+    const abi_dump_module = b.createModule(.{
+        .root_source_file = b.path("tools/abi_dump.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "abi", .module = abi_module }},
+    });
+    const abi_dump_exe = b.addExecutable(.{
+        .name = "abi_dump",
+        .root_module = abi_dump_module,
+    });
+    b.installArtifact(abi_dump_exe);
+
+    const abi_check = b.addRunArtifact(abi_dump_exe);
+    abi_check.setCwd(b.path("."));
+    if (b.args) |args| abi_check.addArgs(args) else abi_check.addArgs(&.{ "--check", "tools/abi-baseline.txt" });
+    const abi_step = b.step("abi", "Check the ABI surface against the baseline (-- --print to regenerate)");
+    abi_step.dependOn(&abi_check.step);
+
+    // A bare header is not a translation unit, so the compile check goes
+    // through a generated file that includes it. C99 proves the header stays
+    // C99-clean; C11 activates the static asserts on the frozen layouts.
+    const header_tu = b.addWriteFiles().add("camerakit_header_check.c", "#include <camerakit.h>\n");
+    for ([_][]const u8{ "c99", "c11" }) |std_name| {
+        const header_module = b.createModule(.{ .target = target, .optimize = optimize });
+        header_module.addCSourceFile(.{
+            .file = header_tu,
+            .flags = &.{ b.fmt("-std={s}", .{std_name}), "-Werror" },
+        });
+        header_module.addIncludePath(b.path("include"));
+        const header_object = b.addObject(.{
+            .name = b.fmt("camerakit_header_{s}", .{std_name}),
+            .root_module = header_module,
+        });
+        abi_step.dependOn(&header_object.step);
+    }
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
+    const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
+    test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
 }
 
 // The pinned toolchain is the only toolchain: .zigversion is the single place

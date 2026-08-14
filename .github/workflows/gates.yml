@@ -32,6 +32,8 @@ jobs:
         run: zig build gate -- --log "origin/${{ github.base_ref }}..HEAD"
       - name: tests
         run: zig build test
+      - name: abi surface
+        run: zig build abi
       - name: visibility guard
         env:
           GH_TOKEN: ${{ github.token }}
