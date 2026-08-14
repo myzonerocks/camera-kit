@@ -1,5 +1,13 @@
 # Decisions
 
+## 2026-08-14 Gates run locally
+
+Hosted runners are not funded, so the gate suite is local and authoritative:
+zig build ci runs the tests in both optimize modes, the source gate, the abi
+surface check, the vendor verification, and the commit provenance scan. It
+must be green before every push and every merge. The workflow files stay for
+the day hosted runners return; until then they are advisory.
+
 ## 2026-08-14 Main branch protection
 
 GitHub only enforces branch protection on private repositories under a paid
