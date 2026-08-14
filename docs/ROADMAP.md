@@ -4,8 +4,8 @@ Work lands in dependency order. Each stage is built to production
 completeness and merges as a single squash PR.
 
 - [x] Repo scaffold: pinned toolchain, source gate, hooks, CI
-- [ ] Math: SIMD vectors, matrices, quaternions, poses, color conversion
-- [ ] Frame graph: nodes, typed edges, cached schedule, pooled textures and buffers, the degradation ladder
+- [x] Math: SIMD vectors, matrices, quaternions, poses, color conversion
+- [x] Frame graph: nodes, typed edges, cached schedule, pooled textures and buffers, the degradation ladder
 - [ ] C ABI: camerakit.h, the ck_ exports, the ABI diff gate
 - [ ] Render and assets: bgfx backend node, glTF loading
 - [ ] Tracking and beauty: MediaPipe and GPUPixel behind C shims, model fetching against a tracked lock
