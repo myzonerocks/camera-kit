@@ -67,13 +67,13 @@ pub const Renderer = struct {
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         var bgfx_init: c.bgfx_init_t = undefined;
         c.bgfx_init_ctor(&bgfx_init);
-        // Metal on apple targets. Android runs the GL backend while the
-        // Vulkan capability probe lands; the Vulkan program path below is
-        // selected the moment the probe chooses it.
+        // Metal on apple targets. Android probes for the Vulkan
+        // capabilities zero-copy import rests on and takes the GL backend
+        // as the declared fallback when they are missing.
         bgfx_init.type = if (builtin.os.tag == .macos or builtin.os.tag == .ios)
             c.BGFX_RENDERER_TYPE_METAL
         else if (builtin.os.tag == .linux and builtin.abi.isAndroid())
-            c.BGFX_RENDERER_TYPE_OPENGLES
+            (if (@import("vulkan_probe.zig").vulkanReady()) c.BGFX_RENDERER_TYPE_VULKAN else c.BGFX_RENDERER_TYPE_OPENGLES)
         else
             c.BGFX_RENDERER_TYPE_COUNT;
         bgfx_init.resolution.width = options.width;
