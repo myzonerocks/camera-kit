@@ -372,7 +372,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     const so = b.addLibrary(.{ .name = "camerakit", .linkage = .dynamic, .root_module = jni_module });
     so.setLibCFile(libc_txt);
     jni_module.linkLibrary(bgfx_android);
-    for ([_][]const u8{ "android", "log", "EGL", "GLESv3" }) |lib| {
+    for ([_][]const u8{ "android", "log", "EGL", "GLESv3", "vulkan" }) |lib| {
         jni_module.linkSystemLibrary(lib, .{});
     }
 
