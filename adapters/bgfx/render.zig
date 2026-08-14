@@ -165,6 +165,18 @@ pub const InitOptions = struct {
     vsync: bool = true,
 };
 
+pub const Nv12Textures = struct {
+    y: c.bgfx_texture_handle_t,
+    uv: c.bgfx_texture_handle_t,
+};
+
+const UploadCache = struct {
+    y: c.bgfx_texture_handle_t,
+    uv: c.bgfx_texture_handle_t,
+    width: u16,
+    height: u16,
+};
+
 pub const PreviewFrame = union(enum) {
     bgra: struct {
         texture: c.bgfx_texture_handle_t,
@@ -187,6 +199,7 @@ pub const Renderer = struct {
     tex_y: c.bgfx_uniform_handle_t,
     tex_uv: c.bgfx_uniform_handle_t,
     yuv_uniform: c.bgfx_uniform_handle_t,
+    upload_cache: ?UploadCache = null,
 
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         var bgfx_init: c.bgfx_init_t = undefined;
@@ -245,6 +258,10 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(r: *Renderer) void {
+        if (r.upload_cache) |cache| {
+            c.bgfx_destroy_texture(cache.y);
+            c.bgfx_destroy_texture(cache.uv);
+        }
         c.bgfx_destroy_uniform(r.tex_color);
         c.bgfx_destroy_uniform(r.tex_y);
         c.bgfx_destroy_uniform(r.tex_uv);
@@ -326,6 +343,48 @@ pub const Renderer = struct {
                 c.bgfx_submit(0, r.nv12_program, 0, c.BGFX_DISCARD_ALL);
             },
         }
+    }
+
+    /// The stated CPU path: copies NV12 planes into two cached updatable
+    /// textures, recreated only when the size changes. The row copies go
+    /// through bgfx's frame allocator, freed after submission; the cache
+    /// itself is two textures, bounded and freed at shutdown.
+    pub fn uploadNv12(r: *Renderer, width: u16, height: u16, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) !Nv12Textures {
+        if (r.upload_cache) |cache| {
+            if (cache.width != width or cache.height != height) {
+                c.bgfx_destroy_texture(cache.y);
+                c.bgfx_destroy_texture(cache.uv);
+                r.upload_cache = null;
+            }
+        }
+        if (r.upload_cache == null) {
+            const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+            r.upload_cache = .{
+                .y = c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_R8, flags, null, 0),
+                .uv = c.bgfx_create_texture_2d(width / 2, height / 2, false, 1, c.BGFX_TEXTURE_FORMAT_RG8, flags, null, 0),
+                .width = width,
+                .height = height,
+            };
+        }
+        const cache = r.upload_cache.?;
+
+        const y_mem = c.bgfx_alloc(@as(u32, width) * height) orelse return error.OutOfMemory;
+        const y_dst: [*]u8 = y_mem.*.data;
+        for (0..height) |row| {
+            @memcpy(y_dst[row * width ..][0..width], y[row * y_stride ..][0..width]);
+        }
+        c.bgfx_update_texture_2d(cache.y, 0, 0, 0, 0, width, height, y_mem, std.math.maxInt(u16));
+
+        const uv_width: u32 = width;
+        const uv_rows: u32 = height / 2;
+        const uv_mem = c.bgfx_alloc(uv_width * uv_rows) orelse return error.OutOfMemory;
+        const uv_dst: [*]u8 = uv_mem.*.data;
+        for (0..uv_rows) |row| {
+            @memcpy(uv_dst[row * uv_width ..][0..uv_width], uv[row * uv_stride ..][0..uv_width]);
+        }
+        c.bgfx_update_texture_2d(cache.uv, 0, 0, 0, 0, width / 2, height / 2, uv_mem, std.math.maxInt(u16));
+
+        return .{ .y = cache.y, .uv = cache.uv };
     }
 
     pub fn touch(r: *Renderer) void {

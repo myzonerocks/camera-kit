@@ -110,12 +110,14 @@ pub const Engine = struct {
 const CurrentFrame = struct {
     desc: FrameDesc,
     preview: render.PreviewFrame,
+    owns_textures: bool = true,
 };
 
 pub const Session = struct {
     engine: *Engine,
     controller: graph.DegradeController,
     current: ?CurrentFrame = null,
+    copied_frames: u64 = 0,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -165,6 +167,10 @@ pub fn destroySession(session: *Session) void {
 
 fn releaseCurrentFrame(session: *Session) void {
     const current = session.current orelse return;
+    if (!current.owns_textures) {
+        session.current = null;
+        return;
+    }
     if (session.engine.renderer) |*r| {
         switch (current.preview) {
             .bgra => |p| r.destroyTexture(p.texture),
@@ -189,23 +195,23 @@ fn thermalFromC(value: c_int) graph.degrade.ThermalState {
 /// Allocates from the engine allocator for embedders that cannot address
 /// module memory themselves, the wasm host being the one that matters.
 /// Pair every allocation with ck_free of the same size.
-export fn ck_alloc(size: usize) ?[*]u8 {
+pub export fn ck_alloc(size: usize) ?[*]u8 {
     if (size == 0) return null;
     const slice = abiAllocator().alloc(u8, size) catch return null;
     return slice.ptr;
 }
 
-export fn ck_free(ptr: ?[*]u8, size: usize) void {
+pub export fn ck_free(ptr: ?[*]u8, size: usize) void {
     const p = ptr orelse return;
     if (size == 0) return;
     abiAllocator().free(p[0..size]);
 }
 
-export fn ck_abi_version() u32 {
+pub export fn ck_abi_version() u32 {
     return (@as(u32, abi_major) << 16) | abi_minor;
 }
 
-export fn ck_engine_create(config: ?*const EngineConfig, out_engine: ?**Engine) Status {
+pub export fn ck_engine_create(config: ?*const EngineConfig, out_engine: ?**Engine) Status {
     const out = out_engine orelse return .invalid_argument;
     const cfg: EngineConfig = if (config) |c| c.* else .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 };
     const engine = createEngine(abiAllocator(), cfg) catch return .out_of_memory;
@@ -213,11 +219,11 @@ export fn ck_engine_create(config: ?*const EngineConfig, out_engine: ?**Engine) 
     return .ok;
 }
 
-export fn ck_engine_destroy(engine: ?*Engine) void {
+pub export fn ck_engine_destroy(engine: ?*Engine) void {
     destroyEngine(engine orelse return);
 }
 
-export fn ck_engine_init_renderer(engine: ?*Engine, desc: ?*const RendererDesc) Status {
+pub export fn ck_engine_init_renderer(engine: ?*Engine, desc: ?*const RendererDesc) Status {
     const e = engine orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     if (e.renderer != null) return .invalid_argument;
@@ -229,12 +235,12 @@ export fn ck_engine_init_renderer(engine: ?*Engine, desc: ?*const RendererDesc) 
     return .ok;
 }
 
-export fn ck_engine_resize(engine: ?*Engine, width: u32, height: u32) void {
+pub export fn ck_engine_resize(engine: ?*Engine, width: u32, height: u32) void {
     const e = engine orelse return;
     if (e.renderer) |*r| r.resize(width, height);
 }
 
-export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Status {
+pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Status {
     const e = engine orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
     if (session) |s| {
@@ -252,7 +258,7 @@ export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Status {
     return .ok;
 }
 
-export fn ck_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
+pub export fn ck_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
     const out = out_session orelse return .invalid_argument;
     const parent = engine orelse return .invalid_argument;
     const cfg: SessionConfig = if (config) |c| c.* else .{ .frame_budget_us = 0, .reserved = 0 };
@@ -261,11 +267,11 @@ export fn ck_session_create(engine: ?*Engine, config: ?*const SessionConfig, out
     return .ok;
 }
 
-export fn ck_session_destroy(session: ?*Session) void {
+pub export fn ck_session_destroy(session: ?*Session) void {
     destroySession(session orelse return);
 }
 
-export fn ck_session_submit_frame(session: ?*Session, desc: ?*const FrameDesc, planes: ?*const FramePlanes) Status {
+pub export fn ck_session_submit_frame(session: ?*Session, desc: ?*const FrameDesc, planes: ?*const FramePlanes) Status {
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const p = planes orelse return .invalid_argument;
@@ -304,7 +310,7 @@ export fn ck_session_submit_frame(session: ?*Session, desc: ?*const FrameDesc, p
 /// column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).xyz. Shells
 /// that own their GPU pipeline, the web shell today, get their color math
 /// from the core instead of hardcoding it.
-export fn ck_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_matrix: ?*[16]f32) Status {
+pub export fn ck_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_matrix: ?*[16]f32) Status {
     const out = out_matrix orelse return .invalid_argument;
     const standard: math.color.Standard = switch (color_standard) {
         0 => .bt601,
@@ -328,13 +334,48 @@ export fn ck_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_matrix:
     return .ok;
 }
 
-export fn ck_session_report_frame(session: ?*Session, frame_time_us: u32, thermal: c_int) c_int {
+/// Copies NV12 planes into pooled textures. The stated CPU path: a shell
+/// uses it only where the zero-copy import is not wired yet, and the copy
+/// is counted so the budget report shows it.
+pub export fn ck_session_submit_frame_copy(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const y_ptr = y orelse return .invalid_argument;
+    const uv_ptr = uv orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+
+    releaseCurrentFrame(s);
+    const standard: math.color.Standard = switch (d.color_standard) {
+        0 => .bt601,
+        2 => .bt2020,
+        else => .bt709,
+    };
+    const range: math.color.Range = if (d.color_range == 1) .full else .video;
+    const uploaded = r.uploadNv12(
+        @intCast(d.width),
+        @intCast(d.height),
+        y_ptr,
+        y_stride,
+        uv_ptr,
+        uv_stride,
+    ) catch return .out_of_memory;
+    s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .nv12 = .{
+        .y = uploaded.y,
+        .uv = uploaded.uv,
+        .conversion = math.color.yuvToRgb(standard, range),
+    } } };
+    s.copied_frames += 1;
+    return .ok;
+}
+
+pub export fn ck_session_report_frame(session: ?*Session, frame_time_us: u32, thermal: c_int) c_int {
     const s = session orelse return 0;
     _ = s.controller.step(.{ .frame_time_us = frame_time_us, .thermal = thermalFromC(thermal) });
     return @intFromEnum(s.controller.level);
 }
 
-export fn ck_session_degrade_level(session: ?*const Session) c_int {
+pub export fn ck_session_degrade_level(session: ?*const Session) c_int {
     const s = session orelse return 0;
     return @intFromEnum(s.controller.level);
 }

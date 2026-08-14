@@ -188,6 +188,11 @@ ck_status ck_session_submit_frame(ck_session *session, const ck_frame_desc *desc
  * out_matrix holds 16 floats. */
 ck_status ck_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix);
 
+/* Graph thread. The stated CPU path: copies NV12 planes into pooled
+ * textures for shells whose zero-copy import is not wired yet. The copy is
+ * counted; prefer ck_session_submit_frame. */
+ck_status ck_session_submit_frame_copy(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
+
 /* Graph thread. Reports one finished frame: measured whole-pipeline time
  * plus current thermal pressure. Returns the degradation level in effect
  * for the next frame. */

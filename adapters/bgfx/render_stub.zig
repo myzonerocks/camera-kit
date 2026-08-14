@@ -26,6 +26,11 @@ pub const InitOptions = struct {
     vsync: bool = true,
 };
 
+pub const Nv12Textures = struct {
+    y: TextureHandle,
+    uv: TextureHandle,
+};
+
 pub const PreviewFrame = union(enum) {
     bgra: struct {
         texture: TextureHandle,
@@ -73,6 +78,17 @@ pub const Renderer = struct {
         _ = preview;
         _ = rotation_degrees;
         _ = mirror;
+    }
+
+    pub fn uploadNv12(r: *Renderer, width: u16, height: u16, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) !Nv12Textures {
+        _ = r;
+        _ = width;
+        _ = height;
+        _ = y;
+        _ = y_stride;
+        _ = uv;
+        _ = uv_stride;
+        return error.RendererUnavailable;
     }
 
     pub fn touch(r: *Renderer) void {
