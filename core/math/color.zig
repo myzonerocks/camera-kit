@@ -13,9 +13,11 @@ const Mat3 = mat.Mat3;
 
 pub const Standard = enum { bt601, bt709, bt2020 };
 
-/// Video (limited) range packs Y into 16..235 and chroma into 16..240;
-/// full range uses all 256 codes. Camera pipelines commonly deliver video
-/// range; screen content is commonly full.
+/// Video range packs Y into codes 16..235 and chroma into 16..240 of the
+/// 8-bit scale; full range uses all 256 codes. The range is a property of
+/// the delivered buffer, reported by the platform per frame and carried in
+/// the frame descriptor. The conversion must match it exactly: decoding
+/// video range as full lifts black to code 16 and clips highlights.
 pub const Range = enum { video, full };
 
 /// An affine color map: out = matrix * in + offset.
