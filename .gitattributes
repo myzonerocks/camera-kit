@@ -1,0 +1,3 @@
+* text=auto eol=lf
+tools/toolchain-sync linguist-vendored
+.githooks/* linguist-vendored

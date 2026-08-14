@@ -1,0 +1,47 @@
+# Re-include every tree this repository owns. A contributor's global ignore
+# file can carry patterns that happen to match a directory this repository
+# owns, silently excluding source. Re-including every tree makes the
+# repository's own layout authoritative regardless of what a personal ignore
+# file says. The source gate keeps this list in step with the tree.
+!adapters/**
+!core/**
+!harness/**
+!include/**
+!lenses/**
+!shells/**
+!third_party/**
+!tools/**
+
+# Docs are tracked, except the private dev docs under docs/private, which are
+# local only and never committed. One directory keeps sensitive material in
+# one place without listing each file.
+!docs/**
+docs/private/
+
+# Build outputs and caches, never source.
+.zig-cache/
+zig-out/
+
+# Developer-local config such as device-lab paths and signing identities.
+.local/
+.DS_Store
+
+# Vendored engine caches and download archives, rebuilt from the pins in
+# third_party by zig build vendor-sync. The pin files are tracked; the
+# fetched trees and tarballs are not.
+.vendor/
+.vendor-archives/
+
+# Model weights and task bundles, fetched by zig build fetch-models and
+# digest-verified against the tracked models.lock. Runtime artifacts, never
+# committed.
+.models/
+
+# Shell build detritus.
+shells/swift/.build/
+shells/swift/**/DerivedData/
+shells/kotlin/.gradle/
+shells/kotlin/**/build/
+shells/ts/node_modules/
+shells/ts/dist/
+shells/ts/**/*.wasm.map
