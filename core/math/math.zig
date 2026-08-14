@@ -5,6 +5,8 @@
 pub const scalar = @import("scalar.zig");
 pub const vec = @import("vec.zig");
 pub const mat = @import("mat.zig");
+pub const quat = @import("quat.zig");
+pub const pose = @import("pose.zig");
 
 pub const Vec2 = vec.Vec2;
 pub const Vec3 = vec.Vec3;
@@ -12,9 +14,13 @@ pub const Vec4 = vec.Vec4;
 pub const Mat3 = mat.Mat3;
 pub const Mat4 = mat.Mat4;
 pub const DepthRange = mat.DepthRange;
+pub const Quat = quat.Quat;
+pub const Pose = pose.Pose;
 
 test {
     _ = scalar;
     _ = vec;
     _ = mat;
+    _ = quat;
+    _ = pose;
 }
