@@ -1,5 +1,13 @@
 # Decisions
 
+## 2026-08-14 Public repository, hosted gates, server-side protection
+
+The owner made the repository public so hosted runners are unmetered. That
+retires the visibility guard, restores hosted CI as the merge authority with
+the local zig build ci as pre-flight, and unlocks server-side rules: main
+now requires a pull request with the gates check green, allows only squash
+merges, and blocks force pushes and deletion for everyone.
+
 ## 2026-08-14 Gates run locally
 
 Hosted runners are not funded, so the gate suite is local and authoritative:
