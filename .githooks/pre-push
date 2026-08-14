@@ -1,0 +1,9 @@
+#!/bin/sh
+# main is PR-only; squash merges happen server-side, never as a local push.
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    echo "pre-push: refusing direct push to main; open a PR and squash-merge on green" >&2
+    exit 1
+  fi
+done
+exit 0
