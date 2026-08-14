@@ -9,17 +9,12 @@ android {
 
     defaultConfig {
         minSdk = 29
-        ndkVersion = "29.0.14206865"
-        externalNativeBuild {
-            cmake {
-                abiFilters += "arm64-v8a"
-            }
-        }
     }
 
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
+    sourceSets {
+        getByName("main") {
+            // The .so comes from zig build android; gradle only packages it.
+            jniLibs.srcDir("../../../zig-out/android")
         }
     }
 

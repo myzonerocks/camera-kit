@@ -45,6 +45,9 @@ shells/swift/.build/
 shells/swift/**/DerivedData/
 shells/kotlin/.gradle/
 shells/kotlin/**/build/
+shells/kotlin/gradle/
+shells/kotlin/gradlew
+shells/kotlin/local.properties
 shells/ts/node_modules/
 shells/ts/dist/
 shells/ts/demo/dist.js

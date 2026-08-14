@@ -5,6 +5,7 @@
 //! built: transient quad vertices come from bgfx's bounded pools.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const math = @import("math");
 
 pub const c = @cImport({
@@ -58,6 +59,44 @@ pub fn samplerUniformTriple(comptime name: []const u8) [3]ShaderUniform {
         .{ .name = name, .kind = 0x10, .num = 0, .reg_index = 0, .reg_count = 0 },
     };
 }
+
+const preview_vertex_essl =
+    \\attribute highp vec3 a_position;
+    \\attribute highp vec2 a_texcoord0;
+    \\varying highp vec2 v_texcoord0;
+    \\uniform highp mat4 u_modelViewProj;
+    \\void main ()
+    \\{
+    \\  gl_Position = (u_modelViewProj * vec4(a_position, 1.0));
+    \\  v_texcoord0 = a_texcoord0;
+    \\}
+    \\
+;
+
+const rgba_fragment_essl =
+    \\varying highp vec2 v_texcoord0;
+    \\uniform sampler2D s_texColor;
+    \\void main ()
+    \\{
+    \\  gl_FragColor = texture2D(s_texColor, v_texcoord0);
+    \\}
+    \\
+;
+
+const nv12_fragment_essl =
+    \\varying highp vec2 v_texcoord0;
+    \\uniform sampler2D s_texY;
+    \\uniform sampler2D s_texUV;
+    \\uniform highp mat4 u_yuvTransform;
+    \\void main ()
+    \\{
+    \\  highp float y = texture2D(s_texY, v_texcoord0).r;
+    \\  highp vec2 uv = texture2D(s_texUV, v_texcoord0).rg;
+    \\  highp vec3 rgb = (u_yuvTransform * vec4(y, uv.x, uv.y, 1.0)).rgb;
+    \\  gl_FragColor = vec4(rgb, 1.0);
+    \\}
+    \\
+;
 
 const preview_vertex_msl =
     \\#include <metal_stdlib>
@@ -204,7 +243,14 @@ pub const Renderer = struct {
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         var bgfx_init: c.bgfx_init_t = undefined;
         c.bgfx_init_ctor(&bgfx_init);
-        bgfx_init.type = c.BGFX_RENDERER_TYPE_METAL;
+        // Metal on apple targets. Android runs the GL backend until the
+        // shader toolchain brings SPIR-V for Vulkan.
+        bgfx_init.type = if (builtin.os.tag == .macos or builtin.os.tag == .ios)
+            c.BGFX_RENDERER_TYPE_METAL
+        else if (builtin.os.tag == .linux and builtin.abi.isAndroid())
+            c.BGFX_RENDERER_TYPE_OPENGLES
+        else
+            c.BGFX_RENDERER_TYPE_COUNT;
         bgfx_init.resolution.width = options.width;
         bgfx_init.resolution.height = options.height;
         bgfx_init.resolution.reset = if (options.vsync) c.BGFX_RESET_VSYNC else c.BGFX_RESET_NONE;
@@ -219,14 +265,29 @@ pub const Renderer = struct {
         _ = c.bgfx_vertex_layout_add(&layout, c.BGFX_ATTRIB_TEXCOORD0, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         c.bgfx_vertex_layout_end(&layout);
 
-        const rgba_program = try makeProgram(gpa, &.{
+        const mvp_uniform = [_]ShaderUniform{
             .{ .name = "u_modelViewProj", .kind = 0x04, .num = 1, .reg_index = 0, .reg_count = 4 },
-        }, &samplerUniformTriple("s_texColor"), rgba_fragment_msl);
-        const nv12_program = try makeProgram(gpa, &.{
-            .{ .name = "u_modelViewProj", .kind = 0x04, .num = 1, .reg_index = 0, .reg_count = 4 },
-        }, &(.{
-            ShaderUniform{ .name = "u_yuvTransform", .kind = 0x14, .num = 1, .reg_index = 0, .reg_count = 4 },
-        } ++ samplerUniformTriple("s_texY") ++ samplerUniformTriple("s_texUV")), nv12_fragment_msl);
+        };
+        const backend = c.bgfx_get_renderer_type();
+        const rgba_program, const nv12_program = switch (backend) {
+            c.BGFX_RENDERER_TYPE_METAL => .{
+                try makeProgram(gpa, &mvp_uniform, &samplerUniformTriple("s_texColor"), preview_vertex_msl, rgba_fragment_msl),
+                try makeProgram(gpa, &mvp_uniform, &(.{
+                    ShaderUniform{ .name = "u_yuvTransform", .kind = 0x14, .num = 1, .reg_index = 0, .reg_count = 4 },
+                } ++ samplerUniformTriple("s_texY") ++ samplerUniformTriple("s_texUV")), preview_vertex_msl, nv12_fragment_msl),
+            },
+            c.BGFX_RENDERER_TYPE_OPENGLES => .{
+                try makeProgram(gpa, &mvp_uniform, &.{
+                    .{ .name = "s_texColor", .kind = 0x00, .num = 1, .reg_index = 0, .reg_count = 1 },
+                }, preview_vertex_essl, rgba_fragment_essl),
+                try makeProgram(gpa, &mvp_uniform, &.{
+                    .{ .name = "u_yuvTransform", .kind = 0x14, .num = 1, .reg_index = 0, .reg_count = 4 },
+                    .{ .name = "s_texY", .kind = 0x00, .num = 1, .reg_index = 0, .reg_count = 1 },
+                    .{ .name = "s_texUV", .kind = 0x00, .num = 1, .reg_index = 1, .reg_count = 1 },
+                }, preview_vertex_essl, nv12_fragment_essl),
+            },
+            else => return error.RendererUnsupported,
+        };
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
@@ -245,8 +306,8 @@ pub const Renderer = struct {
         };
     }
 
-    fn makeProgram(gpa: std.mem.Allocator, vs_uniforms: []const ShaderUniform, fs_uniforms: []const ShaderUniform, fragment_source: []const u8) !c.bgfx_program_handle_t {
-        const vs_blob = try buildShaderBlob(gpa, 'V', vs_uniforms, preview_vertex_msl);
+    fn makeProgram(gpa: std.mem.Allocator, vs_uniforms: []const ShaderUniform, fs_uniforms: []const ShaderUniform, vertex_source: []const u8, fragment_source: []const u8) !c.bgfx_program_handle_t {
+        const vs_blob = try buildShaderBlob(gpa, 'V', vs_uniforms, vertex_source);
         defer gpa.free(vs_blob);
         const fs_blob = try buildShaderBlob(gpa, 'F', fs_uniforms, fragment_source);
         defer gpa.free(fs_blob);
