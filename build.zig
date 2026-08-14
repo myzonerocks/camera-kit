@@ -141,6 +141,132 @@ pub fn build(b: *std.Build) void {
         const missing = b.addFail("camera-kit: .vendor/cgltf missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
     }
+
+    // The desktop harness draws through the real render stack. It exists
+    // only where its vendors are synced and the host is supported.
+    const have_render_stack = blk: {
+        for ([_][]const u8{ ".vendor/bx/src/amalgamated.cpp", ".vendor/bimg/src/image.cpp", ".vendor/bgfx/src/amalgamated.cpp", ".vendor/glfw/src/init.c" }) |probe| {
+            b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
+        }
+        break :blk true;
+    };
+    const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
+    if (have_render_stack and target.result.os.tag == .macos) {
+        const render_stack = buildRenderStack(b, target, optimize);
+        const harness_module = b.createModule(.{
+            .root_source_file = b.path("harness/desktop.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "math", .module = math_module },
+                .{ .name = "graph", .module = graph_module },
+            },
+        });
+        harness_module.addIncludePath(b.path(".vendor/bgfx/include"));
+        harness_module.addIncludePath(b.path(".vendor/bx/include"));
+        harness_module.addIncludePath(b.path(".vendor/glfw/include"));
+        harness_module.link_libc = true;
+        if (have_cgltf) {
+            harness_module.addIncludePath(b.path(".vendor/cgltf"));
+        }
+        const harness_exe = b.addExecutable(.{
+            .name = "harness",
+            .root_module = harness_module,
+        });
+        harness_module.linkLibrary(render_stack.bgfx);
+        harness_module.linkLibrary(render_stack.glfw);
+        for ([_][]const u8{ "Metal", "QuartzCore", "Cocoa", "IOKit", "CoreFoundation", "Foundation", "AppKit", "CoreMedia", "CoreVideo", "VideoToolbox" }) |framework| {
+            harness_exe.root_module.linkFramework(framework, .{});
+        }
+        b.installArtifact(harness_exe);
+        const run_harness = b.addRunArtifact(harness_exe);
+        run_harness.setCwd(b.path("."));
+        if (b.args) |args| run_harness.addArgs(args);
+        harness_step.dependOn(&run_harness.step);
+    } else {
+        const missing = b.addFail("camera-kit: harness needs macos and synced render vendors, run zig build vendor-sync");
+        harness_step.dependOn(&missing.step);
+    }
+}
+
+const RenderStack = struct {
+    bgfx: *std.Build.Step.Compile,
+    glfw: *std.Build.Step.Compile,
+};
+
+// bx, bimg, and bgfx compile as one static library from their amalgamated
+// sources; zig is the C++ and Objective-C++ compiler. Debug config follows
+// the zig optimize mode.
+fn buildRenderStack(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) RenderStack {
+    const debug_flag = if (optimize == .Debug) "-DBX_CONFIG_DEBUG=1" else "-DBX_CONFIG_DEBUG=0";
+
+    const bgfx_module = b.createModule(.{ .target = target, .optimize = optimize });
+    bgfx_module.link_libcpp = true;
+    for ([_][]const u8{
+        ".vendor/bx/include",
+        ".vendor/bx/include/compat/osx",
+        ".vendor/bx/3rdparty",
+        ".vendor/bimg/include",
+        ".vendor/bimg/3rdparty",
+        ".vendor/bimg/3rdparty/astc-encoder/include",
+        ".vendor/bimg/3rdparty/iqa/include",
+        ".vendor/bimg/3rdparty/tinyexr/deps",
+        ".vendor/bgfx/include",
+        ".vendor/bgfx/3rdparty",
+        ".vendor/bgfx/3rdparty/khronos",
+    }) |dir| bgfx_module.addIncludePath(b.path(dir));
+    const cxx_flags = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-exceptions", "-fno-rtti", "-fno-sanitize=undefined", "-D__STDC_FORMAT_MACROS", "-DBIMG_CONFIG_PARSE_AVIF=0", "-DBIMG_CONFIG_PARSE_HEIF=0", "-DBIMG_CONFIG_PARSE_EXR=0", debug_flag };
+    bgfx_module.addCSourceFile(.{ .file = b.path(".vendor/bx/src/amalgamated.cpp"), .flags = &cxx_flags });
+    for ([_][]const u8{ "image.cpp", "image_cubemap_filter.cpp", "image_decode.cpp", "image_encode.cpp" }) |file| {
+        bgfx_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/bimg/src/{s}", .{file})), .flags = &cxx_flags });
+    }
+    if (listFiles(b, ".vendor/bimg/3rdparty/astc-encoder/source", ".cpp")) |astc_files| {
+        for (astc_files) |file| bgfx_module.addCSourceFile(.{ .file = b.path(file), .flags = &cxx_flags });
+    }
+    bgfx_module.addIncludePath(b.path(".vendor/bgfx/src"));
+    bgfx_module.addCSourceFile(.{
+        .file = b.path("adapters/bgfx/bgfx_amalgamated.mm"),
+        .flags = &(cxx_flags ++ [_][]const u8{"-fno-objc-arc"}),
+    });
+    const bgfx_lib = b.addLibrary(.{ .name = "bgfx", .linkage = .static, .root_module = bgfx_module });
+
+    const glfw_module = b.createModule(.{ .target = target, .optimize = optimize });
+    glfw_module.link_libc = true;
+    glfw_module.addIncludePath(b.path(".vendor/glfw/include"));
+    glfw_module.addIncludePath(b.path(".vendor/glfw/src"));
+    const glfw_flags = [_][]const u8{"-D_GLFW_COCOA"};
+    for ([_][]const u8{
+        "context.c",      "egl_context.c",  "init.c",         "input.c",
+        "monitor.c",      "null_init.c",    "null_joystick.c", "null_monitor.c",
+        "null_window.c",  "osmesa_context.c", "platform.c",   "vulkan.c",
+        "window.c",       "macos_time.c",   "posix_module.c", "posix_thread.c",
+    }) |file| {
+        glfw_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/glfw/src/{s}", .{file})), .flags = &glfw_flags });
+    }
+    for ([_][]const u8{ "cocoa_init.m", "cocoa_joystick.m", "cocoa_monitor.m", "cocoa_window.m", "nsgl_context.m" }) |file| {
+        glfw_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/glfw/src/{s}", .{file})), .flags = &(glfw_flags ++ [_][]const u8{"-fno-objc-arc"}) });
+    }
+    const glfw_lib = b.addLibrary(.{ .name = "glfw", .linkage = .static, .root_module = glfw_module });
+
+    return .{ .bgfx = bgfx_lib, .glfw = glfw_lib };
+}
+
+fn listFiles(b: *std.Build, dir_path: []const u8, suffix: []const u8) ?[][]const u8 {
+    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return null;
+    defer dir.close(b.graph.io);
+    var files: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (it.next(b.graph.io) catch return null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, suffix)) continue;
+        files.append(b.allocator, b.fmt("{s}/{s}", .{ dir_path, entry.name })) catch return null;
+    }
+    std.mem.sort([]const u8, files.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    return files.items;
 }
 
 // The pinned toolchain is the only toolchain: .zigversion is the single place

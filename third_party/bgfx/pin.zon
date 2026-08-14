@@ -1,0 +1,10 @@
+.{
+    .name = "bgfx",
+    .repo = "https://github.com/bkaradzic/bgfx",
+    .version = "master 2026-08-14",
+    .commit = "b12eef18b583d1294c5caf691c1d7d7d1afda143",
+    .archive_sha256 = "a99e3fcdfd8b3ab449f44887a7c44dcdb2d22498ad7b7c82460844f7bb31a80a",
+    .license = "BSD-2-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "ac2e0d253b1584316a36a0fae1d4407fa3ebcb15f27021ab479b23d27f0c9c08",
+}
