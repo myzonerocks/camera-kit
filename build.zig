@@ -126,12 +126,34 @@ pub fn build(b: *std.Build) void {
         ci_step.dependOn(&release_tests.step);
     }
 
+    const fetch_models_module = b.createModule(.{
+        .root_source_file = b.path("tools/fetch_models.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const fetch_models_exe = b.addExecutable(.{
+        .name = "fetch_models",
+        .root_module = fetch_models_module,
+    });
+    const run_fetch_models = b.addRunArtifact(fetch_models_exe);
+    run_fetch_models.setCwd(b.path("."));
+    if (b.args) |args| run_fetch_models.addArgs(args);
+    const fetch_models_step = b.step("fetch-models", "Fetch and verify model files from third_party/models.lock (-- --check to verify only)");
+    fetch_models_step.dependOn(&run_fetch_models.step);
+    {
+        const models_check = b.addRunArtifact(fetch_models_exe);
+        models_check.setCwd(b.path("."));
+        models_check.addArgs(&.{"--check"});
+        ci_step.dependOn(&models_check.step);
+    }
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
     const vendor_sync_tests = b.addTest(.{ .root_module = vendor_sync_module });
+    const fetch_models_tests = b.addTest(.{ .root_module = fetch_models_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
@@ -140,6 +162,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
     test_step.dependOn(&b.addRunArtifact(vendor_sync_tests).step);
+    test_step.dependOn(&b.addRunArtifact(fetch_models_tests).step);
 
     // Adapters compile against the vendored trees. Without them the rest of
     // the build still works, vendor-sync included; only the steps that need

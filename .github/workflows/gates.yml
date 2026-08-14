@@ -35,6 +35,12 @@ jobs:
         run: zig build vendor-sync
       - uses: actions/cache@v4
         with:
+          path: .models
+          key: models-${{ hashFiles('third_party/models.lock') }}
+      - name: fetch models
+        run: zig build fetch-models
+      - uses: actions/cache@v4
+        with:
           path: .zig-cache
           key: zigcache-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
           restore-keys: |
