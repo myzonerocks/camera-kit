@@ -1,0 +1,27 @@
+abi 0.1
+type abi.FrameDesc size=32 align=8
+  field width offset=0 size=4
+  field height offset=4 size=4
+  field pixel_format offset=8 size=4
+  field color_standard offset=12 size=4
+  field color_range offset=16 size=4
+  field reserved offset=20 size=4
+  field timestamp_us offset=24 size=8
+type abi.Landmarks size=24 align=8
+  field points offset=0 size=8
+  field point_count offset=8 size=4
+  field confidence offset=12 size=4
+  field timestamp_us offset=16 size=8
+type abi.EngineConfig size=8 align=4
+  field texture_pool_capacity offset=0 size=4
+  field staging_pool_capacity offset=4 size=4
+type abi.SessionConfig size=8 align=4
+  field frame_budget_us offset=0 size=4
+  field reserved offset=4 size=4
+fn uint32_t ck_abi_version(void)
+fn ck_status ck_engine_create(const ck_engine_config *config, ck_engine **out_engine)
+fn void ck_engine_destroy(ck_engine *engine)
+fn ck_status ck_session_create(ck_engine *engine, const ck_session_config *config, ck_session **out_session)
+fn void ck_session_destroy(ck_session *session)
+fn ck_degrade_level ck_session_report_frame(ck_session *session, uint32_t frame_time_us, ck_thermal thermal)
+fn ck_degrade_level ck_session_degrade_level(const ck_session *session)
