@@ -6,10 +6,10 @@
 const std = @import("std");
 const scalar = @import("scalar.zig");
 const vec = @import("vec.zig");
-const mat = @import("mat.zig");
+const matrix = @import("matrix.zig");
 
 const Vec3 = vec.Vec3;
-const Mat3 = mat.Mat3;
+const Mat3 = matrix.Mat3;
 
 pub const Standard = enum { bt601, bt709, bt2020 };
 
