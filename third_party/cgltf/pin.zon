@@ -1,0 +1,10 @@
+.{
+    .name = "cgltf",
+    .repo = "https://github.com/jkuhlmann/cgltf",
+    .version = "master 2026-02-02",
+    .commit = "85cd62382dfea638278962690cf515023f33ed00",
+    .archive_sha256 = "793aba47e4bbe7a1a4c5822313e0b187c07cdb0a610d1ff65dcbd0619e90a65b",
+    .license = "MIT",
+    .license_file = "LICENSE",
+    .license_sha256 = "f619925f80ef862497aaf8e8155ef218fa6a2190055129523ca3df9119a9ba95",
+}

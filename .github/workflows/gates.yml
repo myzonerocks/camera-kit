@@ -25,6 +25,12 @@ jobs:
         run: |
           tools/toolchain-sync
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: .vendor
+          key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
+      - name: vendor sync
+        run: zig build vendor-sync -- --only cgltf
       - name: source-tracked gate
         run: zig build gate -- --tree
       - name: commit provenance
