@@ -216,9 +216,9 @@ pub fn build(b: *std.Build) void {
         }
         break :blk true;
     };
-    addIosStep(b, optimize);
-
-    addAndroidStep(b, optimize);
+    const shaderc_exe = addShadercTool(b, optimize);
+    addIosStep(b, optimize, shaderc_exe);
+    addAndroidStep(b, optimize, shaderc_exe);
 
     // The web core: the same export layer compiled to wasm32 with every ck_
     // symbol visible to the embedder.
@@ -267,6 +267,9 @@ pub fn build(b: *std.Build) void {
         harness_module.addIncludePath(b.path(".vendor/bx/include"));
         harness_module.addIncludePath(b.path(".vendor/glfw/include"));
         harness_module.link_libc = true;
+        if (shaderc_exe) |tool| {
+            harness_module.addImport("shader_blobs", addShaderBlobs(b, tool, target, optimize));
+        }
         harness_module.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
         harness_module.addCSourceFile(.{
             .file = b.path("harness/lodepng_impl.c"),
@@ -308,8 +311,12 @@ fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8) vo
     module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "lib", "aarch64-linux-android", "29" }) });
 }
 
-fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
+fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile) void {
     const android_step = b.step("android", "Build libcamerakit.so for android arm64-v8a");
+    const shaderc_tool = shaderc_exe orelse {
+        android_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        return;
+    };
     const sysroot = ndkSysroot(b) orelse {
         const missing = b.addFail("camera-kit: ndk 29.0.14206865 not installed under ~/Library/Android/sdk/ndk");
         android_step.dependOn(&missing.step);
@@ -338,6 +345,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
     // translate-c rejects; neutralizing them costs only the annotations.
     render_android.addCMacro("_Nonnull", "");
     render_android.addCMacro("_Nullable", "");
+    render_android.addImport("shader_blobs", addShaderBlobs(b, shaderc_tool, android_target, optimize));
     const abi_android = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
         .target = android_target,
@@ -474,8 +482,12 @@ fn listFiles(b: *std.Build, dir_path: []const u8, suffix: []const u8) ?[][]const
 // the version is written, and a mismatching compiler fails closed here. The
 // shadow lane (weekly build against Zig master) is the one sanctioned bypass,
 // via CK_ALLOW_ZIG_MISMATCH=1.
-fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
+fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile) void {
     const ios_step = b.step("ios", "Build camerakit and bgfx static libraries for iOS devices");
+    const shaderc_tool = shaderc_exe orelse {
+        ios_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        return;
+    };
     if (b.sysroot == null) {
         const missing = b.addFail("camera-kit: run zig build ios --sysroot \"$(xcrun --sdk iphoneos --show-sdk-path)\"");
         ios_step.dependOn(&missing.step);
@@ -507,6 +519,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
     render_ios.addIncludePath(b.path(".vendor/bx/include"));
     render_ios.link_libc = true;
     addAppleSdkPaths(b, render_ios);
+    render_ios.addImport("shader_blobs", addShaderBlobs(b, shaderc_tool, ios_target, optimize));
     const abi_ios = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
         .target = ios_target,
@@ -530,6 +543,185 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
         const fix = b.addSystemCommand(&.{ "ranlib", b.getInstallPath(.{ .custom = "ios" }, lib.out_filename) });
         fix.step.dependOn(&install.step);
         ios_step.dependOn(&fix.step);
+    }
+}
+
+// The shader toolchain: bgfx's shaderc compiled from the vendored tree for
+// the host, emitting spirv, msl, essl, and glsl. WGSL support compiles out
+// gracefully without tint, per the tool's own include guard.
+fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build.Step.Compile {
+    _ = optimize;
+    const step = b.step("shaderc", "Build the shader compiler from the vendored bgfx tree");
+    b.build_root.handle.access(b.graph.io, ".vendor/bgfx/tools/shaderc/shaderc.cpp", .{}) catch {
+        step.dependOn(&b.addFail("camera-kit: .vendor/bgfx missing, run zig build vendor-sync").step);
+        return null;
+    };
+    const target = b.graph.host;
+    const opt = .ReleaseFast;
+
+    const bgfx_dir = ".vendor/bgfx";
+    const spirv_tools = ".vendor/bgfx/3rdparty/spirv-tools";
+    const spirv_headers = ".vendor/bgfx/3rdparty/spirv-headers";
+    const glslang = ".vendor/bgfx/3rdparty/glslang";
+    const glsl_optimizer = ".vendor/bgfx/3rdparty/glsl-optimizer";
+    const fcpp_dir = ".vendor/bgfx/3rdparty/fcpp";
+    const spirv_cross = ".vendor/bgfx/3rdparty/spirv-cross";
+
+    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS" };
+    const c_flags = [_][]const u8{ "-fno-sanitize=undefined", "-w" };
+
+    const spirv_opt_module = b.createModule(.{ .target = target, .optimize = opt });
+    spirv_opt_module.link_libcpp = true;
+    for ([_][]const u8{ spirv_tools, spirv_tools ++ "/include", spirv_tools ++ "/include/generated", spirv_tools ++ "/source", spirv_headers ++ "/include" }) |dir| {
+        spirv_opt_module.addIncludePath(b.path(dir));
+    }
+    addCxxDir(b, spirv_opt_module, spirv_tools ++ "/source", &cxx17, &.{"mimalloc.cpp"});
+    for ([_][]const u8{ "source/opt", "source/reduce", "source/val", "source/util" }) |dir| {
+        addCxxDir(b, spirv_opt_module, b.fmt("{s}/{s}", .{ spirv_tools, dir }), &cxx17, &.{});
+    }
+    const spirv_opt_lib = b.addLibrary(.{ .name = "spirv-opt", .linkage = .static, .root_module = spirv_opt_module });
+
+    const spirv_cross_module = b.createModule(.{ .target = target, .optimize = opt });
+    spirv_cross_module.link_libcpp = true;
+    spirv_cross_module.addCMacro("SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS", "");
+    spirv_cross_module.addIncludePath(b.path(spirv_cross ++ "/include"));
+    for ([_][]const u8{ "spirv_cfg.cpp", "spirv_cpp.cpp", "spirv_cross.cpp", "spirv_cross_parsed_ir.cpp", "spirv_cross_util.cpp", "spirv_glsl.cpp", "spirv_hlsl.cpp", "spirv_msl.cpp", "spirv_parser.cpp", "spirv_reflect.cpp" }) |file| {
+        spirv_cross_module.addCSourceFile(.{ .file = b.path(b.fmt("{s}/{s}", .{ spirv_cross, file })), .flags = &cxx17 });
+    }
+    const spirv_cross_lib = b.addLibrary(.{ .name = "spirv-cross", .linkage = .static, .root_module = spirv_cross_module });
+
+    const glslang_module = b.createModule(.{ .target = target, .optimize = opt });
+    glslang_module.link_libcpp = true;
+    glslang_module.addCMacro("ENABLE_OPT", "1");
+    glslang_module.addCMacro("ENABLE_HLSL", "1");
+    for ([_][]const u8{ glslang, ".vendor/bgfx/3rdparty", spirv_tools ++ "/include", spirv_tools ++ "/source" }) |dir| {
+        glslang_module.addIncludePath(b.path(dir));
+    }
+    for ([_][]const u8{ "glslang/MachineIndependent", "glslang/MachineIndependent/preprocessor", "glslang/GenericCodeGen", "glslang/ResourceLimits", "glslang/OSDependent/Unix", "glslang/HLSL", "SPIRV" }) |dir| {
+        addCxxDir(b, glslang_module, b.fmt("{s}/{s}", .{ glslang, dir }), &cxx17, &.{});
+    }
+    const glslang_lib = b.addLibrary(.{ .name = "glslang", .linkage = .static, .root_module = glslang_module });
+
+    const glslopt_module = b.createModule(.{ .target = target, .optimize = opt });
+    glslopt_module.link_libcpp = true;
+    for ([_][]const u8{ glsl_optimizer ++ "/src", glsl_optimizer ++ "/include", glsl_optimizer ++ "/src/mesa", glsl_optimizer ++ "/src/mapi", glsl_optimizer ++ "/src/glsl" }) |dir| {
+        glslopt_module.addIncludePath(b.path(dir));
+    }
+    addCxxDir(b, glslopt_module, glsl_optimizer ++ "/src/glsl", &cxx17, &.{ "ir_set_program_inouts.cpp", "main.cpp", "builtin_stubs.cpp" });
+    for ([_][]const u8{ "src/glsl/glcpp/glcpp-lex.c", "src/glsl/glcpp/glcpp-parse.c", "src/glsl/glcpp/pp.c", "src/glsl/strtod.c", "src/mesa/main/imports.c", "src/mesa/program/prog_hash_table.c", "src/mesa/program/symbol_table.c", "src/util/hash_table.c", "src/util/ralloc.c" }) |file| {
+        glslopt_module.addCSourceFile(.{ .file = b.path(b.fmt("{s}/{s}", .{ glsl_optimizer, file })), .flags = &c_flags });
+    }
+    const glslopt_lib = b.addLibrary(.{ .name = "glsl-optimizer", .linkage = .static, .root_module = glslopt_module });
+
+    const fcpp_module = b.createModule(.{ .target = target, .optimize = opt });
+    fcpp_module.link_libc = true;
+    fcpp_module.addCMacro("NINCLUDE", "64");
+    fcpp_module.addCMacro("NWORK", "65536");
+    fcpp_module.addCMacro("NBUFF", "65536");
+    fcpp_module.addCMacro("OLD_PREPROCESSOR", "0");
+    fcpp_module.addIncludePath(b.path(fcpp_dir));
+    for ([_][]const u8{ "cpp1.c", "cpp2.c", "cpp3.c", "cpp4.c", "cpp5.c", "cpp6.c" }) |file| {
+        fcpp_module.addCSourceFile(.{ .file = b.path(b.fmt("{s}/{s}", .{ fcpp_dir, file })), .flags = &c_flags });
+    }
+    const fcpp_lib = b.addLibrary(.{ .name = "fcpp", .linkage = .static, .root_module = fcpp_module });
+
+    const shaderc_module = b.createModule(.{ .target = target, .optimize = opt });
+    shaderc_module.link_libcpp = true;
+    for ([_][]const u8{
+        ".vendor/bimg/include",
+        bgfx_dir ++ "/include",
+        ".vendor/bx/include",
+        bgfx_dir ++ "/3rdparty/directx-headers/include/directx",
+        fcpp_dir,
+        glslang ++ "/glslang/Public",
+        glslang ++ "/glslang/Include",
+        glslang,
+        glsl_optimizer ++ "/include",
+        glsl_optimizer ++ "/src/glsl",
+        spirv_tools ++ "/include",
+        spirv_cross,
+        spirv_cross ++ "/include",
+        spirv_headers ++ "/include",
+    }) |dir| {
+        shaderc_module.addIncludePath(b.path(dir));
+    }
+    if (target.result.os.tag == .macos) {
+        shaderc_module.addIncludePath(b.path(".vendor/bx/include/compat/osx"));
+    }
+    addCxxDir(b, shaderc_module, bgfx_dir ++ "/tools/shaderc", &cxx17, &.{});
+    shaderc_module.addCSourceFile(.{ .file = b.path(bgfx_dir ++ "/src/vertexlayout.cpp"), .flags = &cxx17 });
+    shaderc_module.addCSourceFile(.{ .file = b.path(bgfx_dir ++ "/src/shader.cpp"), .flags = &cxx17 });
+    shaderc_module.addCSourceFile(.{ .file = b.path(".vendor/bx/src/amalgamated.cpp"), .flags = &cxx17 });
+    for ([_][]const u8{ "image.cpp", "image_cubemap_filter.cpp", "image_decode.cpp", "image_encode.cpp" }) |file| {
+        shaderc_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/bimg/src/{s}", .{file})), .flags = &cxx17 });
+    }
+    for ([_][]const u8{
+        ".vendor/bimg/3rdparty",
+        ".vendor/bimg/3rdparty/astc-encoder/include",
+        ".vendor/bimg/3rdparty/iqa/include",
+        ".vendor/bimg/3rdparty/tinyexr/deps",
+    }) |dir| {
+        shaderc_module.addIncludePath(b.path(dir));
+    }
+    if (listFiles(b, ".vendor/bimg/3rdparty/astc-encoder/source", ".cpp")) |astc_files| {
+        for (astc_files) |file| shaderc_module.addCSourceFile(.{ .file = b.path(file), .flags = &cxx17 });
+    }
+    shaderc_module.addCMacro("BIMG_CONFIG_PARSE_AVIF", "0");
+    shaderc_module.addCMacro("BIMG_CONFIG_PARSE_HEIF", "0");
+    shaderc_module.addCMacro("BIMG_CONFIG_PARSE_EXR", "0");
+
+    const shaderc_exe = b.addExecutable(.{ .name = "shaderc", .root_module = shaderc_module });
+    shaderc_module.linkLibrary(fcpp_lib);
+    shaderc_module.linkLibrary(glslang_lib);
+    shaderc_module.linkLibrary(glslopt_lib);
+    shaderc_module.linkLibrary(spirv_opt_lib);
+    shaderc_module.linkLibrary(spirv_cross_lib);
+    step.dependOn(&b.addInstallArtifact(shaderc_exe, .{}).step);
+    return shaderc_exe;
+}
+
+// Compiles the kit's shaders with the vendored compiler at build time and
+// exposes the blobs as one embedded module, per backend profile.
+fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const wf = b.addWriteFiles();
+    var source: std.ArrayList(u8) = .empty;
+    const shaders = [_]struct { name: []const u8, kind: []const u8 }{
+        .{ .name = "vs_preview", .kind = "vertex" },
+        .{ .name = "fs_preview_rgba", .kind = "fragment" },
+        .{ .name = "fs_preview_nv12", .kind = "fragment" },
+    };
+    const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
+        .{ .profile = "metal", .platform = "ios", .tag = "metal" },
+        .{ .profile = "spirv", .platform = "android", .tag = "spirv" },
+        .{ .profile = "300_es", .platform = "android", .tag = "essl" },
+    };
+    for (shaders) |shader| {
+        for (profiles) |profile| {
+            const run = b.addRunArtifact(shaderc_exe);
+            run.addArg("-f");
+            run.addFileArg(b.path(b.fmt("adapters/bgfx/shaders/{s}.sc", .{shader.name})));
+            run.addArg("-o");
+            const out_name = b.fmt("{s}.{s}.bin", .{ shader.name, profile.tag });
+            const out = run.addOutputFileArg(out_name);
+            run.addArgs(&.{ "--type", shader.kind, "--platform", profile.platform, "-p", profile.profile, "--varyingdef" });
+            run.addFileArg(b.path("adapters/bgfx/shaders/varying.def.sc"));
+            run.addArg("-i");
+            run.addDirectoryArg(b.path(".vendor/bgfx/src"));
+            _ = wf.addCopyFile(out, out_name);
+            source.appendSlice(b.allocator, b.fmt("pub const {s}_{s} = @embedFile(\"{s}\");\n", .{ shader.name, profile.tag, out_name })) catch @panic("oom");
+        }
+    }
+    const root = wf.add("shader_blobs.zig", source.items);
+    return b.createModule(.{ .root_source_file = root, .target = target, .optimize = optimize });
+}
+
+fn addCxxDir(b: *std.Build, module: *std.Build.Module, dir: []const u8, flags: []const []const u8, exclude: []const []const u8) void {
+    const files = listFiles(b, dir, ".cpp") orelse return;
+    outer: for (files) |file| {
+        for (exclude) |bad| {
+            if (std.mem.endsWith(u8, file, bad)) continue :outer;
+        }
+        module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
     }
 }
 
