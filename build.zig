@@ -36,13 +36,29 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const abi_module = b.createModule(.{
+        .root_source_file = b.path("core/abi/abi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "graph", .module = graph_module }},
+    });
+
+    const camerakit_lib = b.addLibrary(.{
+        .name = "camerakit",
+        .linkage = .static,
+        .root_module = abi_module,
+    });
+    b.installArtifact(camerakit_lib);
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
+    const abi_tests = b.addTest(.{ .root_module = abi_module });
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
+    test_step.dependOn(&b.addRunArtifact(abi_tests).step);
 }
 
 // The pinned toolchain is the only toolchain: .zigversion is the single place
