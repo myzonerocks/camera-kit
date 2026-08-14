@@ -108,6 +108,15 @@ pub const Primitive = struct {
         return p.readVec3Attribute(c.cgltf_attribute_type_position, out);
     }
 
+    pub fn readTexcoords(p: Primitive, out: [][2]f32) Error!usize {
+        const accessor = p.findAttribute(c.cgltf_attribute_type_texcoord) orelse return 0;
+        const count = @min(accessor.*.count, out.len);
+        const floats: [*]f32 = @ptrCast(out.ptr);
+        const unpacked = c.cgltf_accessor_unpack_floats(accessor, floats, count * 2);
+        if (unpacked != count * 2) return error.MalformedAsset;
+        return count;
+    }
+
     pub fn readNormals(p: Primitive, out: [][3]f32) Error!usize {
         return p.readVec3Attribute(c.cgltf_attribute_type_normal, out);
     }
@@ -210,6 +219,21 @@ pub const Asset = struct {
 
     pub fn nodeCount(a: *const Asset) usize {
         return a.data.nodes_count;
+    }
+
+    pub fn imageCount(a: *const Asset) usize {
+        return a.data.images_count;
+    }
+
+    /// Raw bytes of an embedded image (its buffer view), typically a PNG a
+    /// texture decoder consumes. External image files are already refused
+    /// at parse time, so an image either has embedded bytes or none.
+    pub fn imageBytes(a: *const Asset, index: usize) ?[]const u8 {
+        const image = &a.data.images[index];
+        const view = image.buffer_view orelse return null;
+        const buffer_data = view.*.buffer.*.data orelse return null;
+        const base: [*]const u8 = @ptrCast(buffer_data);
+        return base[view.*.offset .. view.*.offset + view.*.size];
     }
 
     pub fn node(a: *const Asset, index: usize) Node {

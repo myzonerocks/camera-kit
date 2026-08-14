@@ -122,25 +122,27 @@ pub fn build(b: *std.Build) void {
         b.build_root.handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
         break :blk true;
     };
-    if (have_cgltf) {
-        const gltf_module = b.createModule(.{
+    const gltf_module: ?*std.Build.Module = if (have_cgltf) blk: {
+        const m = b.createModule(.{
             .root_source_file = b.path("adapters/gltf/gltf.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "math", .module = math_module }},
         });
-        gltf_module.addIncludePath(b.path(".vendor/cgltf"));
-        gltf_module.addCSourceFile(.{
+        m.addIncludePath(b.path(".vendor/cgltf"));
+        m.addCSourceFile(.{
             .file = b.path("adapters/gltf/cgltf_impl.c"),
             .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
         });
-        gltf_module.link_libc = true;
-        const gltf_tests = b.addTest(.{ .root_module = gltf_module });
+        m.link_libc = true;
+        const gltf_tests = b.addTest(.{ .root_module = m });
         test_step.dependOn(&b.addRunArtifact(gltf_tests).step);
-    } else {
+        break :blk m;
+    } else blk: {
         const missing = b.addFail("camera-kit: .vendor/cgltf missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
-    }
+        break :blk null;
+    };
 
     // The desktop harness draws through the real render stack. It exists
     // only where its vendors are synced and the host is supported.
@@ -151,7 +153,7 @@ pub fn build(b: *std.Build) void {
         break :blk true;
     };
     const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
-    if (have_render_stack and target.result.os.tag == .macos) {
+    if (have_render_stack and gltf_module != null and target.result.os.tag == .macos) {
         const render_stack = buildRenderStack(b, target, optimize);
         const harness_module = b.createModule(.{
             .root_source_file = b.path("harness/desktop.zig"),
@@ -160,15 +162,18 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "math", .module = math_module },
                 .{ .name = "graph", .module = graph_module },
+                .{ .name = "gltf", .module = gltf_module.? },
             },
         });
         harness_module.addIncludePath(b.path(".vendor/bgfx/include"));
         harness_module.addIncludePath(b.path(".vendor/bx/include"));
         harness_module.addIncludePath(b.path(".vendor/glfw/include"));
         harness_module.link_libc = true;
-        if (have_cgltf) {
-            harness_module.addIncludePath(b.path(".vendor/cgltf"));
-        }
+        harness_module.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
+        harness_module.addCSourceFile(.{
+            .file = b.path("harness/lodepng_impl.c"),
+            .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+        });
         const harness_exe = b.addExecutable(.{
             .name = "harness",
             .root_module = harness_module,

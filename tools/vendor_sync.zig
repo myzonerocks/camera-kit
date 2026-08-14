@@ -138,9 +138,15 @@ pub fn main(init: std.process.Init) !u8 {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
     var check_only = false;
+    var only: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--check")) {
             check_only = true;
+        } else if (std.mem.eql(u8, arg, "--only")) {
+            only = args.next() orelse {
+                std.debug.print("vendor-sync: --only needs a vendor name\n", .{});
+                return 2;
+            };
         } else {
             std.debug.print("vendor-sync: unknown argument '{s}'\n", .{arg});
             return 2;
@@ -166,7 +172,12 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }.lessThan);
 
-    for (names.items) |name| try s.syncOne(name);
+    for (names.items) |name| {
+        if (only) |wanted| {
+            if (!std.mem.eql(u8, name, wanted)) continue;
+        }
+        try s.syncOne(name);
+    }
 
     if (s.failures != 0) {
         std.debug.print("vendor-sync: {d} failure(s)\n", .{s.failures});
