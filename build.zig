@@ -86,17 +86,61 @@ pub fn build(b: *std.Build) void {
         abi_step.dependOn(&header_object.step);
     }
 
+    const vendor_sync_module = b.createModule(.{
+        .root_source_file = b.path("tools/vendor_sync.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const vendor_sync_exe = b.addExecutable(.{
+        .name = "vendor_sync",
+        .root_module = vendor_sync_module,
+    });
+    const run_vendor_sync = b.addRunArtifact(vendor_sync_exe);
+    run_vendor_sync.setCwd(b.path("."));
+    if (b.args) |args| run_vendor_sync.addArgs(args);
+    const vendor_step = b.step("vendor-sync", "Fetch and verify vendored trees from third_party pins (-- --check to verify only)");
+    vendor_step.dependOn(&run_vendor_sync.step);
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
+    const vendor_sync_tests = b.addTest(.{ .root_module = vendor_sync_module });
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
+    test_step.dependOn(&b.addRunArtifact(vendor_sync_tests).step);
+
+    // Adapters compile against the vendored trees. Without them the rest of
+    // the build still works, vendor-sync included; only the steps that need
+    // a vendor fail, closed, naming the exact command.
+    const have_cgltf = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (have_cgltf) {
+        const gltf_module = b.createModule(.{
+            .root_source_file = b.path("adapters/gltf/gltf.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "math", .module = math_module }},
+        });
+        gltf_module.addIncludePath(b.path(".vendor/cgltf"));
+        gltf_module.addCSourceFile(.{
+            .file = b.path("adapters/gltf/cgltf_impl.c"),
+            .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+        });
+        gltf_module.link_libc = true;
+        const gltf_tests = b.addTest(.{ .root_module = gltf_module });
+        test_step.dependOn(&b.addRunArtifact(gltf_tests).step);
+    } else {
+        const missing = b.addFail("camera-kit: .vendor/cgltf missing, run zig build vendor-sync");
+        test_step.dependOn(&missing.step);
+    }
 }
 
 // The pinned toolchain is the only toolchain: .zigversion is the single place
