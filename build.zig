@@ -51,11 +51,26 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // The host export layer carries the render stub: unit tests cannot
+    // exercise Metal, and the harness plus device demos are the executable
+    // truth for the real backend. Platform libraries built by the ios step
+    // link the real binding.
+    const render_stub_module = b.createModule(.{
+        .root_source_file = b.path("adapters/bgfx/render_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_module }},
+    });
+
     const abi_module = b.createModule(.{
         .root_source_file = b.path("core/abi/abi.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "graph", .module = graph_module }},
+        .imports = &.{
+            .{ .name = "graph", .module = graph_module },
+            .{ .name = "math", .module = math_module },
+            .{ .name = "render", .module = render_stub_module },
+        },
     });
 
     const camerakit_lib = b.addLibrary(.{
@@ -201,9 +216,12 @@ pub fn build(b: *std.Build) void {
         }
         break :blk true;
     };
+    addIosStep(b, optimize);
+
     const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
     if (have_render_stack and gltf_module != null and target.result.os.tag == .macos) {
-        const render_stack = buildRenderStack(b, target, optimize);
+        const bgfx_lib = buildBgfxLib(b, target, optimize);
+        const glfw_lib = buildGlfwLib(b, target, optimize);
         const harness_module = b.createModule(.{
             .root_source_file = b.path("harness/desktop.zig"),
             .target = target,
@@ -227,8 +245,8 @@ pub fn build(b: *std.Build) void {
             .name = "harness",
             .root_module = harness_module,
         });
-        harness_module.linkLibrary(render_stack.bgfx);
-        harness_module.linkLibrary(render_stack.glfw);
+        harness_module.linkLibrary(bgfx_lib);
+        harness_module.linkLibrary(glfw_lib);
         for ([_][]const u8{ "Metal", "QuartzCore", "Cocoa", "IOKit", "CoreFoundation", "Foundation", "AppKit", "CoreMedia", "CoreVideo", "VideoToolbox" }) |framework| {
             harness_exe.root_module.linkFramework(framework, .{});
         }
@@ -243,19 +261,22 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-const RenderStack = struct {
-    bgfx: *std.Build.Step.Compile,
-    glfw: *std.Build.Step.Compile,
-};
-
 // bx, bimg, and bgfx compile as one static library from their amalgamated
-// sources; zig is the C++ and Objective-C++ compiler. Debug config follows
-// the zig optimize mode.
-fn buildRenderStack(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) RenderStack {
+// sources; zig is the C++ and Objective-C++ compiler for every target,
+// device targets included. Debug config follows the zig optimize mode.
+fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
+    const sdk = b.sysroot orelse return;
+    module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "include" }) });
+    module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
+}
+
+fn buildBgfxLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
     const debug_flag = if (optimize == .Debug) "-DBX_CONFIG_DEBUG=1" else "-DBX_CONFIG_DEBUG=0";
 
     const bgfx_module = b.createModule(.{ .target = target, .optimize = optimize });
+    bgfx_module.link_libc = true;
     bgfx_module.link_libcpp = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, bgfx_module);
     for ([_][]const u8{
         ".vendor/bx/include",
         ".vendor/bx/include/compat/osx",
@@ -282,8 +303,10 @@ fn buildRenderStack(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .file = b.path("adapters/bgfx/bgfx_amalgamated.mm"),
         .flags = &(cxx_flags ++ [_][]const u8{"-fno-objc-arc"}),
     });
-    const bgfx_lib = b.addLibrary(.{ .name = "bgfx", .linkage = .static, .root_module = bgfx_module });
+    return b.addLibrary(.{ .name = "bgfx", .linkage = .static, .root_module = bgfx_module });
+}
 
+fn buildGlfwLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
     const glfw_module = b.createModule(.{ .target = target, .optimize = optimize });
     glfw_module.link_libc = true;
     glfw_module.addIncludePath(b.path(".vendor/glfw/include"));
@@ -300,9 +323,7 @@ fn buildRenderStack(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     for ([_][]const u8{ "cocoa_init.m", "cocoa_joystick.m", "cocoa_monitor.m", "cocoa_window.m", "nsgl_context.m" }) |file| {
         glfw_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/glfw/src/{s}", .{file})), .flags = &(glfw_flags ++ [_][]const u8{"-fno-objc-arc"}) });
     }
-    const glfw_lib = b.addLibrary(.{ .name = "glfw", .linkage = .static, .root_module = glfw_module });
-
-    return .{ .bgfx = bgfx_lib, .glfw = glfw_lib };
+    return b.addLibrary(.{ .name = "glfw", .linkage = .static, .root_module = glfw_module });
 }
 
 fn listFiles(b: *std.Build, dir_path: []const u8, suffix: []const u8) ?[][]const u8 {
@@ -327,6 +348,59 @@ fn listFiles(b: *std.Build, dir_path: []const u8, suffix: []const u8) ?[][]const
 // the version is written, and a mismatching compiler fails closed here. The
 // shadow lane (weekly build against Zig master) is the one sanctioned bypass,
 // via CK_ALLOW_ZIG_MISMATCH=1.
+fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
+    const ios_step = b.step("ios", "Build camerakit and bgfx static libraries for iOS devices");
+    if (b.sysroot == null) {
+        const missing = b.addFail("camera-kit: run zig build ios --sysroot \"$(xcrun --sdk iphoneos --show-sdk-path)\"");
+        ios_step.dependOn(&missing.step);
+        return;
+    }
+    const ios_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .ios,
+        .abi = .none,
+    });
+
+    const math_ios = b.createModule(.{
+        .root_source_file = b.path("core/math/math.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+    });
+    const graph_ios = b.createModule(.{
+        .root_source_file = b.path("core/graph/graph.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+    });
+    const render_ios = b.createModule(.{
+        .root_source_file = b.path("adapters/bgfx/render.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_ios }},
+    });
+    render_ios.addIncludePath(b.path(".vendor/bgfx/include"));
+    render_ios.addIncludePath(b.path(".vendor/bx/include"));
+    render_ios.link_libc = true;
+    addAppleSdkPaths(b, render_ios);
+    const abi_ios = b.createModule(.{
+        .root_source_file = b.path("core/abi/abi.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "graph", .module = graph_ios },
+            .{ .name = "math", .module = math_ios },
+            .{ .name = "render", .module = render_ios },
+        },
+    });
+    const camerakit_ios = b.addLibrary(.{
+        .name = "camerakit",
+        .linkage = .static,
+        .root_module = abi_ios,
+    });
+    const bgfx_ios = buildBgfxLib(b, ios_target, optimize);
+    ios_step.dependOn(&b.addInstallArtifact(camerakit_ios, .{ .dest_dir = .{ .override = .{ .custom = "ios" } } }).step);
+    ios_step.dependOn(&b.addInstallArtifact(bgfx_ios, .{ .dest_dir = .{ .override = .{ .custom = "ios" } } }).step);
+}
+
 fn enforcePinnedZig(b: *std.Build) void {
     const raw = b.build_root.handle.readFileAlloc(b.graph.io, ".zigversion", b.allocator, .limited(128)) catch |err|
         std.process.fatal("camera-kit: cannot read .zigversion: {t}", .{err});

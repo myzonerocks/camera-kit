@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define CK_ABI_MAJOR 0u
-#define CK_ABI_MINOR 1u
+#define CK_ABI_MINOR 2u
 #define CK_ABI_VERSION ((CK_ABI_MAJOR << 16) | CK_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against CK_ABI_MAJOR. */
@@ -45,6 +45,7 @@ typedef enum ck_status {
     CK_ERROR_OUT_OF_MEMORY = 2,
     CK_ERROR_POOL_EXHAUSTED = 3,
     CK_ERROR_ABI_MISMATCH = 4,
+    CK_ERROR_RENDERER_UNAVAILABLE = 5,
 } ck_status;
 
 typedef struct ck_engine ck_engine;
@@ -88,6 +89,12 @@ typedef enum ck_color_range {
     CK_COLOR_RANGE_FULL = 1,
 } ck_color_range;
 
+/* ck_frame_desc.flags bits. Rotation is the quarter-turn count to apply for
+ * upright display; mirror flips horizontally, for front cameras. */
+#define CK_FRAME_FLAG_MIRROR 0x1u
+#define CK_FRAME_ROTATION_SHIFT 8u
+#define CK_FRAME_ROTATION_MASK 0x300u
+
 /* Describes one camera frame. The pixel data itself stays in the platform
  * buffer the shell hands over; the core never copies it on the frame path.
  * Layout: 32 bytes, static-asserted below. */
@@ -97,9 +104,28 @@ typedef struct ck_frame_desc {
     uint32_t pixel_format;   /* ck_pixel_format */
     uint32_t color_standard; /* ck_color_standard */
     uint32_t color_range;    /* ck_color_range */
-    uint32_t reserved;       /* zero */
+    uint32_t flags;          /* CK_FRAME_* bits */
     int64_t timestamp_us;    /* capture time, monotonic microseconds */
 } ck_frame_desc;
+
+/* The render surface a shell hands the engine: an NSWindow, CAMetalLayer,
+ * ANativeWindow, or canvas handle per platform. Layout: 16 bytes. */
+typedef struct ck_renderer_desc {
+    void *native_window_handle;
+    uint32_t width;
+    uint32_t height;
+} ck_renderer_desc;
+
+/* Zero-copy plane handles for one frame: platform texture objects
+ * (MTLTexture, AHardwareBuffer-backed images, WebGL textures) as opaque
+ * pointer-sized values. The platform object must stay valid until the next
+ * submitted frame has rendered; the shell guarantees that by holding the
+ * buffer. Layout: 32 bytes. */
+typedef struct ck_frame_planes {
+    uint32_t plane_count;
+    uint32_t reserved; /* zero */
+    uint64_t planes[3];
+} ck_frame_planes;
 
 /* A tracking result crossing the boundary. Points are x, y, z triples in
  * normalized image space; the memory belongs to the producer and stays
@@ -131,9 +157,24 @@ typedef struct ck_session_config {
 ck_status ck_engine_create(const ck_engine_config *config, ck_engine **out_engine);
 void ck_engine_destroy(ck_engine *engine);
 
+/* Graph thread. Brings up the render backend on the given surface. */
+ck_status ck_engine_init_renderer(ck_engine *engine, const ck_renderer_desc *desc);
+
+/* Graph thread. Resizes the render surface. */
+void ck_engine_resize(ck_engine *engine, uint32_t width, uint32_t height);
+
+/* Graph thread. Draws the session's most recent frame to the surface and
+ * presents. A null session presents the clear color. */
+ck_status ck_engine_render_frame(ck_engine *engine, ck_session *session);
+
 /* Graph thread. config may be null for defaults. */
 ck_status ck_session_create(ck_engine *engine, const ck_session_config *config, ck_session **out_session);
 void ck_session_destroy(ck_session *session);
+
+/* Graph thread. Hands over one camera frame, zero-copy. The descriptor is
+ * copied; the plane handles are wrapped, not read, and their platform
+ * objects must outlive the next rendered frame. */
+ck_status ck_session_submit_frame(ck_session *session, const ck_frame_desc *desc, const ck_frame_planes *planes);
 
 /* Graph thread. Reports one finished frame: measured whole-pipeline time
  * plus current thermal pressure. Returns the degradation level in effect
@@ -148,6 +189,8 @@ _Static_assert(sizeof(ck_frame_desc) == 32, "ck_frame_desc layout is frozen");
 _Static_assert(sizeof(ck_landmarks) == 24, "ck_landmarks layout is frozen");
 _Static_assert(sizeof(ck_engine_config) == 8, "ck_engine_config layout is frozen");
 _Static_assert(sizeof(ck_session_config) == 8, "ck_session_config layout is frozen");
+_Static_assert(sizeof(ck_renderer_desc) == 16, "ck_renderer_desc layout is frozen");
+_Static_assert(sizeof(ck_frame_planes) == 32, "ck_frame_planes layout is frozen");
 #endif
 
 #ifdef __cplusplus
