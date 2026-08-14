@@ -7,6 +7,7 @@ pub const vec = @import("vec.zig");
 pub const mat = @import("mat.zig");
 pub const quat = @import("quat.zig");
 pub const pose = @import("pose.zig");
+pub const color = @import("color.zig");
 
 pub const Vec2 = vec.Vec2;
 pub const Vec3 = vec.Vec3;
@@ -23,4 +24,5 @@ test {
     _ = mat;
     _ = quat;
     _ = pose;
+    _ = color;
 }
