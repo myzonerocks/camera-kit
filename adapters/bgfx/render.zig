@@ -7,189 +7,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const math = @import("math");
+const blobs = @import("shader_blobs");
 
 pub const c = @cImport({
     @cInclude("bgfx/c99/bgfx.h");
 });
 
 pub const invalid_handle: u16 = std.math.maxInt(u16);
-
-// Shader blobs in the exact binary layout bgfx parses: magic VSH/FSH
-// version 11, in/out hashes, the uniform table, then platform shader source
-// compiled by the driver at load. The lens shader toolchain replaces hand
-// assembly when it lands; the format itself is what shaderc emits.
-pub const ShaderUniform = struct {
-    name: []const u8,
-    kind: u8,
-    num: u8,
-    reg_index: u16,
-    reg_count: u16,
-};
-
-pub fn buildShaderBlob(gpa: std.mem.Allocator, kind: u8, uniforms: []const ShaderUniform, source: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    try out.appendSlice(gpa, &.{ kind, 'S', 'H', 11 });
-    try out.appendSlice(gpa, &(.{0} ** 8)); // input and output hashes
-    var scratch: [4]u8 = undefined;
-    std.mem.writeInt(u16, scratch[0..2], @intCast(uniforms.len), .little);
-    try out.appendSlice(gpa, scratch[0..2]);
-    for (uniforms) |u| {
-        try out.append(gpa, @intCast(u.name.len));
-        try out.appendSlice(gpa, u.name);
-        try out.append(gpa, u.kind);
-        try out.append(gpa, u.num);
-        std.mem.writeInt(u16, scratch[0..2], u.reg_index, .little);
-        try out.appendSlice(gpa, scratch[0..2]);
-        std.mem.writeInt(u16, scratch[0..2], u.reg_count, .little);
-        try out.appendSlice(gpa, scratch[0..2]);
-        try out.appendSlice(gpa, &.{ 0, 0, 0, 0 }); // texInfo, texFormat
-    }
-    std.mem.writeInt(u32, &scratch, @intCast(source.len), .little);
-    try out.appendSlice(gpa, &scratch);
-    try out.appendSlice(gpa, source);
-    try out.append(gpa, 0);
-    return out.toOwnedSlice(gpa);
-}
-
-pub fn samplerUniformTriple(comptime name: []const u8) [3]ShaderUniform {
-    return .{
-        .{ .name = name ++ "Sampler", .kind = 0x11, .num = 1, .reg_index = 0xffff, .reg_count = 1 },
-        .{ .name = name ++ "Texture", .kind = 0x11, .num = 1, .reg_index = 0xffff, .reg_count = 1 },
-        .{ .name = name, .kind = 0x10, .num = 0, .reg_index = 0, .reg_count = 0 },
-    };
-}
-
-const preview_vertex_essl =
-    \\attribute highp vec3 a_position;
-    \\attribute highp vec2 a_texcoord0;
-    \\varying highp vec2 v_texcoord0;
-    \\uniform highp mat4 u_modelViewProj;
-    \\void main ()
-    \\{
-    \\  gl_Position = (u_modelViewProj * vec4(a_position, 1.0));
-    \\  v_texcoord0 = a_texcoord0;
-    \\}
-    \\
-;
-
-const rgba_fragment_essl =
-    \\varying highp vec2 v_texcoord0;
-    \\uniform sampler2D s_texColor;
-    \\void main ()
-    \\{
-    \\  gl_FragColor = texture2D(s_texColor, v_texcoord0);
-    \\}
-    \\
-;
-
-const nv12_fragment_essl =
-    \\varying highp vec2 v_texcoord0;
-    \\uniform sampler2D s_texY;
-    \\uniform sampler2D s_texUV;
-    \\uniform highp mat4 u_yuvTransform;
-    \\void main ()
-    \\{
-    \\  highp float y = texture2D(s_texY, v_texcoord0).r;
-    \\  highp vec2 uv = texture2D(s_texUV, v_texcoord0).rg;
-    \\  highp vec3 rgb = (u_yuvTransform * vec4(y, uv.x, uv.y, 1.0)).rgb;
-    \\  gl_FragColor = vec4(rgb, 1.0);
-    \\}
-    \\
-;
-
-const preview_vertex_msl =
-    \\#include <metal_stdlib>
-    \\#include <simd/simd.h>
-    \\
-    \\using namespace metal;
-    \\
-    \\struct _Global
-    \\{
-    \\    float4x4 u_modelViewProj;
-    \\};
-    \\
-    \\struct xlatMtlMain_out
-    \\{
-    \\    float2 _entryPointOutput_v_texcoord0 [[user(locn0)]];
-    \\    float4 gl_Position [[position]];
-    \\};
-    \\
-    \\struct xlatMtlMain_in
-    \\{
-    \\    float3 a_position [[attribute(0)]];
-    \\    float2 a_texcoord0 [[attribute(1)]];
-    \\};
-    \\
-    \\vertex xlatMtlMain_out xlatMtlMain(xlatMtlMain_in in [[stage_in]], constant _Global& _mtl_u [[buffer(0)]])
-    \\{
-    \\    xlatMtlMain_out out = {};
-    \\    out.gl_Position = _mtl_u.u_modelViewProj * float4(in.a_position, 1.0);
-    \\    out._entryPointOutput_v_texcoord0 = in.a_texcoord0;
-    \\    return out;
-    \\}
-    \\
-;
-
-const rgba_fragment_msl =
-    \\#include <metal_stdlib>
-    \\#include <simd/simd.h>
-    \\
-    \\using namespace metal;
-    \\
-    \\struct xlatMtlMain_out
-    \\{
-    \\    float4 bgfx_FragData0 [[color(0)]];
-    \\};
-    \\
-    \\struct xlatMtlMain_in
-    \\{
-    \\    float2 v_texcoord0 [[user(locn0)]];
-    \\};
-    \\
-    \\fragment xlatMtlMain_out xlatMtlMain(xlatMtlMain_in in [[stage_in]], texture2d<float> s_texColor [[texture(0)]], sampler s_texColorSampler [[sampler(0)]])
-    \\{
-    \\    xlatMtlMain_out out = {};
-    \\    out.bgfx_FragData0 = s_texColor.sample(s_texColorSampler, in.v_texcoord0);
-    \\    return out;
-    \\}
-    \\
-;
-
-// Two-plane YCbCr sampled and converted with the exact affine map from the
-// math module, passed as one homogeneous matrix: rgb = (M * float4(yuv, 1)).
-const nv12_fragment_msl =
-    \\#include <metal_stdlib>
-    \\#include <simd/simd.h>
-    \\
-    \\using namespace metal;
-    \\
-    \\struct _Global
-    \\{
-    \\    float4x4 u_yuvTransform;
-    \\};
-    \\
-    \\struct xlatMtlMain_out
-    \\{
-    \\    float4 bgfx_FragData0 [[color(0)]];
-    \\};
-    \\
-    \\struct xlatMtlMain_in
-    \\{
-    \\    float2 v_texcoord0 [[user(locn0)]];
-    \\};
-    \\
-    \\fragment xlatMtlMain_out xlatMtlMain(xlatMtlMain_in in [[stage_in]], constant _Global& _mtl_u [[buffer(0)]], texture2d<float> s_texY [[texture(0)]], sampler s_texYSampler [[sampler(0)]], texture2d<float> s_texUV [[texture(1)]], sampler s_texUVSampler [[sampler(1)]])
-    \\{
-    \\    xlatMtlMain_out out = {};
-    \\    float y = s_texY.sample(s_texYSampler, in.v_texcoord0).r;
-    \\    float2 uv = s_texUV.sample(s_texUVSampler, in.v_texcoord0).rg;
-    \\    float3 rgb = (_mtl_u.u_yuvTransform * float4(y, uv.x, uv.y, 1.0)).rgb;
-    \\    out.bgfx_FragData0 = float4(rgb, 1.0);
-    \\    return out;
-    \\}
-    \\
-;
 
 /// The affine color conversion as one homogeneous matrix for the shader.
 pub fn yuvTransform(conversion: math.color.Conversion) math.Mat4 {
@@ -243,8 +67,9 @@ pub const Renderer = struct {
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         var bgfx_init: c.bgfx_init_t = undefined;
         c.bgfx_init_ctor(&bgfx_init);
-        // Metal on apple targets. Android runs the GL backend until the
-        // shader toolchain brings SPIR-V for Vulkan.
+        // Metal on apple targets. Android runs the GL backend while the
+        // Vulkan capability probe lands; the Vulkan program path below is
+        // selected the moment the probe chooses it.
         bgfx_init.type = if (builtin.os.tag == .macos or builtin.os.tag == .ios)
             c.BGFX_RENDERER_TYPE_METAL
         else if (builtin.os.tag == .linux and builtin.abi.isAndroid())
@@ -265,26 +90,19 @@ pub const Renderer = struct {
         _ = c.bgfx_vertex_layout_add(&layout, c.BGFX_ATTRIB_TEXCOORD0, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         c.bgfx_vertex_layout_end(&layout);
 
-        const mvp_uniform = [_]ShaderUniform{
-            .{ .name = "u_modelViewProj", .kind = 0x04, .num = 1, .reg_index = 0, .reg_count = 4 },
-        };
         const backend = c.bgfx_get_renderer_type();
         const rgba_program, const nv12_program = switch (backend) {
             c.BGFX_RENDERER_TYPE_METAL => .{
-                try makeProgram(gpa, &mvp_uniform, &samplerUniformTriple("s_texColor"), preview_vertex_msl, rgba_fragment_msl),
-                try makeProgram(gpa, &mvp_uniform, &(.{
-                    ShaderUniform{ .name = "u_yuvTransform", .kind = 0x14, .num = 1, .reg_index = 0, .reg_count = 4 },
-                } ++ samplerUniformTriple("s_texY") ++ samplerUniformTriple("s_texUV")), preview_vertex_msl, nv12_fragment_msl),
+                try loadProgram(blobs.vs_preview_metal, blobs.fs_preview_rgba_metal),
+                try loadProgram(blobs.vs_preview_metal, blobs.fs_preview_nv12_metal),
+            },
+            c.BGFX_RENDERER_TYPE_VULKAN => .{
+                try loadProgram(blobs.vs_preview_spirv, blobs.fs_preview_rgba_spirv),
+                try loadProgram(blobs.vs_preview_spirv, blobs.fs_preview_nv12_spirv),
             },
             c.BGFX_RENDERER_TYPE_OPENGLES => .{
-                try makeProgram(gpa, &mvp_uniform, &.{
-                    .{ .name = "s_texColor", .kind = 0x00, .num = 1, .reg_index = 0, .reg_count = 1 },
-                }, preview_vertex_essl, rgba_fragment_essl),
-                try makeProgram(gpa, &mvp_uniform, &.{
-                    .{ .name = "u_yuvTransform", .kind = 0x14, .num = 1, .reg_index = 0, .reg_count = 4 },
-                    .{ .name = "s_texY", .kind = 0x00, .num = 1, .reg_index = 0, .reg_count = 1 },
-                    .{ .name = "s_texUV", .kind = 0x00, .num = 1, .reg_index = 1, .reg_count = 1 },
-                }, preview_vertex_essl, nv12_fragment_essl),
+                try loadProgram(blobs.vs_preview_essl, blobs.fs_preview_rgba_essl),
+                try loadProgram(blobs.vs_preview_essl, blobs.fs_preview_nv12_essl),
             },
             else => return error.RendererUnsupported,
         };
@@ -306,11 +124,7 @@ pub const Renderer = struct {
         };
     }
 
-    fn makeProgram(gpa: std.mem.Allocator, vs_uniforms: []const ShaderUniform, fs_uniforms: []const ShaderUniform, vertex_source: []const u8, fragment_source: []const u8) !c.bgfx_program_handle_t {
-        const vs_blob = try buildShaderBlob(gpa, 'V', vs_uniforms, vertex_source);
-        defer gpa.free(vs_blob);
-        const fs_blob = try buildShaderBlob(gpa, 'F', fs_uniforms, fragment_source);
-        defer gpa.free(fs_blob);
+    fn loadProgram(vs_blob: []const u8, fs_blob: []const u8) !c.bgfx_program_handle_t {
         const vsh = c.bgfx_create_shader(c.bgfx_copy(vs_blob.ptr, @intCast(vs_blob.len)));
         const fsh = c.bgfx_create_shader(c.bgfx_copy(fs_blob.ptr, @intCast(fs_blob.len)));
         const program = c.bgfx_create_program(vsh, fsh, true);
@@ -466,18 +280,13 @@ pub const Renderer = struct {
 
 const t = std.testing;
 
-test "shader blobs carry the exact header bgfx parses" {
-    const blob = try buildShaderBlob(t.allocator, 'V', &.{
-        .{ .name = "u_modelViewProj", .kind = 0x04, .num = 1, .reg_index = 0, .reg_count = 4 },
-    }, "vertex source");
-    defer t.allocator.free(blob);
-    try t.expectEqualSlices(u8, &.{ 'V', 'S', 'H', 11 }, blob[0..4]);
-    try t.expectEqual(@as(u16, 1), std.mem.readInt(u16, blob[12..14], .little));
-    try t.expectEqual(@as(u8, 15), blob[14]);
-    try t.expectEqualStrings("u_modelViewProj", blob[15..30]);
-    const code_size_offset = 15 + 15 + 2 + 8;
-    try t.expectEqual(@as(u32, "vertex source".len), std.mem.readInt(u32, blob[code_size_offset..][0..4], .little));
-    try t.expectEqual(@as(u8, 0), blob[blob.len - 1]);
+test "compiled shader blobs carry the header bgfx parses" {
+    inline for (.{ blobs.vs_preview_metal, blobs.vs_preview_spirv, blobs.vs_preview_essl }) |blob| {
+        try t.expectEqualSlices(u8, "VSH", blob[0..3]);
+    }
+    inline for (.{ blobs.fs_preview_rgba_metal, blobs.fs_preview_nv12_spirv, blobs.fs_preview_nv12_essl }) |blob| {
+        try t.expectEqualSlices(u8, "FSH", blob[0..3]);
+    }
 }
 
 test "yuv transform embeds matrix and offset homogeneously" {
@@ -488,11 +297,8 @@ test "yuv transform embeds matrix and offset homogeneously" {
     try t.expect(math.vec.approxEq(rgb_direct, math.vec.vec3From4(homogeneous), 1.0e-6));
 }
 
-test "sampler triple matches the metal naming convention" {
-    const triple = samplerUniformTriple("s_texY");
-    try t.expectEqualStrings("s_texYSampler", triple[0].name);
-    try t.expectEqualStrings("s_texYTexture", triple[1].name);
-    try t.expectEqualStrings("s_texY", triple[2].name);
-    try t.expectEqual(@as(u8, 0x11), triple[0].kind);
-    try t.expectEqual(@as(u8, 0x10), triple[2].kind);
+test "every backend has all three shaders embedded" {
+    try t.expect(blobs.fs_preview_rgba_essl.len > 0);
+    try t.expect(blobs.fs_preview_rgba_spirv.len > 0);
+    try t.expect(blobs.vs_preview_essl.len > 0);
 }
