@@ -1,0 +1,46 @@
+name: zig-next
+
+# Shadow lane: build the gate suite weekly against Zig master so upstream
+# breakage is discovered the week it lands, never as a surprise migration.
+# Allowed to fail; failures are filed as issues tagged zig-next.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: fetch zig master
+        run: |
+          url="$(curl -fsSL https://ziglang.org/download/index.json | python3 -c "
+          import json, sys
+          print(json.load(sys.stdin)['master']['x86_64-linux']['tarball'])")"
+          curl -fsSL "$url" -o zig-master.tar.xz
+          mkdir -p "$RUNNER_TEMP/zig-master"
+          tar -xJf zig-master.tar.xz -C "$RUNNER_TEMP/zig-master" --strip-components=1
+          rm zig-master.tar.xz
+      - name: build and test on master
+        id: build
+        continue-on-error: true
+        run: |
+          CK_ALLOW_ZIG_MISMATCH=1 "$RUNNER_TEMP/zig-master/zig" build test 2>&1 | tee shadow.log
+          exit "${PIPESTATUS[0]}"
+      - name: file issue on failure
+        if: steps.build.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$("$RUNNER_TEMP/zig-master/zig" version)"
+          title="zig-next: gate suite fails on $ver"
+          if [ -z "$(gh issue list --label zig-next --state open --search "$title" --json number --jq '.[].number')" ]; then
+            tail -c 60000 shadow.log > body.log
+            printf 'Weekly shadow-lane build against Zig master failed.\n\n```\n' > body.md
+            cat body.log >> body.md
+            printf '\n```\n' >> body.md
+            gh issue create --title "$title" --label zig-next --body-file body.md
+          fi
