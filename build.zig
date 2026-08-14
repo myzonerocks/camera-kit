@@ -24,6 +24,21 @@ pub fn build(b: *std.Build) void {
     const gate_step = b.step("gate", "Run the source-tracked gate (-- --staged | --tree | --commit-msg <file> | --log <range>)");
     gate_step.dependOn(&run_gate.step);
 
+    // The authoritative gate suite runs locally: hosted runners are not
+    // funded, so green here is the merge bar. One command, every gate.
+    const ci_step = b.step("ci", "Run every gate locally: tests, source gate, abi, vendor check, provenance");
+    {
+        const ci_gate = b.addRunArtifact(gate_exe);
+        ci_gate.setCwd(b.path("."));
+        ci_gate.addArgs(&.{"--tree"});
+        ci_step.dependOn(&ci_gate.step);
+        const ci_log = b.addRunArtifact(gate_exe);
+        ci_log.setCwd(b.path("."));
+        ci_log.addArgs(&.{ "--log", "origin/main..HEAD" });
+        ci_step.dependOn(&ci_log.step);
+    }
+
+
     const math_module = b.createModule(.{
         .root_source_file = b.path("core/math/math.zig"),
         .target = target,
@@ -67,6 +82,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| abi_check.addArgs(args) else abi_check.addArgs(&.{ "--check", "tools/abi-baseline.txt" });
     const abi_step = b.step("abi", "Check the ABI surface against the baseline (-- --print to regenerate)");
     abi_step.dependOn(&abi_check.step);
+    ci_step.dependOn(abi_step);
 
     // A bare header is not a translation unit, so the compile check goes
     // through a generated file that includes it. C99 proves the header stays
@@ -100,6 +116,15 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_vendor_sync.addArgs(args);
     const vendor_step = b.step("vendor-sync", "Fetch and verify vendored trees from third_party pins (-- --check to verify only)");
     vendor_step.dependOn(&run_vendor_sync.step);
+    {
+        const vendor_check = b.addRunArtifact(vendor_sync_exe);
+        vendor_check.setCwd(b.path("."));
+        vendor_check.addArgs(&.{"--check"});
+        ci_step.dependOn(&vendor_check.step);
+        const release_tests = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "test", "-Doptimize=ReleaseFast" });
+        release_tests.setCwd(b.path("."));
+        ci_step.dependOn(&release_tests.step);
+    }
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
@@ -108,6 +133,7 @@ pub fn build(b: *std.Build) void {
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
     const vendor_sync_tests = b.addTest(.{ .root_module = vendor_sync_module });
     const test_step = b.step("test", "Run all tests");
+    ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
