@@ -290,7 +290,7 @@ fn buildBgfxLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         ".vendor/bgfx/3rdparty",
         ".vendor/bgfx/3rdparty/khronos",
     }) |dir| bgfx_module.addIncludePath(b.path(dir));
-    const cxx_flags = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-exceptions", "-fno-rtti", "-fno-sanitize=undefined", "-D__STDC_FORMAT_MACROS", "-DBIMG_CONFIG_PARSE_AVIF=0", "-DBIMG_CONFIG_PARSE_HEIF=0", "-DBIMG_CONFIG_PARSE_EXR=0", debug_flag };
+    const cxx_flags = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-exceptions", "-fno-rtti", "-fno-sanitize=undefined", "-D__STDC_FORMAT_MACROS", "-Wno-date-time", "-DBIMG_CONFIG_PARSE_AVIF=0", "-DBIMG_CONFIG_PARSE_HEIF=0", "-DBIMG_CONFIG_PARSE_EXR=0", debug_flag };
     bgfx_module.addCSourceFile(.{ .file = b.path(".vendor/bx/src/amalgamated.cpp"), .flags = &cxx_flags });
     for ([_][]const u8{ "image.cpp", "image_cubemap_filter.cpp", "image_decode.cpp", "image_encode.cpp" }) |file| {
         bgfx_module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/bimg/src/{s}", .{file})), .flags = &cxx_flags });
@@ -397,8 +397,14 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
         .root_module = abi_ios,
     });
     const bgfx_ios = buildBgfxLib(b, ios_target, optimize);
-    ios_step.dependOn(&b.addInstallArtifact(camerakit_ios, .{ .dest_dir = .{ .override = .{ .custom = "ios" } } }).step);
-    ios_step.dependOn(&b.addInstallArtifact(bgfx_ios, .{ .dest_dir = .{ .override = .{ .custom = "ios" } } }).step);
+    // Apple's linker requires 8-byte archive member alignment; the system
+    // ranlib rewrites zig's archives into the accepted layout.
+    for ([_]*std.Build.Step.Compile{ camerakit_ios, bgfx_ios }) |lib| {
+        const install = b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = "ios" } } });
+        const fix = b.addSystemCommand(&.{ "ranlib", b.getInstallPath(.{ .custom = "ios" }, lib.out_filename) });
+        fix.step.dependOn(&install.step);
+        ios_step.dependOn(&fix.step);
+    }
 }
 
 fn enforcePinnedZig(b: *std.Build) void {

@@ -17,6 +17,12 @@ const render = @import("render");
 pub const abi_major: u16 = 0;
 pub const abi_minor: u16 = 2;
 
+// As a library embedded in someone else's process the core never
+// symbolizes its own stack: the hosting app owns crash reporting, and the
+// symbolization machinery drags in loader interfaces mobile platforms do
+// not export. A panic prints the message and traps.
+pub const panic = std.debug.simple_panic;
+
 pub const Status = enum(c_int) {
     ok = 0,
     invalid_argument = 1,

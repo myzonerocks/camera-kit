@@ -1,0 +1,41 @@
+name: CameraKitDemo
+options:
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  CameraKitDemo:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: kit.camera.demo
+        DEVELOPMENT_TEAM: 9ZCMLRAW4V
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging.h
+        HEADER_SEARCH_PATHS: ["$(PROJECT_DIR)/../../../include"]
+        LIBRARY_SEARCH_PATHS: ["$(PROJECT_DIR)/../../../zig-out/ios"]
+        OTHER_LDFLAGS:
+          - "-lcamerakit"
+          - "-lbgfx"
+          - "-lc++"
+          - "-framework"
+          - "Metal"
+          - "-framework"
+          - "QuartzCore"
+          - "-framework"
+          - "CoreMedia"
+          - "-framework"
+          - "CoreVideo"
+          - "-framework"
+          - "VideoToolbox"
+          - "-framework"
+          - "AVFoundation"
+        TARGETED_DEVICE_FAMILY: "1"
+    info:
+      path: Sources/Info.plist
+      properties:
+        UILaunchScreen: {}
+        NSCameraUsageDescription: Shows the live camera preview.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false

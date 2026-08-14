@@ -38,6 +38,9 @@ zig-out/
 .models/
 
 # Shell build detritus.
+shells/swift/**/*.xcodeproj/
+shells/swift/demo/Sources/Info.plist
+shells/swift/**/xcuserdata/
 shells/swift/.build/
 shells/swift/**/DerivedData/
 shells/kotlin/.gradle/
