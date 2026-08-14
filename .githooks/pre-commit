@@ -1,0 +1,8 @@
+#!/bin/sh
+# Source-tracked gate, both directions, on every commit.
+set -e
+root="$(git rev-parse --show-toplevel)"
+zig="$root/.local/zig/current/zig"
+[ -x "$zig" ] || zig=zig
+cd "$root"
+exec "$zig" build gate -- --staged

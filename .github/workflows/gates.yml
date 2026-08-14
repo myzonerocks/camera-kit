@@ -1,0 +1,39 @@
+name: gates
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v4
+        with:
+          path: .local/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: source-tracked gate
+        run: zig build gate -- --tree
+      - name: commit provenance
+        if: github.event_name == 'pull_request'
+        run: zig build gate -- --log "origin/${{ github.base_ref }}..HEAD"
+      - name: tests
+        run: zig build test
+      - name: visibility guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)" = "true"

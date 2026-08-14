@@ -1,0 +1,13 @@
+#!/bin/sh
+# Provenance scan of the commit message being written.
+set -e
+root="$(git rev-parse --show-toplevel)"
+zig="$root/.local/zig/current/zig"
+[ -x "$zig" ] || zig=zig
+msg="$1"
+case "$msg" in
+  /*) ;;
+  *) msg="$PWD/$msg" ;;
+esac
+cd "$root"
+exec "$zig" build gate -- --commit-msg "$msg"
