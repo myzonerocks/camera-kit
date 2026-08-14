@@ -1,0 +1,199 @@
+import AVFoundation
+import CoreVideo
+import Metal
+import os
+
+// Owns the capture side: device discovery, permission, the NV12 output, and
+// zero-copy hand-off of each frame's Metal textures into the engine. Frames
+// never touch the CPU; CVMetalTextureCache wraps the camera planes as
+// MTLTextures backed by the same IOSurface.
+final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    enum State: String {
+        case idle
+        case running
+        case denied
+        case interrupted
+        case failed
+    }
+
+    private let log = Logger(subsystem: "kit.camera.demo", category: "capture")
+    private let captureSession = AVCaptureSession()
+    private let outputQueue = DispatchQueue(label: "kit.camera.demo.capture")
+    private var textureCache: CVMetalTextureCache?
+    private var engineSession: OpaquePointer?
+
+    // The plane textures of the two most recent frames stay retained so the
+    // GPU can still sample the frame in flight while the next one arrives.
+    private var inflight: [[Any]] = [[], []]
+    private var inflightIndex = 0
+
+    private(set) var state: State = .idle
+    private(set) var submittedFrames = 0
+    private var mirrored = false
+    private var rotationQuarterTurns: UInt32 = 0
+    var onStateChange: ((State) -> Void)?
+
+    func start(engineSession: OpaquePointer?, position: AVCaptureDevice.Position = .back) {
+        self.engineSession = engineSession
+
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            configureAndRun(position: position)
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        self.configureAndRun(position: position)
+                    } else {
+                        self.transition(to: .denied)
+                    }
+                }
+            }
+        default:
+            transition(to: .denied)
+        }
+    }
+
+    func stop() {
+        captureSession.stopRunning()
+        transition(to: .idle)
+    }
+
+    private func transition(to newState: State) {
+        state = newState
+        log.info("capture state \(newState.rawValue)")
+        onStateChange?(newState)
+    }
+
+    private func configureAndRun(position: AVCaptureDevice.Position) {
+        var cache: CVMetalTextureCache?
+        guard let metalDevice = MTLCreateSystemDefaultDevice(),
+              CVMetalTextureCacheCreate(nil, nil, metalDevice, nil, &cache) == kCVReturnSuccess
+        else {
+            transition(to: .failed)
+            return
+        }
+        textureCache = cache
+
+        captureSession.beginConfiguration()
+        captureSession.sessionPreset = .hd1920x1080
+
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position),
+              let input = try? AVCaptureDeviceInput(device: device),
+              captureSession.canAddInput(input)
+        else {
+            captureSession.commitConfiguration()
+            transition(to: .failed)
+            return
+        }
+        captureSession.addInput(input)
+        mirrored = position == .front
+
+        let output = AVCaptureVideoDataOutput()
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        ]
+        output.alwaysDiscardsLateVideoFrames = true
+        output.setSampleBufferDelegate(self, queue: outputQueue)
+        guard captureSession.canAddOutput(output) else {
+            captureSession.commitConfiguration()
+            transition(to: .failed)
+            return
+        }
+        captureSession.addOutput(output)
+        if let connection = output.connection(with: .video) {
+            let angle: CGFloat = 90
+            if connection.isVideoRotationAngleSupported(angle) {
+                connection.videoRotationAngle = 0
+            }
+        }
+        captureSession.commitConfiguration()
+
+        NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: AVCaptureSession.wasInterruptedNotification, object: captureSession)
+        NotificationCenter.default.addObserver(self, selector: #selector(interruptionEnded), name: AVCaptureSession.interruptionEndedNotification, object: captureSession)
+        NotificationCenter.default.addObserver(self, selector: #selector(runtimeError), name: AVCaptureSession.runtimeErrorNotification, object: captureSession)
+
+        // Sensor sits landscape; one quarter turn shows portrait upright.
+        rotationQuarterTurns = 1
+
+        outputQueue.async {
+            self.captureSession.startRunning()
+            DispatchQueue.main.async { self.transition(to: .running) }
+        }
+    }
+
+    @objc private func interrupted() {
+        transition(to: .interrupted)
+    }
+
+    @objc private func interruptionEnded() {
+        transition(to: .running)
+    }
+
+    @objc private func runtimeError(_ notification: Notification) {
+        log.error("capture runtime error: \(String(describing: notification.userInfo))")
+        transition(to: .failed)
+        outputQueue.async {
+            self.captureSession.startRunning()
+            DispatchQueue.main.async { self.transition(to: .running) }
+        }
+    }
+
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let engineSession,
+              let cache = textureCache,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+        else { return }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+
+        var yTextureRef: CVMetalTexture?
+        var uvTextureRef: CVMetalTexture?
+        guard CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .r8Unorm, width, height, 0, &yTextureRef) == kCVReturnSuccess,
+              CVMetalTextureCacheCreateTextureFromImage(nil, cache, pixelBuffer, nil, .rg8Unorm, width / 2, height / 2, 1, &uvTextureRef) == kCVReturnSuccess,
+              let yRef = yTextureRef, let uvRef = uvTextureRef,
+              let yTexture = CVMetalTextureGetTexture(yRef),
+              let uvTexture = CVMetalTextureGetTexture(uvRef)
+        else { return }
+
+        // Keep this frame's platform objects alive until the frame after
+        // next has rendered.
+        inflight[inflightIndex] = [pixelBuffer, yRef, uvRef, yTexture, uvTexture]
+        inflightIndex = (inflightIndex + 1) % inflight.count
+
+        var standard: UInt32 = CK_COLOR_BT709.rawValue
+        if let matrix = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String {
+            if matrix == (kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String) {
+                standard = CK_COLOR_BT601.rawValue
+            } else if matrix == (kCVImageBufferYCbCrMatrix_ITU_R_2020 as String) {
+                standard = CK_COLOR_BT2020.rawValue
+            }
+        }
+
+        var flags: UInt32 = rotationQuarterTurns << CK_FRAME_ROTATION_SHIFT
+        if mirrored { flags |= CK_FRAME_FLAG_MIRROR }
+
+        var desc = ck_frame_desc(
+            width: UInt32(width),
+            height: UInt32(height),
+            pixel_format: CK_PIXEL_NV12.rawValue,
+            color_standard: standard,
+            color_range: CK_COLOR_RANGE_VIDEO.rawValue,
+            flags: flags,
+            timestamp_us: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000)
+        )
+        var planes = ck_frame_planes(
+            plane_count: 2,
+            reserved: 0,
+            planes: (
+                UInt64(UInt(bitPattern: Unmanaged.passUnretained(yTexture).toOpaque())),
+                UInt64(UInt(bitPattern: Unmanaged.passUnretained(uvTexture).toOpaque())),
+                0
+            )
+        )
+        if ck_session_submit_frame(engineSession, &desc, &planes) == CK_OK {
+            submittedFrames += 1
+        }
+    }
+}

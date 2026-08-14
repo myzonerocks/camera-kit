@@ -28,6 +28,17 @@ pub const Conversion = struct {
     pub fn apply(c: Conversion, in: Vec3) Vec3 {
         return c.matrix.mulVec(in) + c.offset;
     }
+
+    /// The same map as one homogeneous matrix, the form shaders consume:
+    /// out = (M * vec4(in, 1)).xyz.
+    pub fn homogeneous(c: Conversion) matrix.Mat4 {
+        var m = matrix.Mat4.identity;
+        inline for (0..3) |col| {
+            m.cols[col] = vec.vec4From3(c.matrix.cols[col], 0.0);
+        }
+        m.cols[3] = vec.vec4From3(c.offset, 1.0);
+        return m;
+    }
 };
 
 fn lumaCoefficients(standard: Standard) [2]f32 {
