@@ -9,18 +9,26 @@
 const std = @import("std");
 const abi = @import("abi");
 
-const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig };
+const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig, abi.RendererDesc, abi.FramePlanes };
 
 // Exported functions with their frozen C signatures. Kept next to the type
 // manifest so a new export without a manifest entry is caught in review.
 const abi_functions = [_][]const u8{
     "uint32_t ck_abi_version(void)",
+    "void *ck_alloc(size_t size)",
+    "void ck_free(void *ptr, size_t size)",
     "ck_status ck_engine_create(const ck_engine_config *config, ck_engine **out_engine)",
     "void ck_engine_destroy(ck_engine *engine)",
     "ck_status ck_session_create(ck_engine *engine, const ck_session_config *config, ck_session **out_session)",
     "void ck_session_destroy(ck_session *session)",
+    "ck_status ck_engine_init_renderer(ck_engine *engine, const ck_renderer_desc *desc)",
+    "void ck_engine_resize(ck_engine *engine, uint32_t width, uint32_t height)",
+    "ck_status ck_engine_render_frame(ck_engine *engine, ck_session *session)",
+    "ck_status ck_session_submit_frame(ck_session *session, const ck_frame_desc *desc, const ck_frame_planes *planes)",
+    "ck_status ck_session_submit_frame_copy(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
     "ck_degrade_level ck_session_report_frame(ck_session *session, uint32_t frame_time_us, ck_thermal thermal)",
     "ck_degrade_level ck_session_degrade_level(const ck_session *session)",
+    "ck_status ck_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix)",
 };
 
 fn writeSurface(w: anytype) !void {
