@@ -1,0 +1,10 @@
+.{
+    .name = "bimg",
+    .repo = "https://github.com/bkaradzic/bimg",
+    .version = "master 2026-08-13",
+    .commit = "371d90098b1fd017cd00205979d5ef74b8c3ed62",
+    .archive_sha256 = "a1464cfbbbbbb1712df9231bb5c5442e3728f78110c7072d5145892e428fd937",
+    .license = "BSD-2-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "ac2e0d253b1584316a36a0fae1d4407fa3ebcb15f27021ab479b23d27f0c9c08",
+}

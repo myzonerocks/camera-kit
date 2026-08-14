@@ -1,0 +1,10 @@
+.{
+    .name = "bx",
+    .repo = "https://github.com/bkaradzic/bx",
+    .version = "master 2026-08-09",
+    .commit = "26ff6d907d83ea2b626ba99322d0f2a3c354e76b",
+    .archive_sha256 = "546b64e5252c093ca9b4badbf9c70f91e6661ad857874fa73bda0d7c7d70b234",
+    .license = "BSD-2-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "ac2e0d253b1584316a36a0fae1d4407fa3ebcb15f27021ab479b23d27f0c9c08",
+}

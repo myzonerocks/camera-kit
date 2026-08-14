@@ -1,0 +1,10 @@
+.{
+    .name = "glfw",
+    .repo = "https://github.com/glfw/glfw",
+    .version = "master 2026-08-03",
+    .commit = "92dcf4ce74f2e2554a98fea09be7c705c17daa5a",
+    .archive_sha256 = "833fef2ddc9b99d3c2af5c197fe01e6c07e6f6f5555115f1a790e3db9a2e7e07",
+    .license = "Zlib",
+    .license_file = "LICENSE.md",
+    .license_sha256 = "149704059b5d0bf551637e50042dd4de9c2cae921021f6636298911e3a5f9462",
+}
