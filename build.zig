@@ -234,6 +234,7 @@ pub fn build(b: *std.Build) void {
         deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize), .{}).step);
         deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize), .{}).step);
         deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize), .{}).step);
+        deps_step.dependOn(&b.addInstallArtifact(buildXnnpackLib(b, target, optimize), .{}).step);
     }
     addIosStep(b, optimize, shaderc_exe);
     addAndroidStep(b, optimize, shaderc_exe);
@@ -536,6 +537,260 @@ fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DNAMESPACE_FOR_HASH_FUNCTIONS=farmhash" },
     });
     return b.addLibrary(.{ .name = "farmhash", .linkage = .static, .root_module = module });
+}
+
+// Reads one SET(<name> ...) source list out of a cmake file in a pinned
+// tree. The generated microkernel lists are the runtime's own source of
+// truth for what compiles on each processor; parsing them keeps this build
+// aligned with the pin instead of a hand-copied snapshot that would rot.
+fn cmakeSourceList(b: *std.Build, root: []const u8, cmake_path: []const u8, var_name: []const u8, out: *std.ArrayList([]const u8)) void {
+    const text = b.build_root.handle.readFileAlloc(b.graph.io, cmake_path, b.allocator, .limited(8 << 20)) catch
+        std.debug.panic("unreadable cmake list {s}", .{cmake_path});
+    const open = b.fmt("SET({s}", .{var_name});
+    var search: usize = 0;
+    const body_start = while (std.mem.indexOfPos(u8, text, search, open)) |at| {
+        const after = at + open.len;
+        if (after < text.len and std.ascii.isWhitespace(text[after])) break after;
+        search = at + 1;
+    } else std.debug.panic("{s} not found in {s}", .{ var_name, cmake_path });
+    var tokens = std.mem.tokenizeAny(u8, text[body_start..], " \t\r\n");
+    while (tokens.next()) |raw| {
+        var token = raw;
+        const closes = std.mem.endsWith(u8, token, ")");
+        if (closes) token = token[0 .. token.len - 1];
+        // Entries referencing cmake variables (the generated identifier
+        // file) are produced by this build separately.
+        if (token.len > 0 and std.mem.indexOfScalar(u8, token, '$') == null) {
+            out.append(b.allocator, b.fmt("{s}/{s}", .{ root, token })) catch @panic("oom");
+        }
+        if (closes) return;
+    }
+    std.debug.panic("unterminated {s} in {s}", .{ var_name, cmake_path });
+}
+
+const XnnpackFamily = struct {
+    list: []const u8,
+    variable: []const u8,
+    features: std.Target.Cpu.Feature.Set = std.Target.Cpu.Feature.Set.empty,
+};
+
+// Production microkernel families per processor, each with the cpu features
+// its sources require. Dispatch picks among them at runtime from detected
+// features, so every family compiles into its own archive built for exactly
+// that feature set; a family must never leak instructions into another.
+const aarch64_feature = std.Target.aarch64.featureSet;
+const xnnpack_aarch64_families = [_]XnnpackFamily{
+    .{ .list = "scalar_microkernels.cmake", .variable = "PROD_SCALAR_MICROKERNEL_SRCS" },
+    .{ .list = "neon_microkernels.cmake", .variable = "PROD_NEON_MICROKERNEL_SRCS" },
+    .{ .list = "neonfp16_microkernels.cmake", .variable = "PROD_NEONFP16_MICROKERNEL_SRCS" },
+    .{ .list = "neonfma_microkernels.cmake", .variable = "PROD_NEONFMA_MICROKERNEL_SRCS" },
+    .{ .list = "neonv8_microkernels.cmake", .variable = "PROD_NEONV8_MICROKERNEL_SRCS" },
+    .{ .list = "neon_aarch64_microkernels.cmake", .variable = "PROD_NEON_AARCH64_MICROKERNEL_SRCS" },
+    .{ .list = "neonfma_aarch64_microkernels.cmake", .variable = "PROD_NEONFMA_AARCH64_MICROKERNEL_SRCS" },
+    .{ .list = "fp16arith_microkernels.cmake", .variable = "PROD_FP16ARITH_MICROKERNEL_SRCS", .features = aarch64_feature(&.{.fullfp16}) },
+    .{ .list = "neonfp16arith_microkernels.cmake", .variable = "PROD_NEONFP16ARITH_MICROKERNEL_SRCS", .features = aarch64_feature(&.{.fullfp16}) },
+    .{ .list = "neonfp16arith_aarch64_microkernels.cmake", .variable = "PROD_NEONFP16ARITH_AARCH64_MICROKERNEL_SRCS", .features = aarch64_feature(&.{.fullfp16}) },
+    .{ .list = "neondot_microkernels.cmake", .variable = "PROD_NEONDOT_MICROKERNEL_SRCS", .features = aarch64_feature(&.{.dotprod}) },
+    .{ .list = "neondot_aarch64_microkernels.cmake", .variable = "PROD_NEONDOT_AARCH64_MICROKERNEL_SRCS", .features = aarch64_feature(&.{.dotprod}) },
+    .{ .list = "neondotfp16arith_microkernels.cmake", .variable = "PROD_NEONDOTFP16ARITH_MICROKERNEL_SRCS", .features = aarch64_feature(&.{ .dotprod, .fullfp16 }) },
+    .{ .list = "neoni8mm_microkernels.cmake", .variable = "PROD_NEONI8MM_MICROKERNEL_SRCS", .features = aarch64_feature(&.{ .i8mm, .fullfp16 }) },
+    .{ .list = "aarch64_microkernels.cmake", .variable = "PROD_AARCH64_ASM_MICROKERNEL_SRCS", .features = aarch64_feature(&.{ .fullfp16, .dotprod }) },
+};
+
+const x86_feature = std.Target.x86.featureSet;
+const x86_avx512_base = [_]std.Target.x86.Feature{ .f16c, .fma, .avx512f, .avx512cd, .avx512bw, .avx512dq, .avx512vl };
+const xnnpack_x86_64_families = [_]XnnpackFamily{
+    .{ .list = "scalar_microkernels.cmake", .variable = "PROD_SCALAR_MICROKERNEL_SRCS" },
+    .{ .list = "sse_microkernels.cmake", .variable = "PROD_SSE_MICROKERNEL_SRCS" },
+    .{ .list = "sse2_microkernels.cmake", .variable = "PROD_SSE2_MICROKERNEL_SRCS" },
+    .{ .list = "sse2fma_microkernels.cmake", .variable = "PROD_SSE2FMA_MICROKERNEL_SRCS" },
+    .{ .list = "ssse3_microkernels.cmake", .variable = "PROD_SSSE3_MICROKERNEL_SRCS", .features = x86_feature(&.{.ssse3}) },
+    .{ .list = "sse41_microkernels.cmake", .variable = "PROD_SSE41_MICROKERNEL_SRCS", .features = x86_feature(&.{.sse4_1}) },
+    .{ .list = "avx_microkernels.cmake", .variable = "PROD_AVX_MICROKERNEL_SRCS", .features = x86_feature(&.{.avx}) },
+    .{ .list = "f16c_microkernels.cmake", .variable = "PROD_F16C_MICROKERNEL_SRCS", .features = x86_feature(&.{.f16c}) },
+    .{ .list = "fma3_microkernels.cmake", .variable = "PROD_FMA3_MICROKERNEL_SRCS", .features = x86_feature(&.{ .f16c, .fma }) },
+    .{ .list = "avx2_microkernels.cmake", .variable = "PROD_AVX2_MICROKERNEL_SRCS", .features = x86_feature(&.{ .f16c, .fma, .avx2 }) },
+    .{ .list = "avx256skx_microkernels.cmake", .variable = "PROD_AVX256SKX_MICROKERNEL_SRCS", .features = x86_feature(&x86_avx512_base) },
+    .{ .list = "avx256vnni_microkernels.cmake", .variable = "PROD_AVX256VNNI_MICROKERNEL_SRCS", .features = x86_feature(&(x86_avx512_base ++ [_]std.Target.x86.Feature{.avx512vnni})) },
+    .{ .list = "avx512f_microkernels.cmake", .variable = "PROD_AVX512F_MICROKERNEL_SRCS", .features = x86_feature(&.{.avx512f}) },
+    .{ .list = "avx512skx_microkernels.cmake", .variable = "PROD_AVX512SKX_MICROKERNEL_SRCS", .features = x86_feature(&x86_avx512_base) },
+    .{ .list = "avx512vbmi_microkernels.cmake", .variable = "PROD_AVX512VBMI_MICROKERNEL_SRCS", .features = x86_feature(&(x86_avx512_base ++ [_]std.Target.x86.Feature{.avx512vbmi})) },
+    .{ .list = "avx512vnni_microkernels.cmake", .variable = "PROD_AVX512VNNI_MICROKERNEL_SRCS", .features = x86_feature(&(x86_avx512_base ++ [_]std.Target.x86.Feature{.avx512vnni})) },
+};
+
+// The inference runtime's cpu backend as one static archive: the shared
+// library groups from the runtime's build plus the production microkernels
+// for the target processor. The build identifier the weight cache checks
+// is derived from the vendor pin, so it changes exactly when the vendored
+// revision does.
+fn xnnpackConfigureModule(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    module.link_libc = true;
+    module.link_libcpp = true;
+    for ([_][]const u8{
+        ".vendor/xnnpack",             ".vendor/xnnpack/include", ".vendor/xnnpack/src",
+        ".vendor/pthreadpool/include",
+        ".vendor/fxdiv/include",       ".vendor/fp16/include", ".vendor/cpuinfo/include",
+    }) |dir| {
+        module.addIncludePath(b.path(dir));
+    }
+    const arch = target.result.cpu.arch;
+    const is_arm = arch == .aarch64;
+    const is_x86 = arch == .x86_64;
+    const toggles = [_]struct { name: []const u8, on: bool }{
+        .{ .name = "XNN_ENABLE_ARM_FP16_VECTOR", .on = is_arm },
+        .{ .name = "XNN_ENABLE_ARM_FP16_SCALAR", .on = is_arm },
+        .{ .name = "XNN_ENABLE_ARM_BF16", .on = false },
+        .{ .name = "XNN_ENABLE_ARM_DOTPROD", .on = is_arm },
+        .{ .name = "XNN_ENABLE_ARM_I8MM", .on = is_arm },
+        .{ .name = "XNN_ENABLE_ARM_SME", .on = false },
+        .{ .name = "XNN_ENABLE_ARM_SME2", .on = false },
+        .{ .name = "XNN_ENABLE_RISCV_VECTOR", .on = false },
+        .{ .name = "XNN_ENABLE_RISCV_FP16_VECTOR", .on = false },
+        .{ .name = "XNN_ENABLE_SSE", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_SSE2", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_SSSE3", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_SSE41", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVX", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_F16C", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_FMA3", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVX2", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVXVNNI", .on = false },
+        .{ .name = "XNN_ENABLE_AVXVNNIINT8", .on = false },
+        .{ .name = "XNN_ENABLE_AVX256SKX", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVX256VNNI", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVX256VNNIGFNI", .on = false },
+        .{ .name = "XNN_ENABLE_AVX512F", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVX512SKX", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVX512VBMI", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVX512VNNI", .on = is_x86 },
+        .{ .name = "XNN_ENABLE_AVX512VNNIGFNI", .on = false },
+        .{ .name = "XNN_ENABLE_AVX512AMX", .on = false },
+        .{ .name = "XNN_ENABLE_AVX512FP16", .on = false },
+        .{ .name = "XNN_ENABLE_AVX512BF16", .on = false },
+        .{ .name = "XNN_ENABLE_WASMRELAXEDSIMDFP16", .on = false },
+        .{ .name = "XNN_ENABLE_VSX", .on = false },
+        .{ .name = "XNN_ENABLE_HVX", .on = false },
+        .{ .name = "XNN_ENABLE_ASSEMBLY", .on = is_arm },
+        .{ .name = "XNN_ENABLE_SPARSE", .on = true },
+        .{ .name = "XNN_ENABLE_RNDNU16", .on = false },
+        .{ .name = "XNN_ENABLE_KLEIDIAI", .on = false },
+        .{ .name = "XNN_ENABLE_WASM_REVECTORIZE", .on = false },
+        .{ .name = "XNN_ENABLE_CPUINFO", .on = true },
+        .{ .name = "XNN_LOG_LEVEL", .on = false },
+    };
+    for (toggles) |toggle| {
+        module.addCMacro(toggle.name, if (toggle.on) "1" else "0");
+    }
+    if (target.result.os.tag == .linux) module.addCMacro("_GNU_SOURCE", "1");
+}
+
+fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    xnnpackConfigureModule(b, module, target);
+    const is_arm = target.result.cpu.arch == .aarch64;
+    const is_x86 = target.result.cpu.arch == .x86_64;
+
+    var shared: std.ArrayList([]const u8) = .empty;
+    for ([_][]const u8{ "OPERATOR_SRCS", "REFERENCE_SRCS", "SUBGRAPH_SRCS", "LOGGING_SRCS", "XNNPACK_SRCS", "TABLE_SRCS" }) |group| {
+        cmakeSourceList(b, ".vendor/xnnpack", ".vendor/xnnpack/CMakeLists.txt", group, &shared);
+    }
+    for ([_][]const u8{
+        "src/sanitizers.c",       "src/configs/hardware-config.c",     "src/xnnpack/init-once.c",
+        "src/indirection.c",      "src/microparams-init.c",            "src/normalization.c",
+        "src/pack-lh.cc",         "src/reference/packing.cc",          "src/allocator.c",
+        "src/cache.c",            "src/datatype.c",                    "src/operators/fingerprint_id.c",
+        "src/operators/fingerprint_cache.c", "src/xnnpack/fingerprint_check.c", "src/memory.c",
+        "src/microkernel-utils.c", "src/mutex.c",                      "src/operator-run.c",
+        "src/operator-utils.c",
+    }) |file| {
+        shared.append(b.allocator, b.fmt(".vendor/xnnpack/{s}", .{file})) catch @panic("oom");
+    }
+    const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
+    const cxx_flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    var seen = std.StringHashMap(void).init(b.allocator);
+    for (shared.items) |file| {
+        if ((seen.getOrPut(file) catch @panic("oom")).found_existing) continue;
+        const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".cc")) &cxx_flags else &c_flags;
+        module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
+    }
+
+    var micro_c_flags: std.ArrayList([]const u8) = .empty;
+    micro_c_flags.appendSlice(b.allocator, &c_flags) catch @panic("oom");
+    micro_c_flags.append(b.allocator, "-fno-math-errno") catch @panic("oom");
+    if (is_x86) {
+        micro_c_flags.appendSlice(b.allocator, &.{ "-mstack-alignment=64", "-fomit-frame-pointer", "-mstackrealign" }) catch @panic("oom");
+    }
+    const families: []const XnnpackFamily = if (is_arm) &xnnpack_aarch64_families else &xnnpack_x86_64_families;
+    for (families) |family| {
+        const wants_features = !family.features.eql(std.Target.Cpu.Feature.Set.empty);
+        const family_module = if (wants_features) blk: {
+            var query = target.query;
+            query.cpu_model = .baseline;
+            query.cpu_features_add = family.features;
+            const family_target = b.resolveTargetQuery(query);
+            const family_module = b.createModule(.{ .target = family_target, .optimize = optimize });
+            xnnpackConfigureModule(b, family_module, family_target);
+            break :blk family_module;
+        } else module;
+        var sources: std.ArrayList([]const u8) = .empty;
+        cmakeSourceList(b, ".vendor/xnnpack", b.fmt(".vendor/xnnpack/cmake/gen/{s}", .{family.list}), family.variable, &sources);
+        var added = false;
+        for (sources.items) |file| {
+            if ((seen.getOrPut(file) catch @panic("oom")).found_existing) continue;
+            const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".cc")) &cxx_flags else micro_c_flags.items;
+            family_module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
+            added = true;
+        }
+        if (wants_features and added) {
+            const family_name = family.list[0 .. family.list.len - "_microkernels.cmake".len];
+            module.linkLibrary(b.addLibrary(.{
+                .name = b.fmt("xnnpack-{s}", .{family_name}),
+                .linkage = .static,
+                .root_module = family_module,
+            }));
+        }
+    }
+
+    const pin_text = b.build_root.handle.readFileAlloc(b.graph.io, "third_party/xnnpack/pin.zon", b.allocator, .limited(4096)) catch @panic("xnnpack pin unreadable");
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(pin_text, &digest, .{});
+    var id_source: std.ArrayList(u8) = .empty;
+    id_source.appendSlice(b.allocator,
+        \\#include <stdbool.h>
+        \\#include <stdint.h>
+        \\#include <stddef.h>
+        \\#include <string.h>
+        \\
+        \\static const uint8_t xnn_build_identifier[] = {
+        \\
+    ) catch @panic("oom");
+    for (digest, 0..) |byte, index| {
+        id_source.appendSlice(b.allocator, b.fmt("{s}{d},", .{ if (index == 0) "  " else " ", byte })) catch @panic("oom");
+    }
+    id_source.appendSlice(b.allocator,
+        \\
+        \\};
+        \\
+        \\size_t xnn_experimental_get_build_identifier_size(void) {
+        \\  return sizeof(xnn_build_identifier);
+        \\}
+        \\
+        \\const void* xnn_experimental_get_build_identifier_data(void) {
+        \\  return xnn_build_identifier;
+        \\}
+        \\
+        \\bool xnn_experimental_check_build_identifier(const void* data, const size_t size) {
+        \\  if (size != xnn_experimental_get_build_identifier_size()) {
+        \\    return false;
+        \\  }
+        \\  return !memcmp(data, xnn_build_identifier, size);
+        \\}
+        \\
+    ) catch @panic("oom");
+    const identifier_file = b.addWriteFiles().add("xnnpack_build_identifier.c", id_source.items);
+    module.addCSourceFile(.{ .file = identifier_file, .flags = &c_flags });
+
+    return b.addLibrary(.{ .name = "xnnpack", .linkage = .static, .root_module = module });
 }
 
 fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
