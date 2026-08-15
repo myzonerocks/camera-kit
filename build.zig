@@ -167,40 +167,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const bundle_module = b.createModule(.{
-        .root_source_file = b.path("core/tracking/bundle.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const detector_module = b.createModule(.{
-        .root_source_file = b.path("core/tracking/detector.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const sampler_module = b.createModule(.{
-        .root_source_file = b.path("core/tracking/sampler.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{.{ .name = "math", .module = math_module }},
-    });
-    const face_module = b.createModule(.{
-        .root_source_file = b.path("core/tracking/face.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "sampler", .module = sampler_module },
-            .{ .name = "detector", .module = detector_module },
-        },
-    });
-    const tracker_module = b.createModule(.{
-        .root_source_file = b.path("core/tracking/tracker.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "sampler", .module = sampler_module },
-            .{ .name = "face", .module = face_module },
-        },
-    });
+    const tracking_cores = trackingCoreModules(b, target, optimize, math_module);
+    const bundle_module = tracking_cores.bundle;
+    const detector_module = tracking_cores.detector;
+    const sampler_module = tracking_cores.sampler;
+    const face_module = tracking_cores.face;
+    const tracker_module = tracking_cores.tracker;
+    abi_module.addImport("face", face_module);
+    abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
@@ -308,6 +282,35 @@ pub fn build(b: *std.Build) void {
         });
         runtime_module.link_libc = true;
         runtime_module.addIncludePath(b.path(".vendor/litert"));
+        // The export layer instance under real tracking: the harness drives
+        // the same ck_ surface a shell uses, worker thread and all.
+        const tracking_real_module = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/tracking.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = bundle_module },
+                .{ .name = "runtime", .module = runtime_module },
+                .{ .name = "detector", .module = detector_module },
+                .{ .name = "sampler", .module = sampler_module },
+                .{ .name = "face", .module = face_module },
+                .{ .name = "tracker", .module = tracker_module },
+                .{ .name = "graph", .module = graph_module },
+                .{ .name = "math", .module = math_module },
+            },
+        });
+        const abi_tracking_module = b.createModule(.{
+            .root_source_file = b.path("core/abi/abi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "graph", .module = graph_module },
+                .{ .name = "math", .module = math_module },
+                .{ .name = "render", .module = render_stub_module },
+                .{ .name = "face", .module = face_module },
+                .{ .name = "tracking", .module = tracking_real_module },
+            },
+        });
         const tracking_module = b.createModule(.{
             .root_source_file = b.path("harness/tracking.zig"),
             .target = target,
@@ -319,6 +322,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sampler", .module = sampler_module },
                 .{ .name = "face", .module = face_module },
                 .{ .name = "tracker", .module = tracker_module },
+                .{ .name = "math", .module = math_module },
+                .{ .name = "abi", .module = abi_tracking_module },
             },
         });
         tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?));
@@ -367,6 +372,9 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "render", .module = render_wasm },
             },
         });
+        const tracking_cores_wasm = trackingCoreModules(b, wasm_target, .ReleaseSmall, math_wasm);
+        abi_wasm.addImport("face", tracking_cores_wasm.face);
+        abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, math_wasm));
         const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
         camerakit_wasm.entry = .disabled;
         camerakit_wasm.rdynamic = true;
@@ -480,6 +488,9 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .{ .name = "render", .module = render_android },
         },
     });
+    const tracking_cores_android = trackingCoreModules(b, android_target, optimize, math_android);
+    abi_android.addImport("face", tracking_cores_android.face);
+    abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
     const jni_module = b.createModule(.{
         .root_source_file = b.path("adapters/android/jni.zig"),
         .target = android_target,
@@ -517,6 +528,72 @@ fn buildBgfxAndroid(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
 // The schema compiler from the pinned flatbuffers tree, built for the host
 // to generate the inference runtime's schema headers at build time.
+const TrackingCoreModules = struct {
+    bundle: *std.Build.Module,
+    detector: *std.Build.Module,
+    sampler: *std.Build.Module,
+    face: *std.Build.Module,
+    tracker: *std.Build.Module,
+};
+
+// The pure tracking core for one target: geometry, decode, and sampling
+// shared by the worker, the harness, and the export layer.
+fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_module: *std.Build.Module) TrackingCoreModules {
+    const bundle_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/bundle.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const detector_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/detector.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const sampler_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/sampler.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_module }},
+    });
+    const face_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/face.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_module },
+            .{ .name = "detector", .module = detector_module },
+        },
+    });
+    const tracker_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/tracker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_module },
+            .{ .name = "face", .module = face_module },
+        },
+    });
+    return .{
+        .bundle = bundle_module,
+        .detector = detector_module,
+        .sampler = sampler_module,
+        .face = face_module,
+        .tracker = tracker_module,
+    };
+}
+
+fn trackingStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, face_module: *std.Build.Module, math_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/tracking_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "face", .module = face_module },
+            .{ .name = "math", .module = math_module },
+        },
+    });
+}
+
 fn listFilesRecursive(b: *std.Build, dir_path: []const u8, suffix: []const u8, exclude: []const []const u8, out: *std.ArrayList([]const u8)) void {
     var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
     defer dir.close(b.graph.io);
@@ -1245,6 +1322,9 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             .{ .name = "render", .module = render_ios },
         },
     });
+    const tracking_cores_ios = trackingCoreModules(b, ios_target, optimize, math_ios);
+    abi_ios.addImport("face", tracking_cores_ios.face);
+    abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
     const camerakit_ios = b.addLibrary(.{
         .name = "camerakit",
         .linkage = .static,

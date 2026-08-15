@@ -1,4 +1,4 @@
-abi 0.3
+abi 0.4
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -26,6 +26,13 @@ type abi.FramePlanes size=32 align=8
   field plane_count offset=0 size=4
   field reserved offset=4 size=4
   field planes offset=8 size=24
+type face.Result size=5968 align=8
+  field frame_serial offset=0 size=8
+  field timestamp_us offset=8 size=8
+  field presence offset=16 size=4
+  field landmark_count_out offset=20 size=4
+  field landmarks offset=24 size=5736
+  field blendshapes offset=5760 size=208
 fn uint32_t ck_abi_version(void)
 fn void *ck_alloc(size_t size)
 fn void ck_free(void *ptr, size_t size)
@@ -42,3 +49,7 @@ fn ck_status ck_session_submit_frame_copy(ck_session *session, const ck_frame_de
 fn ck_degrade_level ck_session_report_frame(ck_session *session, uint32_t frame_time_us, ck_thermal thermal)
 fn ck_degrade_level ck_session_degrade_level(const ck_session *session)
 fn ck_status ck_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix)
+fn ck_status ck_session_enable_face_tracking(ck_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)
+fn void ck_session_disable_face_tracking(ck_session *session)
+fn ck_status ck_session_track_frame(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)
+fn ck_status ck_session_face_result(ck_session *session, ck_face_result *out_result)

@@ -10,9 +10,29 @@ const sampler = @import("sampler");
 const detector = @import("detector");
 
 pub const landmark_count = 478;
+pub const blendshape_count = 52;
 pub const region_scale = 1.5;
 
 pub const Landmark = struct { x: f32, y: f32, z: f32 };
+
+/// One published tracking result, the shape that crosses the C boundary.
+/// Landmarks are x, y in frame pixels and z in the same scale; a zero
+/// landmark count means the frame held no face. The layout is frozen.
+pub const Result = extern struct {
+    frame_serial: u64,
+    timestamp_us: i64,
+    presence: f32,
+    landmark_count_out: u32,
+    landmarks: [landmark_count * 3]f32,
+    blendshapes: [blendshape_count]f32,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(Result) == 5968);
+    std.debug.assert(@offsetOf(Result, "presence") == 16);
+    std.debug.assert(@offsetOf(Result, "landmarks") == 24);
+    std.debug.assert(@offsetOf(Result, "blendshapes") == 24 + landmark_count * 3 * 4);
+}
 
 /// Indices of the landmarks the blendshape model consumes, in its input
 /// order. The subset is part of the model's contract, fixed at training.

@@ -13,9 +13,13 @@ const builtin = @import("builtin");
 const graph = @import("graph");
 const math = @import("math");
 const render = @import("render");
+const tracking = @import("tracking");
+const face = @import("face");
+
+pub const FaceResult = face.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 3;
+pub const abi_minor: u16 = 4;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -31,6 +35,8 @@ pub const Status = enum(c_int) {
     pool_exhausted = 3,
     abi_mismatch = 4,
     renderer_unavailable = 5,
+    unsupported = 6,
+    again = 7,
 };
 
 pub const FrameDesc = extern struct {
@@ -118,6 +124,7 @@ pub const Session = struct {
     controller: graph.DegradeController,
     current: ?CurrentFrame = null,
     copied_frames: u64 = 0,
+    face_tracking: ?*tracking.Tracking = null,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -161,6 +168,8 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
 }
 
 pub fn destroySession(session: *Session) void {
+    if (session.face_tracking) |worker| tracking.destroy(worker);
+    session.face_tracking = null;
     releaseCurrentFrame(session);
     session.engine.gpa.destroy(session);
 }
@@ -404,6 +413,71 @@ pub export fn ck_session_degrade_level(session: ?*const Session) c_int {
     return @intFromEnum(s.controller.level);
 }
 
+/// Stands the face tracking worker up from a model bundle. The bundle
+/// bytes are copied; the caller may release them on return. On platforms
+/// built without the inference stack this reports unsupported.
+pub export fn ck_session_enable_face_tracking(session: ?*Session, task_bytes: ?[*]const u8, task_len: usize, threads: i32) Status {
+    const s = session orelse return .invalid_argument;
+    const bytes = task_bytes orelse return .invalid_argument;
+    if (task_len == 0) return .invalid_argument;
+    if (s.face_tracking != null) return .ok;
+    const worker_threads = if (threads <= 0) 2 else threads;
+    s.face_tracking = tracking.create(s.engine.gpa, bytes[0..task_len], worker_threads) catch |err| switch (err) {
+        error.Unsupported => return .unsupported,
+        error.InvalidBundle => return .invalid_argument,
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn ck_session_disable_face_tracking(session: ?*Session) void {
+    const s = session orelse return;
+    if (s.face_tracking) |worker| tracking.destroy(worker);
+    s.face_tracking = null;
+}
+
+/// Feeds one NV12 frame to the tracking worker. The planes are CPU
+/// addresses valid for the duration of the call; the worker copies and
+/// returns immediately, dropping stale frames in favor of this one.
+pub export fn ck_session_track_frame(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const y_plane = y orelse return .invalid_argument;
+    const uv_plane = uv orelse return .invalid_argument;
+    const worker = s.face_tracking orelse return .again;
+    if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
+    if (d.width == 0 or d.height == 0) return .invalid_argument;
+    if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
+    const standard: math.color.Standard = switch (d.color_standard) {
+        0 => .bt601,
+        2 => .bt2020,
+        else => .bt709,
+    };
+    const range: math.color.Range = if (d.color_range == 1) .full else .video;
+    tracking.submitNv12(
+        worker,
+        d.width,
+        d.height,
+        d.timestamp_us,
+        math.color.yuvToRgb(standard, range),
+        y_plane,
+        y_stride,
+        uv_plane,
+        uv_stride,
+    );
+    return .ok;
+}
+
+/// Reads the newest tracking result into caller memory. Reports again
+/// until the worker has published its first result.
+pub export fn ck_session_face_result(session: ?*Session, out_result: ?*face.Result) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_result orelse return .invalid_argument;
+    const worker = s.face_tracking orelse return .again;
+    if (!tracking.readResult(worker, out)) return .again;
+    return .ok;
+}
+
 const t = std.testing;
 
 test "alloc and free round-trip through the abi allocator" {
@@ -489,4 +563,21 @@ test "rotation and mirror decode from the flags field" {
     const flags: u32 = frame_flag_mirror | (3 << frame_rotation_shift);
     try t.expectEqual(@as(u32, 3), (flags & frame_rotation_mask) >> frame_rotation_shift);
     try t.expect(flags & frame_flag_mirror != 0);
+}
+
+test "face tracking on a build without the inference stack refuses" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const bytes = [_]u8{ 1, 2, 3 };
+    try t.expectEqual(Status.unsupported, ck_session_enable_face_tracking(session, &bytes, bytes.len, 0));
+    var result: FaceResult = undefined;
+    try t.expectEqual(Status.again, ck_session_face_result(session, &result));
+    const desc: FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 0, .color_standard = 0, .color_range = 0, .flags = 0, .timestamp_us = 0 };
+    const planes = [_]u8{0} ** 8;
+    try t.expectEqual(Status.again, ck_session_track_frame(session, &desc, &planes, 2, &planes, 2));
+    ck_session_disable_face_tracking(session);
+    try t.expectEqual(Status.invalid_argument, ck_session_face_result(session, null));
 }

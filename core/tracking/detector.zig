@@ -50,6 +50,22 @@ pub fn generateAnchors(input_size: u32, layers: []const Layer, out: []Anchor) vo
     std.debug.assert(at == out.len);
 }
 
+pub const short_range_layers = [_]Layer{ .{ .stride = 8, .anchors_per_cell = 2 }, .{ .stride = 16, .anchors_per_cell = 6 } };
+pub const full_range_layers = [_]Layer{.{ .stride = 4, .anchors_per_cell = 1 }};
+
+/// Picks the stride plan matching a model's own anchor count, verified
+/// against its input size. The model decides; a mismatch is a wiring
+/// defect the caller must refuse to run with.
+pub fn planForModel(input_size: u32, anchor_total: usize) ?[]const Layer {
+    const plan: []const Layer = switch (anchor_total) {
+        896 => &short_range_layers,
+        2304 => &full_range_layers,
+        else => return null,
+    };
+    if (anchorCount(input_size, plan) != anchor_total) return null;
+    return plan;
+}
+
 pub const Detection = struct {
     score: f32,
     /// Box center and size, normalized to the model input square.
@@ -197,12 +213,16 @@ fn mergeOverlapping(candidates: []Detection) []Detection {
 
 const t = std.testing;
 
-const short_range_layers = [_]Layer{ .{ .stride = 8, .anchors_per_cell = 2 }, .{ .stride = 16, .anchors_per_cell = 6 } };
-const full_range_layers = [_]Layer{.{ .stride = 4, .anchors_per_cell = 1 }};
-
 test "anchor plans produce the model's anchor counts" {
     try t.expectEqual(@as(usize, 896), anchorCount(128, &short_range_layers));
     try t.expectEqual(@as(usize, 2304), anchorCount(192, &full_range_layers));
+}
+
+test "plan selection follows the model's anchor total" {
+    try t.expectEqual(@as(?[]const Layer, &short_range_layers), planForModel(128, 896));
+    try t.expectEqual(@as(?[]const Layer, &full_range_layers), planForModel(192, 2304));
+    try t.expectEqual(@as(?[]const Layer, null), planForModel(128, 2304));
+    try t.expectEqual(@as(?[]const Layer, null), planForModel(128, 1000));
 }
 
 test "anchors cover the unit square from the first cell center" {

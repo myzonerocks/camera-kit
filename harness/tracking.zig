@@ -14,9 +14,78 @@ const sampler = @import("sampler");
 const face = @import("face");
 const tracker = @import("tracker");
 
+const abi = @import("abi");
+const math = @import("math");
+
 const stb = @cImport(@cInclude("stb_image.h"));
 
 var harness_io: std.Io = undefined;
+
+const Nv12Copy = struct {
+    y: []u8,
+    uv: []u8,
+    width: u32,
+    height: u32,
+
+    fn deinit(copy: Nv12Copy, gpa: std.mem.Allocator) void {
+        gpa.free(copy.y);
+        gpa.free(copy.uv);
+    }
+};
+
+/// Converts a decoded RGBA frame to NV12 exactly the way a camera would
+/// deliver it: full range, the classic standard, chroma averaged 2x2.
+fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
+    const bytes = frame.pixels.rgba8;
+    const conversion = math.color.rgbToYuv(.bt601, .full);
+    const width = frame.width;
+    const height = frame.height;
+    const half_width = (width + 1) / 2;
+    const half_height = (height + 1) / 2;
+    const y_plane = try gpa.alloc(u8, @as(usize, width) * height);
+    errdefer gpa.free(y_plane);
+    const uv_plane = try gpa.alloc(u8, @as(usize, half_width) * half_height * 2);
+    errdefer gpa.free(uv_plane);
+
+    for (0..height) |row| {
+        for (0..width) |column| {
+            const at = (row * width + column) * 4;
+            const yuv = conversion.apply(.{
+                @as(f32, @floatFromInt(bytes[at])) / 255.0,
+                @as(f32, @floatFromInt(bytes[at + 1])) / 255.0,
+                @as(f32, @floatFromInt(bytes[at + 2])) / 255.0,
+            });
+            y_plane[row * width + column] = @intFromFloat(std.math.clamp(yuv[0], 0.0, 1.0) * 255.0);
+        }
+    }
+    for (0..half_height) |row| {
+        for (0..half_width) |column| {
+            var cb: f32 = 0;
+            var cr: f32 = 0;
+            var samples: f32 = 0;
+            for (0..2) |dy| {
+                for (0..2) |dx| {
+                    const source_y = row * 2 + dy;
+                    const source_x = column * 2 + dx;
+                    if (source_y >= height or source_x >= width) continue;
+                    const at = (source_y * width + source_x) * 4;
+                    const yuv = conversion.apply(.{
+                        @as(f32, @floatFromInt(bytes[at])) / 255.0,
+                        @as(f32, @floatFromInt(bytes[at + 1])) / 255.0,
+                        @as(f32, @floatFromInt(bytes[at + 2])) / 255.0,
+                    });
+                    cb += yuv[1];
+                    cr += yuv[2];
+                    samples += 1;
+                }
+            }
+            const at = (row * half_width + column) * 2;
+            uv_plane[at] = @intFromFloat(std.math.clamp(cb / samples, 0.0, 1.0) * 255.0);
+            uv_plane[at + 1] = @intFromFloat(std.math.clamp(cr / samples, 0.0, 1.0) * 255.0);
+        }
+    }
+    return .{ .y = y_plane, .uv = uv_plane, .width = width, .height = height };
+}
 
 const CorpusFrame = struct {
     frame: sampler.Frame,
@@ -285,6 +354,59 @@ pub fn main(init_args: std.process.Init) !u8 {
         try out.flush();
         if (tracked_presence < tracker.presence_floor) return 1;
         if (gap_drift > 0.1) return 1;
+    }
+
+    // The same portrait through the public surface: session, worker
+    // thread, NV12 planes, polled result. This is the path a shell runs.
+    {
+        const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+        defer abi.destroyEngine(engine);
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+
+        const enable = abi.ck_session_enable_face_tracking(session, task_bytes.ptr, task_bytes.len, 2);
+        if (enable != .ok) {
+            try out.print("abi enable face tracking: {s}\n", .{@tagName(enable)});
+            try out.flush();
+            return 1;
+        }
+
+        const corpus = try loadCorpusFrame(gpa, ".models/corpus/face_frontal_b.jpg");
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = 1000,
+        };
+        const feed = abi.ck_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2);
+        if (feed != .ok) return 1;
+
+        var result: face.Result = undefined;
+        var polls: usize = 0;
+        while (abi.ck_session_face_result(session, &result) == .again) {
+            std.Thread.yield() catch {};
+            polls += 1;
+            if (polls > 100_000_000) {
+                try out.print("abi result: timed out\n", .{});
+                try out.flush();
+                return 1;
+            }
+        }
+        try out.print(
+            "abi surface: serial {d}, presence {d:.3}, landmarks {d}, timestamp {d}\n",
+            .{ result.frame_serial, result.presence, result.landmark_count_out, result.timestamp_us },
+        );
+        try out.flush();
+        if (result.presence < 0.5) return 1;
+        if (result.landmark_count_out != face.landmark_count) return 1;
+        if (result.timestamp_us != 1000) return 1;
     }
 
     try out.print("tracking harness: corpus clean through detect, landmarks, blendshapes\n", .{});

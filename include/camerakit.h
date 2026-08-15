@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define CK_ABI_MAJOR 0u
-#define CK_ABI_MINOR 3u
+#define CK_ABI_MINOR 4u
 #define CK_ABI_VERSION ((CK_ABI_MAJOR << 16) | CK_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against CK_ABI_MAJOR. */
@@ -52,6 +52,8 @@ typedef enum ck_status {
     CK_ERROR_POOL_EXHAUSTED = 3,
     CK_ERROR_ABI_MISMATCH = 4,
     CK_ERROR_RENDERER_UNAVAILABLE = 5,
+    CK_ERROR_UNSUPPORTED = 6,
+    CK_AGAIN = 7,
 } ck_status;
 
 typedef struct ck_engine ck_engine;
@@ -145,6 +147,21 @@ typedef struct ck_landmarks {
     int64_t timestamp_us;
 } ck_landmarks;
 
+/* One face tracking result. Landmarks are x, y in frame pixels with z in
+ * the same scale, three floats per point; a zero landmark_count means the
+ * frame held no face. blendshapes are 52 scores in zero to one. Layout:
+ * 5968 bytes, static-asserted below. */
+#define CK_FACE_LANDMARK_COUNT 478u
+#define CK_FACE_BLENDSHAPE_COUNT 52u
+typedef struct ck_face_result {
+    uint64_t frame_serial;
+    int64_t timestamp_us;
+    float presence;
+    uint32_t landmark_count;
+    float landmarks[CK_FACE_LANDMARK_COUNT * 3];
+    float blendshapes[CK_FACE_BLENDSHAPE_COUNT];
+} ck_face_result;
+
 /* Bounds for the engine's frame-path pools. Zero means the built-in
  * default. Layout: 8 bytes. */
 typedef struct ck_engine_config {
@@ -211,6 +228,8 @@ _Static_assert(sizeof(ck_frame_desc) == 32, "ck_frame_desc layout is frozen");
 _Static_assert(sizeof(ck_landmarks) == 24, "ck_landmarks layout is frozen");
 _Static_assert(sizeof(ck_engine_config) == 8, "ck_engine_config layout is frozen");
 _Static_assert(sizeof(ck_session_config) == 8, "ck_session_config layout is frozen");
+_Static_assert(sizeof(ck_face_result) == 5968, "ck_face_result layout is frozen");
+_Static_assert(offsetof(ck_face_result, landmarks) == 24, "ck_face_result layout is frozen");
 _Static_assert(sizeof(ck_renderer_desc) == (sizeof(void *) == 8 ? 16 : 12), "ck_renderer_desc layout is frozen");
 _Static_assert(sizeof(ck_frame_planes) == 32, "ck_frame_planes layout is frozen");
 #endif
