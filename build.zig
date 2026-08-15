@@ -346,6 +346,57 @@ pub fn build(b: *std.Build) void {
     } else {
         tracking_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
     }
+
+    // The web tracking module: the same pipeline compiled to a wasi module
+    // the ts shell runs inside a worker, synchronous per frame.
+    const tracking_wasm_step = b.step("tracking-wasm", "Build the web tracking module (wasm32-wasi)");
+    if (have_inference_stack and flatc_exe != null) {
+        // The pinned build enables both simd sets globally for wasm, and the
+        // kernel configs select at compile time accordingly.
+        const wasi_target = b.resolveTargetQuery(.{
+            .cpu_arch = .wasm32,
+            .os_tag = .wasi,
+            .cpu_features_add = std.Target.wasm.featureSet(&.{ .simd128, .relaxed_simd }),
+        });
+        const wasi_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+        const cores_wasi = trackingCoreModules(b, wasi_target, wasi_optimize, b.createModule(.{
+            .root_source_file = b.path("core/math/math.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+        }));
+        const runtime_wasi = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/runtime.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+        });
+        runtime_wasi.link_libc = true;
+        runtime_wasi.addIncludePath(b.path(".vendor/litert"));
+        const exports_wasi = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/wasm_exports.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = cores_wasi.bundle },
+                .{ .name = "runtime", .module = runtime_wasi },
+                .{ .name = "detector", .module = cores_wasi.detector },
+                .{ .name = "sampler", .module = cores_wasi.sampler },
+                .{ .name = "face", .module = cores_wasi.face },
+                .{ .name = "tracker", .module = cores_wasi.tracker },
+            },
+        });
+        exports_wasi.linkLibrary(buildTfliteLib(b, wasi_target, wasi_optimize, flatc_exe.?, null));
+        exports_wasi.linkLibrary(buildXnnpackLib(b, wasi_target, wasi_optimize, null, null));
+        exports_wasi.linkLibrary(buildAbseilLib(b, wasi_target, wasi_optimize, null));
+        exports_wasi.linkLibrary(buildFarmhashLib(b, wasi_target, wasi_optimize, null));
+        exports_wasi.linkLibrary(buildFft2dLib(b, wasi_target, wasi_optimize, null));
+        exports_wasi.linkLibrary(buildPthreadpoolLib(b, wasi_target, wasi_optimize, null));
+        const tracking_wasm = b.addExecutable(.{ .name = "camerakit_tracking", .root_module = exports_wasi });
+        tracking_wasm.entry = .disabled;
+        tracking_wasm.rdynamic = true;
+        tracking_wasm_step.dependOn(&b.addInstallArtifact(tracking_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
+    } else {
+        tracking_wasm_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
+    }
     addIosStep(b, optimize, shaderc_exe, flatc_exe);
     addAndroidStep(b, optimize, shaderc_exe, flatc_exe);
 
@@ -668,26 +719,44 @@ fn listFilesRecursive(b: *std.Build, dir_path: []const u8, suffix: []const u8, e
 
 // Abseil from the pinned tree: every runtime library source, tests and
 // tooling excluded, one static archive.
+fn immintrinPath(b: *std.Build) []const u8 {
+    const lib_dir = b.graph.zig_lib_directory.path orelse ".";
+    return b.pathJoin(&.{ lib_dir, "include", "immintrin.h" });
+}
+
 fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libcpp = true;
     if (target.result.abi.isAndroid()) module.pic = true;
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    if (target.result.cpu.arch.isWasm()) module.addIncludePath(b.path("adapters/tracking/wasi_std"));
     module.addIncludePath(b.path(".vendor/abseil"));
     var sources: std.ArrayList([]const u8) = .empty;
-    listFilesRecursive(b, ".vendor/abseil/absl", ".cc", &.{
+    var absl_excludes: std.ArrayList([]const u8) = .empty;
+    absl_excludes.appendSlice(b.allocator, &.{
         "_test", "test_", "_benchmark", "benchmark", "_mock", "mock_", "matchers",
         "test_util", "print_hash_of", "gaussian_distribution_gentables", "pool_urbg_gentables",
         "_win.cc", "_emscripten.cc",
-    }, &sources);
+    }) catch @panic("oom");
+    // No signals to install a handler for on the web target.
+    if (target.result.cpu.arch.isWasm()) {
+        absl_excludes.append(b.allocator, "failure_signal_handler.cc") catch @panic("oom");
+    }
+    listFilesRecursive(b, ".vendor/abseil/absl", ".cc", absl_excludes.items, &sources);
     std.mem.sort([]const u8, sources.items, {}, struct {
         fn lessThan(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.lessThan(u8, x, y);
         }
     }.lessThan);
-    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    var flags: std.ArrayList([]const u8) = .empty;
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    // The container internals include the bmi2 intrinsics header directly,
+    // which this compiler only accepts by way of immintrin.
+    if (target.result.cpu.arch == .x86_64) {
+        flags.appendSlice(b.allocator, &.{ "-include", immintrinPath(b) }) catch @panic("oom");
+    }
     for (sources.items) |file| {
-        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+        module.addCSourceFile(.{ .file = b.path(file), .flags = flags.items });
     }
     const lib = b.addLibrary(.{ .name = "absl", .linkage = .static, .root_module = module });
     if (libc) |file| lib.setLibCFile(file);
@@ -763,7 +832,11 @@ fn buildPthreadpoolLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     module.addIncludePath(b.path(".vendor/pthreadpool/src"));
     module.addIncludePath(b.path(".vendor/fxdiv/include"));
     const flags = [_][]const u8{ "-std=gnu11", "-fno-sanitize=undefined", "-w", "-DPTHREADPOOL_USE_GCD=0", "-DPTHREADPOOL_USE_EVENT=0", "-DPTHREADPOOL_USE_FUTEX=0" };
-    for ([_][]const u8{ "legacy-api.c", "portable-api.c", "memory.c", "pthreads.c" }) |file| {
+    const sources: []const []const u8 = if (target.result.cpu.arch.isWasm())
+        &.{ "legacy-api.c", "shim.c" }
+    else
+        &.{ "legacy-api.c", "portable-api.c", "memory.c", "pthreads.c" };
+    for (sources) |file| {
         module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/pthreadpool/src/{s}", .{file})), .flags = &flags });
     }
     const lib = b.addLibrary(.{ .name = "pthreadpool", .linkage = .static, .root_module = module });
@@ -844,6 +917,7 @@ const XnnpackFamily = struct {
     list: []const u8,
     variable: []const u8,
     features: std.Target.Cpu.Feature.Set = std.Target.Cpu.Feature.Set.empty,
+    exclude_contains: []const []const u8 = &.{},
 };
 
 // Production microkernel families per processor, each with the cpu features
@@ -888,6 +962,15 @@ const xnnpack_x86_64_families = [_]XnnpackFamily{
     .{ .list = "avx512skx_microkernels.cmake", .variable = "PROD_AVX512SKX_MICROKERNEL_SRCS", .features = x86_feature(&x86_avx512_base) },
     .{ .list = "avx512vbmi_microkernels.cmake", .variable = "PROD_AVX512VBMI_MICROKERNEL_SRCS", .features = x86_feature(&(x86_avx512_base ++ [_]std.Target.x86.Feature{.avx512vbmi})) },
     .{ .list = "avx512vnni_microkernels.cmake", .variable = "PROD_AVX512VNNI_MICROKERNEL_SRCS", .features = x86_feature(&(x86_avx512_base ++ [_]std.Target.x86.Feature{.avx512vnni})) },
+};
+
+const wasm_feature = std.Target.wasm.featureSet;
+const xnnpack_wasm_families = [_]XnnpackFamily{
+    .{ .list = "scalar_microkernels.cmake", .variable = "PROD_SCALAR_MICROKERNEL_SRCS" },
+    .{ .list = "wasmsimd_microkernels.cmake", .variable = "PROD_WASMSIMD_MICROKERNEL_SRCS", .features = wasm_feature(&.{.simd128}) },
+    // The half precision kernels use instructions browsers do not validate
+    // yet; the config never selects them while their toggle is off.
+    .{ .list = "wasmrelaxedsimd_microkernels.cmake", .variable = "PROD_WASMRELAXEDSIMD_MICROKERNEL_SRCS", .features = wasm_feature(&.{ .simd128, .relaxed_simd }), .exclude_contains = &.{"f16"} },
 };
 
 // The inference runtime's cpu backend as one static archive: the shared
@@ -949,7 +1032,7 @@ fn xnnpackConfigureModule(b: *std.Build, module: *std.Build.Module, target: std.
         .{ .name = "XNN_ENABLE_RNDNU16", .on = false },
         .{ .name = "XNN_ENABLE_KLEIDIAI", .on = false },
         .{ .name = "XNN_ENABLE_WASM_REVECTORIZE", .on = false },
-        .{ .name = "XNN_ENABLE_CPUINFO", .on = true },
+        .{ .name = "XNN_ENABLE_CPUINFO", .on = !arch.isWasm() },
         .{ .name = "XNN_LOG_LEVEL", .on = false },
     };
     for (toggles) |toggle| {
@@ -994,7 +1077,12 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     if (is_x86) {
         micro_c_flags.appendSlice(b.allocator, &.{ "-mstack-alignment=64", "-fomit-frame-pointer", "-mstackrealign" }) catch @panic("oom");
     }
-    const families: []const XnnpackFamily = if (is_arm) &xnnpack_aarch64_families else &xnnpack_x86_64_families;
+    const families: []const XnnpackFamily = if (is_arm)
+        &xnnpack_aarch64_families
+    else if (target.result.cpu.arch.isWasm())
+        &xnnpack_wasm_families
+    else
+        &xnnpack_x86_64_families;
     for (families) |family| {
         const wants_features = !family.features.eql(std.Target.Cpu.Feature.Set.empty);
         const family_module = if (wants_features) blk: {
@@ -1009,8 +1097,11 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         var sources: std.ArrayList([]const u8) = .empty;
         cmakeSourceList(b, ".vendor/xnnpack", b.fmt(".vendor/xnnpack/cmake/gen/{s}", .{family.list}), family.variable, &sources);
         var added = false;
-        for (sources.items) |file| {
+        family_files: for (sources.items) |file| {
             if ((seen.getOrPut(file) catch @panic("oom")).found_existing) continue;
+            for (family.exclude_contains) |pattern| {
+                if (std.mem.indexOf(u8, file, pattern) != null) continue :family_files;
+            }
             // Assembly runs through the integrated assembler, which takes
             // its instruction set from the architecture flag, not from the
             // module's cpu features.
@@ -1168,11 +1259,15 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     module.link_libcpp = true;
     if (target.result.abi.isAndroid()) module.pic = true;
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    // The single-thread standard thread surface: the wasi standard library
+    // omits these headers, and this module runs on one thread by design.
+    if (target.result.cpu.arch.isWasm()) module.addIncludePath(b.path("adapters/tracking/wasi_std"));
     for ([_][]const u8{
         ".vendor/litert",           ".vendor/tensorflow",          ".vendor/tensorflow/third_party/xla",
         ".vendor/flatbuffers/include",
         ".vendor/abseil",           ".vendor/eigen",               ".vendor/ruy",
         ".vendor/gemmlowp",         ".vendor/ml-dtypes",           ".vendor/farmhash/src",
+        ".vendor/neon2sse",
         ".vendor/cpuinfo/include",  ".vendor/pthreadpool/include", ".vendor/xnnpack",
         ".vendor/xnnpack/include",  ".vendor/fp16/include",
     }) |dir| {
@@ -1190,7 +1285,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     module.addIncludePath(generated.getDirectory());
 
     module.addCMacro("EIGEN_NEON_GEBP_NR", "4");
-    module.addCMacro("TFLITE_WITH_RUY", "1");
+    if (!target.result.cpu.arch.isWasm()) module.addCMacro("TFLITE_WITH_RUY", "1");
     module.addCMacro("TFLITE_KERNEL_USE_XNNPACK", "1");
     module.addCMacro("TFLITE_BUILD_WITH_XNNPACK_DELEGATE", "1");
     module.addCMacro("XNNPACK_DELEGATE_ENABLE_QS8", "1");
@@ -1234,7 +1329,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         "compiler/mlir/lite/core/api/flatbuffer_conversions.cc",
         "compiler/mlir/lite/core/model_builder_base.cc",
         "compiler/mlir/lite/experimental/remat/metadata_util.cc",
-        "compiler/mlir/lite/mmap_allocation.cc",
+        if (target.result.cpu.arch.isWasm()) "compiler/mlir/lite/mmap_allocation_disabled.cc" else "compiler/mlir/lite/mmap_allocation.cc",
         "compiler/mlir/lite/schema/schema_utils.cc",
         "compiler/mlir/lite/utils/string_utils.cc",
     }) |file| {
@@ -1246,9 +1341,13 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         }
     }.lessThan);
     const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
-    const cxx_flags = [_][]const u8{ "-std=c++20", "-fno-sanitize=undefined", "-w" };
+    var cxx_flags: std.ArrayList([]const u8) = .empty;
+    cxx_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    if (target.result.cpu.arch == .x86_64) {
+        cxx_flags.appendSlice(b.allocator, &.{ "-include", immintrinPath(b) }) catch @panic("oom");
+    }
     for (sources.items) |file| {
-        const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".c")) &c_flags else &cxx_flags;
+        const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".c")) &c_flags else cxx_flags.items;
         module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
     }
     if (os == .ios) {
