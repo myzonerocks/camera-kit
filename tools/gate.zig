@@ -49,7 +49,7 @@ const forbidden_extensions = [_][]const u8{
     ".zip",  ".tar",    ".tgz",    ".xz",   ".gz",
     ".7z",   ".a",      ".so",     ".dylib", ".dll",
     ".o",    ".jar",    ".aar",    ".apk",  ".ipa",
-    ".wasm", ".ptau",   ".pt",     ".h5",
+    ".wasm", ".ptau",   ".pt",     ".h5",   ".out",
 };
 
 // Ignored-by-design prefixes that are skipped before the foreign-layer check;
@@ -354,6 +354,7 @@ test "forbidden extensions catch artifact classes" {
     try std.testing.expectEqualStrings(".task", forbiddenExtension("face_landmarker.task").?);
     try std.testing.expectEqualStrings(".wasm", forbiddenExtension("shells/ts/core.wasm").?);
     try std.testing.expectEqualStrings(".a", forbiddenExtension("libfoo.a").?);
+    try std.testing.expectEqualStrings(".out", forbiddenExtension("a.out").?);
     try std.testing.expect(forbiddenExtension("core/math/mat4.zig") == null);
     try std.testing.expect(forbiddenExtension("include/camerakit.h") == null);
 }
