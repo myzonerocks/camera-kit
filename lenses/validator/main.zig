@@ -456,3 +456,148 @@ test "a fragment shader referencing an unknown symbol fails the shader-compile s
     }
     try t.expect(found);
 }
+
+/// Applies one small, random structural mutation to `base` - a bit flip,
+/// a byte inserted or deleted, a truncation, a chunk duplicated
+/// elsewhere in the string, or (occasionally) `base` ignored entirely in
+/// favor of pure random bytes. This is what turns a handful of seed
+/// corpus entries below into the thousands of malformed variations
+/// SPEC.md section 9 requires the validator survive.
+fn mutate(allocator: std.mem.Allocator, random: std.Random, base: []const u8) ![]u8 {
+    switch (random.uintLessThan(u8, 6)) {
+        0 => {
+            const out = try allocator.alloc(u8, random.uintLessThan(usize, 512));
+            random.bytes(out);
+            return out;
+        },
+        1 => {
+            if (base.len == 0) return allocator.dupe(u8, base);
+            return allocator.dupe(u8, base[0..random.uintLessThan(usize, base.len)]);
+        },
+        2 => {
+            const out = try allocator.dupe(u8, base);
+            if (out.len > 0) {
+                const idx = random.uintLessThan(usize, out.len);
+                const bit: u3 = @truncate(random.int(u8));
+                out[idx] ^= @as(u8, 1) << bit;
+            }
+            return out;
+        },
+        3 => {
+            const idx = if (base.len == 0) 0 else random.uintLessThan(usize, base.len + 1);
+            const out = try allocator.alloc(u8, base.len + 1);
+            @memcpy(out[0..idx], base[0..idx]);
+            out[idx] = random.int(u8);
+            @memcpy(out[idx + 1 ..], base[idx..]);
+            return out;
+        },
+        4 => {
+            if (base.len == 0) return allocator.dupe(u8, base);
+            const idx = random.uintLessThan(usize, base.len);
+            const out = try allocator.alloc(u8, base.len - 1);
+            @memcpy(out[0..idx], base[0..idx]);
+            @memcpy(out[idx..], base[idx + 1 ..]);
+            return out;
+        },
+        else => {
+            if (base.len == 0) return allocator.dupe(u8, base);
+            const a = random.uintLessThan(usize, base.len);
+            const b = a + random.uintLessThan(usize, base.len - a + 1);
+            const chunk = base[a..b];
+            const idx = random.uintLessThan(usize, base.len + 1);
+            const out = try allocator.alloc(u8, base.len + chunk.len);
+            @memcpy(out[0..idx], base[0..idx]);
+            @memcpy(out[idx..][0..chunk.len], chunk);
+            @memcpy(out[idx + chunk.len ..], base[idx..]);
+            return out;
+        },
+    }
+}
+
+const fuzz_seed_manifests = [_][]const u8{
+    minimal_valid_manifest,
+    "{}",
+    "",
+    "null",
+    "[]",
+    "\"just a string\"",
+    "{\"glf\": \"1.0\"}",
+    \\{"glf":"1.0","id":"x","version":"1","display_name":"x","engine_compat":">=0.5",
+    \\ "capabilities":["face"],"parameters":[{"name":"a","type":"float","default":0,"min":0,"max":1}],
+    \\ "nodes":[{"id":"n","type":"beauty.reshape","inputs":{"frame":"camera"},"params":{"x":"$a"}}],
+    \\ "triggers":[{"when":"face.present && tap","action":{"kind":"param_set","target":"a","to":1}}]}
+    ,
+};
+
+// SPEC.md section 9: the validator runs against a fuzz corpus of
+// malformed manifests in CI, and a fuzz-found crash or leak is a spec
+// violation of section 8's guarantee, not a lens-author error. Every
+// candidate is either rejected with diagnostics or returns a Manifest
+// this test immediately deinits - std.testing.allocator catches a leak
+// in either path at the end of the run, and a crash here fails the
+// whole test binary, which is the point.
+test "manifest.parse never crashes or leaks on malformed input (fuzz)" {
+    var prng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const random = prng.random();
+
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+
+    var i: usize = 0;
+    while (i < 4000) : (i += 1) {
+        _ = arena.reset(.retain_capacity);
+        const base = fuzz_seed_manifests[random.uintLessThan(usize, fuzz_seed_manifests.len)];
+        const candidate = try mutate(arena.allocator(), random, base);
+
+        var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+        var result = try manifest.parse(t.allocator, &diags, candidate);
+        if (result) |*lens| {
+            var mutable = lens.*;
+            mutable.deinit();
+        }
+    }
+}
+
+const fuzz_seed_shaders = [_][]const u8{
+    valid_fragment_shader,
+    broken_fragment_shader,
+    "",
+    "$input v_texcoord0",
+    "#include <bgfx_shader.sh>\nvoid main() {}",
+};
+
+// The shader-input half of SPEC.md section 9's fuzz corpus requirement.
+// Malformed source reaching a real compiler is expected to fail with
+// diagnostics, not to crash or hang our process - shaderc runs as a
+// child process specifically so a compiler crash on adversarial input
+// surfaces as a Term this test observes, never a signal our own
+// process receives. Kept to a smaller iteration count than the
+// manifest fuzzer since every case spawns real subprocesses.
+test "the shader-compile stage never crashes or leaks on malformed shader source (fuzz)" {
+    if (build_options.shaderc_path.len == 0) return error.SkipZigTest;
+
+    var prng = std.Random.DefaultPrng.init(0x5EED);
+    const random = prng.random();
+
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        var tmp = t.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = minimal_valid_manifest });
+        try tmp.dir.createDirPath(t.io, "shaders");
+
+        var mutate_arena = std.heap.ArenaAllocator.init(t.allocator);
+        defer mutate_arena.deinit();
+        const base = fuzz_seed_shaders[random.uintLessThan(usize, fuzz_seed_shaders.len)];
+        const candidate = try mutate(mutate_arena.allocator(), random, base);
+        try tmp.dir.writeFile(t.io, .{ .sub_path = "shaders/fs_fuzz.glsl", .data = candidate });
+
+        var path_buf: [64]u8 = undefined;
+        const bundle_path = tmpBundlePath(tmp, &path_buf);
+
+        var diag_arena = std.heap.ArenaAllocator.init(t.allocator);
+        defer diag_arena.deinit();
+        var diags = manifest.Diagnostics{ .arena = diag_arena.allocator() };
+        _ = try validateShaders(t.io, t.allocator, &diags, bundle_path);
+    }
+}
