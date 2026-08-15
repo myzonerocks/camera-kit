@@ -254,18 +254,70 @@ pub fn build(b: *std.Build) void {
     };
     const shaderc_exe = addShadercTool(b, optimize);
     const flatc_exe = addFlatcTool(b);
+    const have_inference_stack = blk: {
+        for ([_][]const u8{
+            ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt",
+            ".vendor/fft2d/fftsg2d.c",              ".vendor/abseil/absl/base/config.h",
+        }) |probe| {
+            b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
+        }
+        break :blk true;
+    };
     {
         const deps_step = b.step("inference-deps", "Build the inference runtime dependency libraries");
-        deps_step.dependOn(&b.addInstallArtifact(buildFft2dLib(b, target, optimize), .{}).step);
-        if (flatc_exe) |flatc| {
-            deps_step.dependOn(&b.addInstallArtifact(buildTfliteLib(b, target, optimize, flatc), .{}).step);
+        if (have_inference_stack) {
+            deps_step.dependOn(&b.addInstallArtifact(buildFft2dLib(b, target, optimize), .{}).step);
+            if (flatc_exe) |flatc| {
+                deps_step.dependOn(&b.addInstallArtifact(buildTfliteLib(b, target, optimize, flatc), .{}).step);
+            }
+            deps_step.dependOn(&b.addInstallArtifact(buildAbseilLib(b, target, optimize), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildCpuinfoLib(b, target, optimize), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildXnnpackLib(b, target, optimize), .{}).step);
+        } else {
+            deps_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
         }
-        deps_step.dependOn(&b.addInstallArtifact(buildAbseilLib(b, target, optimize), .{}).step);
-        deps_step.dependOn(&b.addInstallArtifact(buildCpuinfoLib(b, target, optimize), .{}).step);
-        deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize), .{}).step);
-        deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize), .{}).step);
-        deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize), .{}).step);
-        deps_step.dependOn(&b.addInstallArtifact(buildXnnpackLib(b, target, optimize), .{}).step);
+    }
+
+    // The tracking harness stands the face pipeline up on the host: model
+    // bundle in, engines interrogated, decode exercised end to end.
+    const tracking_step = b.step("tracking-harness", "Build and run the tracking harness (face pipeline on host)");
+    if (have_inference_stack and flatc_exe != null) {
+        const runtime_module = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/runtime.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        runtime_module.link_libc = true;
+        runtime_module.addIncludePath(b.path(".vendor/litert"));
+        const tracking_module = b.createModule(.{
+            .root_source_file = b.path("harness/tracking.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = bundle_module },
+                .{ .name = "runtime", .module = runtime_module },
+                .{ .name = "detector", .module = detector_module },
+                .{ .name = "sampler", .module = sampler_module },
+                .{ .name = "face", .module = face_module },
+            },
+        });
+        tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?));
+        tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize));
+        tracking_module.linkLibrary(buildAbseilLib(b, target, optimize));
+        tracking_module.linkLibrary(buildRuyLib(b, target, optimize));
+        tracking_module.linkLibrary(buildFarmhashLib(b, target, optimize));
+        tracking_module.linkLibrary(buildFft2dLib(b, target, optimize));
+        tracking_module.linkLibrary(buildCpuinfoLib(b, target, optimize));
+        tracking_module.linkLibrary(buildPthreadpoolLib(b, target, optimize));
+        const tracking_exe = b.addExecutable(.{ .name = "tracking_harness", .root_module = tracking_module });
+        const run_tracking = b.addRunArtifact(tracking_exe);
+        run_tracking.setCwd(b.path("."));
+        tracking_step.dependOn(&run_tracking.step);
+    } else {
+        tracking_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
     }
     addIosStep(b, optimize, shaderc_exe);
     addAndroidStep(b, optimize, shaderc_exe);
