@@ -173,6 +173,12 @@ pub fn build(b: *std.Build) void {
     const sampler_module = tracking_cores.sampler;
     const face_module = tracking_cores.face;
     const tracker_module = tracking_cores.tracker;
+    const face106_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/face106.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "face", .module = face_module }},
+    });
     abi_module.addImport("face", face_module);
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
 
@@ -182,6 +188,7 @@ pub fn build(b: *std.Build) void {
     const sampler_tests = b.addTest(.{ .root_module = sampler_module });
     const face_tests = b.addTest(.{ .root_module = face_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
+    const face106_tests = b.addTest(.{ .root_module = face106_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
@@ -197,6 +204,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(sampler_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
+    test_step.dependOn(&b.addRunArtifact(face106_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
