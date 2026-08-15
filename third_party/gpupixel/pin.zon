@@ -1,0 +1,10 @@
+.{
+    .name = "gpupixel",
+    .repo = "https://github.com/pixpark/gpupixel",
+    .version = "main 2026-02-13",
+    .commit = "fd596da4d50bc8035c32f0b400af70536dc59e4f",
+    .archive_sha256 = "780388eb17ec58bce290718b59b3689f0c8d5f95bd186ba2d74fefac23255c30",
+    .license = "Apache-2.0",
+    .license_file = "LICENSE",
+    .license_sha256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+}
