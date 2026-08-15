@@ -22,10 +22,52 @@ extern fn ck_beauty_create(resource_path: ?[*:0]const u8) ?*anyopaque;
 extern fn ck_beauty_destroy(handle: ?*anyopaque) void;
 extern fn ck_beauty_set(handle: ?*anyopaque, effect: i32, value: f32) void;
 extern fn ck_beauty_process(handle: ?*anyopaque, rgba_in: [*]const u8, width: i32, height: i32, landmarks106: ?[*]const f32, rgba_out: [*]u8) i32;
+extern fn ck_beauty_output_texture(handle: ?*anyopaque) u32;
+
+extern fn ck_beauty_interop_create() ?*anyopaque;
+extern fn ck_beauty_interop_destroy(handle: ?*anyopaque) void;
+extern fn ck_beauty_interop_composite(handle: ?*anyopaque, source_texture: u32, width: i32, height: i32) ?*anyopaque;
 
 pub const Beauty = struct {
     handle: *anyopaque,
 };
+
+/// The GPU-side bridge from the beauty chain's own output texture into a
+/// platform-shared surface bgfx reads zero-copy from, per
+/// docs/private/DECISIONS.md's 2026-08-15 entry. One instance per
+/// session; independent of Beauty itself since it owns platform surface
+/// state, not chain state.
+pub const Interop = struct {
+    handle: *anyopaque,
+};
+
+pub fn interopCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemory }!*Interop {
+    const handle = ck_beauty_interop_create() orelse return error.Unsupported;
+    const interop = gpa.create(Interop) catch {
+        ck_beauty_interop_destroy(handle);
+        return error.OutOfMemory;
+    };
+    interop.* = .{ .handle = handle };
+    return interop;
+}
+
+pub fn interopDestroy(gpa: std.mem.Allocator, interop: *Interop) void {
+    ck_beauty_interop_destroy(interop.handle);
+    gpa.destroy(interop);
+}
+
+/// Blits the beauty chain's most recent output into the shared surface
+/// and returns its native handle (a CVPixelBufferRef on Apple platforms),
+/// unretained - valid until the next composite call on this Interop or
+/// interopDestroy, never released by the caller. Call immediately after
+/// process() on the same thread: the blit reads whatever GL context is
+/// current rather than gpupixel's own (not exposed publicly), which is
+/// only correct while gpupixel's context is still the one bound here.
+pub fn composite(interop: *Interop, beauty: *Beauty, width: u32, height: u32) ?*anyopaque {
+    const texture = ck_beauty_output_texture(beauty.handle);
+    if (texture == 0) return null;
+    return ck_beauty_interop_composite(interop.handle, texture, @intCast(width), @intCast(height));
+}
 
 pub fn create(gpa: std.mem.Allocator, resource_path: [*:0]const u8) error{ Unsupported, OutOfMemory }!*Beauty {
     const handle = ck_beauty_create(resource_path) orelse return error.Unsupported;

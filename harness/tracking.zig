@@ -30,6 +30,19 @@ extern fn ck_beauty_create(resource_path: ?[*:0]const u8) ?*anyopaque;
 extern fn ck_beauty_destroy(handle: ?*anyopaque) void;
 extern fn ck_beauty_set(handle: ?*anyopaque, effect: i32, value: f32) void;
 extern fn ck_beauty_process(handle: ?*anyopaque, rgba_in: [*]const u8, width: i32, height: i32, landmarks106: ?[*]const f32, rgba_out: [*]u8) i32;
+extern fn ck_beauty_output_texture(handle: ?*anyopaque) u32;
+extern fn ck_beauty_interop_create() ?*anyopaque;
+extern fn ck_beauty_interop_destroy(handle: ?*anyopaque) void;
+extern fn ck_beauty_interop_composite(handle: ?*anyopaque, source_texture: u32, width: i32, height: i32) ?*anyopaque;
+
+// CoreVideo's C ABI, called directly rather than through an objc++ shim:
+// the harness only needs to read back what the GPU compositing path wrote,
+// the same read a real Metal consumer would do through CVMetalTextureCache
+// instead.
+extern fn CVPixelBufferLockBaseAddress(buffer: ?*anyopaque, flags: u64) i32;
+extern fn CVPixelBufferUnlockBaseAddress(buffer: ?*anyopaque, flags: u64) i32;
+extern fn CVPixelBufferGetBaseAddress(buffer: ?*anyopaque) ?[*]u8;
+extern fn CVPixelBufferGetBytesPerRow(buffer: ?*anyopaque) usize;
 
 var harness_io: std.Io = undefined;
 
@@ -519,6 +532,47 @@ pub fn main(init_args: std.process.Init) !u8 {
         try out.flush();
         if (identity_mean > 2.0) return 1;
         if (effect_mean <= identity_mean + 0.5) return 1;
+
+        // The GPU compositing bridge: out_b above is the same smooth+whiten
+        // frame read back through gpupixel's own CPU path; this blits the
+        // chain's live output texture into the shared surface and reads
+        // that back instead, proving the two paths agree on real pixels
+        // rather than just on the fact that a pointer came back non-null.
+        const interop = ck_beauty_interop_create() orelse return 1;
+        defer ck_beauty_interop_destroy(interop);
+        const texture = ck_beauty_output_texture(beauty);
+        if (texture == 0) {
+            try out.print("beauty interop: no output texture\n", .{});
+            try out.flush();
+            return 1;
+        }
+        const surface = ck_beauty_interop_composite(interop, texture, @intCast(image.width), @intCast(image.height)) orelse {
+            try out.print("beauty interop: composite refused\n", .{});
+            try out.flush();
+            return 1;
+        };
+        if (CVPixelBufferLockBaseAddress(surface, 0) != 0) return 1;
+        defer _ = CVPixelBufferUnlockBaseAddress(surface, 0);
+        const base = CVPixelBufferGetBaseAddress(surface) orelse return 1;
+        const stride = CVPixelBufferGetBytesPerRow(surface);
+
+        var composite_delta: u64 = 0;
+        for (0..image.height) |row| {
+            const row_bytes = base[row * stride ..][0 .. image.width * 4];
+            const cpu_row = out_b[row * image.width * 4 ..][0 .. image.width * 4];
+            var col: usize = 0;
+            while (col < image.width * 4) : (col += 4) {
+                // The shared surface is BGRA; gpupixel's CPU readback is RGBA.
+                composite_delta += @abs(@as(i32, row_bytes[col + 0]) - @as(i32, cpu_row[col + 2])); // B
+                composite_delta += @abs(@as(i32, row_bytes[col + 1]) - @as(i32, cpu_row[col + 1])); // G
+                composite_delta += @abs(@as(i32, row_bytes[col + 2]) - @as(i32, cpu_row[col + 0])); // R
+                composite_delta += @abs(@as(i32, row_bytes[col + 3]) - @as(i32, cpu_row[col + 3])); // A
+            }
+        }
+        const composite_mean = @as(f64, @floatFromInt(composite_delta)) / @as(f64, @floatFromInt(pixel_count));
+        try out.print("beauty interop: gpu composite vs cpu readback mean delta {d:.3}\n", .{composite_mean});
+        try out.flush();
+        if (composite_mean > 2.0) return 1;
     }
 
     try out.print("tracking harness: corpus clean through detect, landmarks, blendshapes\n", .{});

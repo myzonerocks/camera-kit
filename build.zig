@@ -407,6 +407,7 @@ pub fn build(b: *std.Build) void {
             tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
             tracking_module.linkFramework("AppKit", .{});
             tracking_module.linkFramework("OpenGL", .{});
+            tracking_module.linkFramework("CoreVideo", .{});
         } else {
             // The beauty archive carries the image loader implementation
             // where it links; elsewhere the harness compiles its own.
@@ -1131,6 +1132,10 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     // The engine's c boundary compiles into the same archive.
     if (apple) {
         module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim_apple.mm"), .flags = flags.items });
+        module.addCSourceFile(.{ .file = b.path("adapters/beauty/interop_apple.mm"), .flags = flags.items });
+        module.linkFramework("CoreVideo", .{});
+        if (os == .macos) module.linkFramework("OpenGL", .{});
+        if (os == .ios) module.linkFramework("OpenGLES", .{});
     } else {
         module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim.cc"), .flags = flags.items });
     }
