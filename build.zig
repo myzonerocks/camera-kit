@@ -360,7 +360,9 @@ pub fn build(b: *std.Build) void {
             .os_tag = .wasi,
             .cpu_features_add = std.Target.wasm.featureSet(&.{ .simd128, .relaxed_simd }),
         });
-        const wasi_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+        // Small mode: the web pays for bytes before it pays for cycles, and
+        // the kernels keep their own inner-loop structure either way.
+        const wasi_optimize: std.builtin.OptimizeMode = .ReleaseSmall;
         const cores_wasi = trackingCoreModules(b, wasi_target, wasi_optimize, b.createModule(.{
             .root_source_file = b.path("core/math/math.zig"),
             .target = wasi_target,
