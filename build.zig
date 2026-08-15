@@ -288,6 +288,18 @@ pub fn build(b: *std.Build) void {
         };
         if (gpupixel_present) {
             beauty_step.dependOn(&b.addInstallArtifact(buildGpupixelLib(b, target, optimize, null), .{}).step);
+            if (ndkSysroot(b)) |sysroot| {
+                const android_target = b.resolveTargetQuery(.{
+                    .cpu_arch = .aarch64,
+                    .os_tag = .linux,
+                    .abi = .android,
+                    .android_api_level = 29,
+                });
+                const libc_txt = b.addWriteFiles().add("android-libc-beauty.txt", b.fmt("include_dir={s}/usr/include\nsys_include_dir={s}/usr/include/aarch64-linux-android\ncrt_dir={s}/usr/lib/aarch64-linux-android/29\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n", .{ sysroot, sysroot, sysroot }));
+                const beauty_android = buildGpupixelLib(b, android_target, optimize, libc_txt);
+                addNdkPaths(b, beauty_android.root_module, sysroot);
+                beauty_step.dependOn(&b.addInstallArtifact(beauty_android, .{ .dest_dir = .{ .override = .{ .custom = "android-beauty" } } }).step);
+            }
         } else {
             beauty_step.dependOn(&b.addFail("beauty engine vendor is not synced; run: zig build vendor-sync").step);
         }
@@ -1663,6 +1675,8 @@ fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
     const sdk = apple_sdk orelse b.sysroot orelse return;
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "include" }) });
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
+    // Newer sdks split pieces of the ui frameworks into sub frameworks.
+    module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "SubFrameworks" }) });
 }
 
 fn buildBgfxLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
@@ -1842,6 +1856,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             buildRuyLib(b, ios_target, optimize, null),
             buildFarmhashLib(b, ios_target, optimize, null),
             buildFlatbuffersLib(b, ios_target, optimize, null),
+            buildGpupixelLib(b, ios_target, optimize, null),
             buildFft2dLib(b, ios_target, optimize, null),
             buildCpuinfoLib(b, ios_target, optimize, null),
             buildPthreadpoolLib(b, ios_target, optimize, null),
