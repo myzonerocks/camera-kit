@@ -33,6 +33,16 @@ object CameraKit {
         timestampUs: Long,
     ): Int
     external fun nativeReportFrame(session: Long, frameTimeUs: Int, thermal: Int): Int
+    external fun nativeSubmitHardwareBuffer(
+        session: Long,
+        hardwareBuffer: android.hardware.HardwareBuffer,
+        width: Int,
+        height: Int,
+        flags: Int,
+        colorStandard: Int,
+        colorRange: Int,
+        timestampUs: Long,
+    ): Int
 
     const val FLAG_MIRROR = 1
     const val ROTATION_SHIFT = 8
@@ -93,6 +103,19 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
 
     fun reportFrame(frameTimeUs: Int, thermal: Int): Int =
         CameraKit.nativeReportFrame(handle, frameTimeUs, thermal)
+
+    fun submitHardwareBuffer(
+        buffer: android.hardware.HardwareBuffer,
+        width: Int,
+        height: Int,
+        rotationDegrees: Int,
+        mirrored: Boolean,
+        timestampUs: Long,
+    ): Boolean = CameraKit.nativeSubmitHardwareBuffer(
+        handle, buffer, width, height,
+        CameraKit.flagsFor(rotationDegrees, mirrored),
+        1, 0, timestampUs,
+    ) == 0
 
     override fun close() = CameraKit.nativeSessionDestroy(handle)
 }

@@ -40,6 +40,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var yScratch: ByteBuffer? = null
     private var uvScratch: ByteBuffer? = null
 
+    // Zero-copy is attempted until the device or stream refuses it once;
+    // after that the stream stays on the declared copy path.
+    private var zeroCopyRefused = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         surfaceView = SurfaceView(this)
@@ -103,7 +107,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.i(tag, "fps %.1f rendered %d camera %d".format(fps, renderedFrames, cameraFrames))
             if (!proofLogged && cameraFrames > 30 && fps > 20) {
                 proofLogged = true
-                Log.i(tag, "CKDROID PROOF live preview: $cameraFrames camera frames rendered at %.1f fps".format(fps))
+                Log.i(tag, "CKDROID preview active: $cameraFrames camera frames rendered at %.1f fps".format(fps))
             }
             fpsWindowStart = now
             fpsWindowFrames = 0
@@ -122,6 +126,27 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             analysis.setAnalyzer(analysisExecutor) { image ->
                 image.use {
                     val session = session ?: return@use
+
+                    if (!zeroCopyRefused && android.os.Build.VERSION.SDK_INT >= 28) {
+                        val hardwareBuffer = it.image?.hardwareBuffer
+                        if (hardwareBuffer != null) {
+                            val submitted = session.submitHardwareBuffer(
+                                hardwareBuffer,
+                                it.width, it.height,
+                                it.imageInfo.rotationDegrees, false,
+                                it.imageInfo.timestamp / 1000,
+                            )
+                            hardwareBuffer.close()
+                            if (submitted) {
+                                cameraFrames += 1
+                                if (cameraFrames == 1) Log.i(tag, "capture state running zero copy")
+                                return@use
+                            }
+                            zeroCopyRefused = true
+                            Log.i(tag, "zero copy refused, copy path takes over")
+                        }
+                    }
+
                     val y = it.planes[0]
                     val u = it.planes[1]
                     val v = it.planes[2]
