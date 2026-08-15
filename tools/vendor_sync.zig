@@ -135,7 +135,7 @@ const Sync = struct {
 
         const stamp_path = try std.fmt.allocPrint(s.arena, "{s}/.pin-commit", .{dest});
         try Io.Dir.cwd().writeFile(s.io, .{ .sub_path = stamp_path, .data = pin.commit });
-        std.debug.print("vendor-sync: {s} {s} synced at {s}\n", .{ pin.name, pin.version, pin.commit[0..12] });
+        std.debug.print("vendor-sync: {s} {s} synced at {s}\n", .{ pin.name, pin.version, pin.commit[0..@min(pin.commit.len, 12)] });
     }
 };
 
