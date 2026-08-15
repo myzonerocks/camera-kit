@@ -302,6 +302,17 @@ pub fn build(b: *std.Build) void {
     };
     const shaderc_exe = addShadercTool(b, optimize);
     const flatc_exe = addFlatcTool(b);
+
+    const lens_shader_toolchain = b.addOptions();
+    if (shaderc_exe) |tool| {
+        lens_shader_toolchain.addOptionPath("shaderc_path", tool.getEmittedBin());
+    } else {
+        lens_shader_toolchain.addOption([]const u8, "shaderc_path", "");
+    }
+    lens_shader_toolchain.addOption([]const u8, "shader_include_dir", ".vendor/bgfx/src");
+    lens_shader_toolchain.addOption([]const u8, "varyingdef_path", "lenses/shaders/varying.def.sc");
+    lens_validator_module.addOptions("build_options", lens_shader_toolchain);
+
     const have_inference_stack = blk: {
         for ([_][]const u8{
             ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt",

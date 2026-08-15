@@ -1,19 +1,21 @@
 //! The reference validator for one .glens bundle, checked directly
 //! against lenses/SPEC.md: a bundle this program accepts is, by
 //! definition, valid, and where this and the spec disagree the spec is
-//! right and this has a bug. Three stages, each collecting every
+//! right and this has a bug. Four stages, each collecting every
 //! diagnostic it finds rather than stopping at the first: bundle
 //! structure (section 1), manifest.json (section 2 through 6, via
-//! core/lens/manifest.zig), then each trigger's `when` expression (6.1,
-//! via core/lens/trigger.zig). Later stages only run once the earlier
-//! one is clean, since a structurally invalid bundle has no manifest
-//! worth parsing.
+//! core/lens/manifest.zig), each trigger's `when` expression (6.1, via
+//! core/lens/trigger.zig), then every shader in shaders/ compiled
+//! through the pinned toolchain (section 7). Later stages only run once
+//! the earlier one is clean, since e.g. a structurally invalid bundle
+//! has no manifest worth parsing.
 //!
 //!   lens_validator <bundle-path>
 
 const std = @import("std");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
+const build_options = @import("build_options");
 
 const max_bundle_bytes: u64 = 64 * 1024 * 1024;
 const max_shader_bytes: u64 = 256 * 1024;
@@ -136,6 +138,74 @@ fn validateTriggers(gpa: std.mem.Allocator, diags: *manifest.Diagnostics, lens: 
     return ok;
 }
 
+const shader_profiles = [_]struct { profile: []const u8, platform: []const u8 }{
+    .{ .profile = "metal", .platform = "ios" },
+    .{ .profile = "spirv", .platform = "android" },
+    .{ .profile = "300_es", .platform = "android" },
+};
+
+/// Every file under shaders/ is a fragment shader for a full-screen pass,
+/// authored against the runtime's one fixed vertex/varying contract
+/// (lenses/shaders/varying.def.sc, SPEC.md section 7). Compiled through
+/// the pinned shaderc toolchain to every platform profile a conforming
+/// runtime ships, since a shader that compiles for one platform and not
+/// another is exactly the failure this stage exists to catch before a
+/// lens ships.
+fn validateShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, bundle_path: []const u8) !bool {
+    var bundle_dir = std.Io.Dir.cwd().openDir(io, bundle_path, .{ .iterate = true }) catch return true;
+    defer bundle_dir.close(io);
+    var shaders_dir = bundle_dir.openDir(io, "shaders", .{ .iterate = true }) catch return true;
+    defer shaders_dir.close(io);
+
+    var walker = try shaders_dir.walk(gpa);
+    defer walker.deinit();
+    var ok = true;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const diag_path = try std.fmt.allocPrint(diags.arena, "/shaders/{s}", .{entry.path});
+
+        if (build_options.shaderc_path.len == 0) {
+            try diags.add(diag_path, "shader toolchain unavailable (run zig build vendor-sync)", .{});
+            ok = false;
+            continue;
+        }
+
+        const disk_path = try std.fs.path.join(diags.arena, &.{ bundle_path, "shaders", entry.path });
+        for (shader_profiles) |profile| {
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(gpa);
+            try argv.appendSlice(gpa, &.{
+                build_options.shaderc_path,
+                "-f",           disk_path,
+                "-o",           "/dev/null",
+                "--type",       "fragment",
+                "--platform",   profile.platform,
+                "-p",           profile.profile,
+                "--varyingdef", build_options.varyingdef_path,
+                "-i",           build_options.shader_include_dir,
+            });
+            const result = std.process.run(gpa, io, .{ .argv = argv.items }) catch |err| {
+                ok = false;
+                try diags.add(diag_path, "shaderc ({s}/{s}) could not run: {t}", .{ profile.platform, profile.profile, err });
+                continue;
+            };
+            defer gpa.free(result.stdout);
+            defer gpa.free(result.stderr);
+            const success = switch (result.term) {
+                .exited => |code| code == 0,
+                else => false,
+            };
+            if (!success) {
+                ok = false;
+                const raw = if (result.stderr.len > 0) result.stderr else result.stdout;
+                const message = std.mem.trim(u8, raw, " \t\r\n");
+                try diags.add(diag_path, "shaderc ({s}/{s}): {s}", .{ profile.platform, profile.profile, message });
+            }
+        }
+    }
+    return ok;
+}
+
 fn report(io: std.Io, bundle_path: []const u8, diagnostics: []const manifest.Diagnostic, ok: bool) !void {
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &buffer);
@@ -182,6 +252,11 @@ pub fn main(init: std.process.Init) !u8 {
     defer lens.deinit();
 
     if (!try validateTriggers(gpa, &diags, &lens)) {
+        try report(io, bundle_path, diags.list.items, false);
+        return 1;
+    }
+
+    if (!try validateShaders(io, gpa, &diags, bundle_path)) {
         try report(io, bundle_path, diags.list.items, false);
         return 1;
     }
@@ -310,4 +385,74 @@ test "a trigger with a bad when expression fails trigger validation" {
     var lens = try manifest.parse(t.allocator, &diags, source) orelse return error.TestUnexpectedResult;
     defer lens.deinit();
     try t.expect(!try validateTriggers(t.allocator, &diags, &lens));
+}
+
+const valid_fragment_shader =
+    \\$input v_texcoord0
+    \\
+    \\#include <bgfx_shader.sh>
+    \\
+    \\SAMPLER2D(s_texColor, 0);
+    \\
+    \\void main()
+    \\{
+    \\    gl_FragColor = texture2D(s_texColor, v_texcoord0);
+    \\}
+;
+
+const broken_fragment_shader =
+    \\$input v_texcoord0
+    \\
+    \\#include <bgfx_shader.sh>
+    \\
+    \\void main()
+    \\{
+    \\    gl_FragColor = this_symbol_does_not_exist;
+    \\}
+;
+
+test "a fragment shader compiling against the fixed varying contract passes the shader-compile stage" {
+    if (build_options.shaderc_path.len == 0) return error.SkipZigTest;
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = minimal_valid_manifest });
+    try tmp.dir.createDirPath(t.io, "shaders");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "shaders/fs_tint.glsl", .data = valid_fragment_shader });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = tmpBundlePath(tmp, &path_buf);
+
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+
+    try t.expect(try validateBundle(t.io, t.allocator, &diags, bundle_path));
+    try t.expect(try validateShaders(t.io, t.allocator, &diags, bundle_path));
+    try t.expectEqual(@as(usize, 0), diags.list.items.len);
+}
+
+test "a fragment shader referencing an unknown symbol fails the shader-compile stage" {
+    if (build_options.shaderc_path.len == 0) return error.SkipZigTest;
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = minimal_valid_manifest });
+    try tmp.dir.createDirPath(t.io, "shaders");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "shaders/fs_broken.glsl", .data = broken_fragment_shader });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = tmpBundlePath(tmp, &path_buf);
+
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+
+    try t.expect(try validateBundle(t.io, t.allocator, &diags, bundle_path));
+    try t.expect(!try validateShaders(t.io, t.allocator, &diags, bundle_path));
+    var found = false;
+    for (diags.list.items) |d| {
+        if (std.mem.indexOf(u8, d.path, "fs_broken.glsl") != null) found = true;
+    }
+    try t.expect(found);
 }
