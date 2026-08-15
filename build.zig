@@ -380,6 +380,13 @@ pub fn build(b: *std.Build) void {
             tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
             tracking_module.linkFramework("AppKit", .{});
             tracking_module.linkFramework("OpenGL", .{});
+        } else {
+            // The beauty archive carries the image loader implementation
+            // where it links; elsewhere the harness compiles its own.
+            tracking_module.addCSourceFile(.{
+                .file = b.path("harness/stb_image_impl.c"),
+                .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
+            });
         }
         tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null));
         tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
