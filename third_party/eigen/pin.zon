@@ -1,0 +1,11 @@
+.{
+    .name = "eigen",
+    .repo = "https://gitlab.com/libeigen/eigen",
+    .version = "litert 2026-08",
+    .commit = "ea13a98decd497a8c5588fb5de71b57bcf10d864",
+    .archive_sha256 = "35c6126e246585d9cf6600b65471582c2701aae64b784a6fd19168a90cfc841e",
+    .license = "MPL-2.0",
+    .license_file = "COPYING.MPL2",
+    .license_sha256 = "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+    .archive_url = "https://gitlab.com/libeigen/eigen/-/archive/ea13a98decd497a8c5588fb5de71b57bcf10d864/eigen-ea13a98decd497a8c5588fb5de71b57bcf10d864.tar.gz",
+}
