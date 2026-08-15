@@ -1,0 +1,11 @@
+.{
+    .name = "tensorflow",
+    .repo = "https://github.com/tensorflow/tensorflow",
+    .version = "v2.21.0-rc0",
+    .commit = "v2.21.0-rc0",
+    .archive_sha256 = "91b2c2d12f0ebd78d84e5e1401269d0e6e36db5b74e19cc929e0f012b380af39",
+    .license = "Apache-2.0",
+    .license_file = "LICENSE",
+    .license_sha256 = "71c6915d04265772a0339bed47276942c678b45cc01534210ebe6984fd1aec65",
+    .archive_url = "https://github.com/tensorflow/tensorflow/archive/refs/tags/v2.21.0-rc0.tar.gz",
+}

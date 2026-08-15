@@ -1,0 +1,10 @@
+.{
+    .name = "pthreadpool",
+    .repo = "https://github.com/google/pthreadpool",
+    .version = "xnnpack 2026-08",
+    .commit = "02460584c6092e527c8b89f7df4de143d70e801f",
+    .archive_sha256 = "5ed27edfb48ac12cd430c184bde3aa36704b2c795030b57f55fdcbc48707ce01",
+    .license = "BSD-2-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "57814a606b4d0fb087d9a534919084b6c11b58a4174cb5a4aef200187780dc3a",
+}

@@ -1,0 +1,10 @@
+.{
+    .name = "cpuinfo",
+    .repo = "https://github.com/pytorch/cpuinfo",
+    .version = "litert 2026-08",
+    .commit = "8ce83db858065145192c97af90cb668ad72a12e9",
+    .archive_sha256 = "b47d81a022b3b1145e7043360c3bfdb7428ab8361e89bd831027355df4900638",
+    .license = "BSD-2-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "8e7e60636c3aa0cb03571a1a841ce5697f9551ff92b3c426c2561613d15ade70",
+}
