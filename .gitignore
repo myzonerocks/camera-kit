@@ -57,3 +57,10 @@ shells/ts/dist/
 shells/ts/demo/dist.js
 shells/ts/demo/camerakit.wasm
 shells/ts/**/*.wasm.map
+
+# Raster images are fetched corpus or scratch artifacts, never source.
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.bmp

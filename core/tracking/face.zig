@@ -6,8 +6,8 @@
 //! blendshape model reads a fixed 146 landmark subset as pixel pairs.
 
 const std = @import("std");
-const sampler = @import("sampler.zig");
-const detector = @import("detector.zig");
+const sampler = @import("sampler");
+const detector = @import("detector");
 
 pub const landmark_count = 478;
 pub const region_scale = 1.5;

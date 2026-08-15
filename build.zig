@@ -186,6 +186,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("core/tracking/face.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_module },
+            .{ .name = "detector", .module = detector_module },
+        },
     });
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
@@ -617,7 +621,7 @@ fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     module.addIncludePath(b.path(".vendor/farmhash/src"));
     module.addCSourceFile(.{
         .file = b.path(".vendor/farmhash/src/farmhash.cc"),
-        .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DNAMESPACE_FOR_HASH_FUNCTIONS=farmhash" },
+        .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
     });
     return b.addLibrary(.{ .name = "farmhash", .linkage = .static, .root_module = module });
 }
