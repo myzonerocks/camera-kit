@@ -7,11 +7,13 @@
 <style>
   html, body { margin: 0; height: 100%; background: #000; }
   canvas { width: 100vw; height: 100vh; display: block; }
+  #overlay { position: fixed; inset: 0; pointer-events: none; }
   #status { position: fixed; top: 12px; left: 12px; color: #fff; font: 13px monospace; white-space: pre; }
 </style>
 </head>
 <body>
 <canvas id="preview" width="1280" height="720"></canvas>
+<canvas id="overlay" width="1280" height="720"></canvas>
 <div id="status">loading</div>
 <script type="module" src="dist.js"></script>
 </body>

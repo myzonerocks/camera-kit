@@ -114,7 +114,8 @@ export interface SessionEvents {
 // VideoFrame ingestion.
 export class PreviewSession {
   private stream: MediaStream | null = null;
-  private video = document.createElement("video");
+  /// The camera element frames render from; analysis passes sample it too.
+  readonly video = document.createElement("video");
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
   private texture: WebGLTexture;

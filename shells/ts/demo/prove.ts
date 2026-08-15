@@ -70,16 +70,70 @@ for (let waited = 0; waited < 30_000; waited += 1000) {
   }
 }
 
+// The tracking pass: wait for the worker, then one corpus portrait must
+// track and the control frame must not.
+let tracking = "";
+for (let waited = 0; waited < 120_000; waited += 1000) {
+  await Bun.sleep(1000);
+  const up = (await send("Runtime.evaluate", {
+    expression: "Boolean(window.trackingUp)",
+    returnByValue: true,
+  })) as { result?: { value?: boolean } };
+  if (up.result?.value) break;
+}
+{
+  const evaluate = async (expression: string) =>
+    (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })) as {
+      result?: { value?: string };
+    };
+  const face = await evaluate(
+    "window.trackImage('./face_frontal_b.jpg').then((r) => JSON.stringify(r))",
+  );
+  const control = await evaluate(
+    "window.trackImage('./no_face_control.jpg').then((r) => JSON.stringify(r))",
+  );
+  try {
+    const faceResult = JSON.parse(face.result?.value ?? "{}");
+    const controlResult = JSON.parse(control.result?.value ?? "{}");
+    if (
+      faceResult.presence > 0.5 &&
+      faceResult.landmarkCount === faceResult.expected &&
+      controlResult.landmarkCount === 0
+    ) {
+      tracking = `CKWEB tracking: portrait presence ${faceResult.presence.toFixed(3)} with ${faceResult.landmarkCount} landmarks, control frame ${controlResult.landmarkCount}`;
+    } else {
+      tracking = `FAIL tracking: face ${face.result?.value} control ${control.result?.value}`;
+    }
+  } catch {
+    tracking = `FAIL tracking: face ${face.result?.value} control ${control.result?.value}`;
+  }
+}
+
+const trackingErr = (await send("Runtime.evaluate", {
+  expression: "String(window.trackingError ?? '')",
+  returnByValue: true,
+})) as { result?: { value?: string } };
+if (trackingErr.result?.value) console.log(`tracking error: ${trackingErr.result.value}`);
+const booted = (await send("Runtime.evaluate", {
+  expression: "JSON.stringify({booted: Boolean(window.workerBooted), up: Boolean(window.trackingUp)})",
+  returnByValue: true,
+})) as { result?: { value?: string } };
+console.log(`worker state: ${booted.result?.value}`);
+
 const statusResult = (await send("Runtime.evaluate", {
   expression: "document.getElementById('status')?.textContent ?? ''",
   returnByValue: true,
 })) as { result?: { value?: string } };
 
 chrome.kill();
-if (proof) {
+if (proof && tracking && !tracking.startsWith("FAIL")) {
   console.log(proof);
+  console.log(tracking);
   console.log(`status: ${statusResult.result?.value}`);
   process.exit(0);
+}
+if (tracking) {
+  console.log(tracking);
 }
 console.log(`FAIL no proof line; status: ${statusResult.result?.value}`);
 process.exit(1);

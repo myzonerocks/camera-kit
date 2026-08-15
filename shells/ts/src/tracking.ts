@@ -60,7 +60,26 @@ function wasiImports(getMemory: () => WebAssembly.Memory): WebAssembly.ModuleImp
       return 0;
     },
     environ_get: (): number => 0,
+    args_sizes_get: (countPtr: number, sizePtr: number): number => {
+      const view = new DataView(getMemory().buffer);
+      view.setUint32(countPtr, 0, true);
+      view.setUint32(sizePtr, 0, true);
+      return 0;
+    },
+    args_get: (): number => 0,
   };
+}
+
+/// Anything else the module's startup declares but never drives answers
+/// with the not-supported code, so instantiation is total without hiding
+/// a call that matters.
+function totalWasi(getMemory: () => WebAssembly.Memory): WebAssembly.ModuleImports {
+  const implemented = wasiImports(getMemory);
+  return new Proxy(implemented, {
+    get(target, property: string) {
+      return target[property] ?? (() => 52);
+    },
+  });
 }
 
 export class FaceTracker {
@@ -78,7 +97,7 @@ export class FaceTracker {
   static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<FaceTracker> {
     let memory: WebAssembly.Memory | undefined;
     const { instance } = await WebAssembly.instantiate(moduleBytes, {
-      wasi_snapshot_preview1: wasiImports(() => memory!),
+      wasi_snapshot_preview1: totalWasi(() => memory!),
     });
     const exports = instance.exports as unknown as TrackingExports;
     memory = exports.memory;
