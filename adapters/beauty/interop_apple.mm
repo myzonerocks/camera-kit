@@ -14,19 +14,31 @@
 // not expose in its public headers; same situation as
 // GPUPixelFramebuffer, a publicly reachable facility whose header just
 // is not under the public include tree.
+//
+// macOS renders through legacy desktop GL (NSOpenGLContext/CGL); iOS
+// through GLES2 (EAGLContext). Both speak the same core GL ES 2.0 subset
+// this file actually uses, and CVOpenGLTextureCache/CVOpenGLESTextureCache
+// are the same shape one level up, so the blit itself and the shaders it
+// runs are shared; only surface setup differs.
 
 #include <cstdint>
 #include <new>
 
 #include <TargetConditionals.h>
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX || TARGET_OS_IOS
 
 #include "core/gpupixel_context.h"
 
 #import <CoreVideo/CoreVideo.h>
+
+#if TARGET_OS_OSX
 #import <OpenGL/OpenGL.h>
 #import <OpenGL/gl.h>
+#else
+#import <OpenGLES/EAGL.h>
+#import <OpenGLES/ES2/gl.h>
+#endif
 
 namespace {
 
@@ -84,6 +96,56 @@ GLuint LinkProgram(const char* vertex_source, const char* fragment_source) {
   return program;
 }
 
+// The blit itself: draws source_texture (a normal GL_TEXTURE_2D, gpupixel's
+// own beauty output) into whatever texture/target fbo currently has bound
+// at GL_COLOR_ATTACHMENT0. Shared between both platforms; only how that
+// attachment gets set up differs.
+bool DrawBlit(GLuint fbo, GLuint blit_program, GLuint source_texture,
+              int32_t width, int32_t height) {
+  const GLenum fbo_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+  if (fbo_status != GL_FRAMEBUFFER_COMPLETE) return false;
+
+  GLint previous_fbo = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
+  GLint previous_viewport[4];
+  glGetIntegerv(GL_VIEWPORT, previous_viewport);
+  GLuint previous_program = 0;
+  glGetIntegerv(GL_CURRENT_PROGRAM, reinterpret_cast<GLint*>(&previous_program));
+
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glViewport(0, 0, width, height);
+  glUseProgram(blit_program);
+
+  static const GLfloat position[] = {-1, -1, 1, -1, -1, 1, 1, 1};
+  static const GLfloat tex_coords[] = {0, 0, 1, 0, 0, 1, 1, 1};
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, position);
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, tex_coords);
+
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, source_texture);
+  glUniform1i(glGetUniformLocation(blit_program, "inputTexture"), 0);
+
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  glDisableVertexAttribArray(0);
+  glDisableVertexAttribArray(1);
+
+  // CVPixelBuffer contents are only guaranteed visible to a different API
+  // (Metal, reading through its own texture cache) after the GL work that
+  // wrote them has been flushed - the CoreVideo texture cache does not do
+  // this for us.
+  glFlush();
+
+  glBindFramebuffer(GL_FRAMEBUFFER, previous_fbo);
+  glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2],
+             previous_viewport[3]);
+  glUseProgram(previous_program);
+  return true;
+}
+
+#if TARGET_OS_OSX
+
 // Owns the state a repeated composite needs across frames: the shared
 // surface (recreated only when the requested size changes), the texture
 // cache bound to whatever context first created it, the blit target FBO,
@@ -94,8 +156,6 @@ struct AppleInterop {
   CVOpenGLTextureRef gl_texture = nullptr;
   GLuint fbo = 0;
   GLuint blit_program = 0;
-  GLuint blit_position_vbo = 0;
-  GLuint blit_texcoord_vbo = 0;
   int width = 0;
   int height = 0;
 
@@ -105,8 +165,6 @@ struct AppleInterop {
     if (texture_cache) CFRelease(texture_cache);
     if (fbo) glDeleteFramebuffers(1, &fbo);
     if (blit_program) glDeleteProgram(blit_program);
-    if (blit_position_vbo) glDeleteBuffers(1, &blit_position_vbo);
-    if (blit_texcoord_vbo) glDeleteBuffers(1, &blit_texcoord_vbo);
   }
 
   bool EnsureSurface(int new_width, int new_height) {
@@ -132,9 +190,8 @@ struct AppleInterop {
       pixel_buffer = nullptr;
     }
 
-    NSDictionary* surface_properties = @{};
     NSDictionary* attributes = @{
-      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : surface_properties,
+      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
       (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
       (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
     };
@@ -156,7 +213,86 @@ struct AppleInterop {
     height = new_height;
     return true;
   }
+
+  GLenum Target() const { return CVOpenGLTextureGetTarget(gl_texture); }
+  GLuint Name() const { return CVOpenGLTextureGetName(gl_texture); }
 };
+
+#else  // TARGET_OS_IOS
+
+// Same shape as the macOS struct above, over CVOpenGLESTextureCache
+// instead: bound to whatever EAGLContext is current when first created
+// rather than a CGL pixel format, and the vended texture target is always
+// GL_TEXTURE_2D (the ES cache never yields rectangle textures the way the
+// legacy desktop one does).
+struct AppleInterop {
+  CVOpenGLESTextureCacheRef texture_cache = nullptr;
+  CVPixelBufferRef pixel_buffer = nullptr;
+  CVOpenGLESTextureRef gl_texture = nullptr;
+  GLuint fbo = 0;
+  GLuint blit_program = 0;
+  int width = 0;
+  int height = 0;
+
+  ~AppleInterop() {
+    if (gl_texture) CFRelease(gl_texture);
+    if (pixel_buffer) CFRelease(pixel_buffer);
+    if (texture_cache) CFRelease(texture_cache);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (blit_program) glDeleteProgram(blit_program);
+  }
+
+  bool EnsureSurface(int new_width, int new_height) {
+    if (gl_texture && width == new_width && height == new_height) return true;
+
+    EAGLContext* eagl_context = [EAGLContext currentContext];
+    if (eagl_context == nullptr) return false;
+
+    if (texture_cache == nullptr) {
+      CVReturn created = CVOpenGLESTextureCacheCreate(
+          kCFAllocatorDefault, nullptr, eagl_context, nullptr, &texture_cache);
+      if (created != kCVReturnSuccess) return false;
+    }
+
+    if (gl_texture) {
+      CFRelease(gl_texture);
+      gl_texture = nullptr;
+    }
+    if (pixel_buffer) {
+      CFRelease(pixel_buffer);
+      pixel_buffer = nullptr;
+    }
+
+    NSDictionary* attributes = @{
+      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+      (NSString*)kCVPixelBufferOpenGLESCompatibilityKey : @YES,
+      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+    };
+    CVReturn buffer_status = CVPixelBufferCreate(
+        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    if (buffer_status != kCVReturnSuccess) return false;
+
+    CVReturn texture_status = CVOpenGLESTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault, texture_cache, pixel_buffer, nullptr, GL_TEXTURE_2D,
+        GL_RGBA, new_width, new_height, GL_BGRA_EXT, GL_UNSIGNED_BYTE, 0,
+        &gl_texture);
+    if (texture_status != kCVReturnSuccess) {
+      CFRelease(pixel_buffer);
+      pixel_buffer = nullptr;
+      return false;
+    }
+
+    width = new_width;
+    height = new_height;
+    return true;
+  }
+
+  GLenum Target() const { return CVOpenGLESTextureGetTarget(gl_texture); }
+  GLuint Name() const { return CVOpenGLESTextureGetName(gl_texture); }
+};
+
+#endif
 
 }  // namespace
 
@@ -170,8 +306,7 @@ void ck_beauty_interop_destroy(void* handle) {
   delete static_cast<AppleInterop*>(handle);
 }
 
-// Blits source_texture (a normal GL_TEXTURE_2D, gpupixel's own beauty
-// output) into the shared IOSurface-backed buffer and returns the
+// Composites source_texture into the shared surface and returns the
 // CVPixelBufferRef, unretained: valid until the next call on this handle
 // or ck_beauty_interop_destroy, never released by the caller.
 void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
@@ -196,53 +331,11 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
       glGenFramebuffers(1, &interop->fbo);
     }
 
-    GLint previous_fbo = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
-    GLint previous_viewport[4];
-    glGetIntegerv(GL_VIEWPORT, previous_viewport);
-    GLuint previous_program = 0;
-    glGetIntegerv(GL_CURRENT_PROGRAM, reinterpret_cast<GLint*>(&previous_program));
-
     glBindFramebuffer(GL_FRAMEBUFFER, interop->fbo);
-    const GLenum target = CVOpenGLTextureGetTarget(interop->gl_texture);
-    const GLuint name = CVOpenGLTextureGetName(interop->gl_texture);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, name, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           interop->Target(), interop->Name(), 0);
 
-    const GLenum fbo_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if (fbo_status != GL_FRAMEBUFFER_COMPLETE) {
-      glBindFramebuffer(GL_FRAMEBUFFER, previous_fbo);
-      ok = false;
-      return;
-    }
-
-    glViewport(0, 0, width, height);
-    glUseProgram(interop->blit_program);
-
-    static const GLfloat position[] = {-1, -1, 1, -1, -1, 1, 1, 1};
-    static const GLfloat tex_coords[] = {0, 0, 1, 0, 0, 1, 1, 1};
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, position);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, tex_coords);
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, source_texture);
-    glUniform1i(glGetUniformLocation(interop->blit_program, "inputTexture"), 0);
-
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glDisableVertexAttribArray(0);
-    glDisableVertexAttribArray(1);
-
-    // CVPixelBuffer contents are only guaranteed visible to a different
-    // API (Metal, reading through its own texture cache) after the GL
-    // work that wrote them has been flushed - CVOpenGLTextureCache does
-    // not do this for us.
-    glFlush();
-
-    glBindFramebuffer(GL_FRAMEBUFFER, previous_fbo);
-    glViewport(previous_viewport[0], previous_viewport[1], previous_viewport[2],
-               previous_viewport[3]);
-    glUseProgram(previous_program);
+    ok = DrawBlit(interop->fbo, interop->blit_program, source_texture, width, height);
   });
 
   return ok ? interop->pixel_buffer : nullptr;
@@ -250,7 +343,7 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
 
 }  // extern "C"
 
-#else  // !TARGET_OS_OSX (iOS bridge lands separately)
+#else  // Every other apple-adjacent target this file might compile for.
 
 extern "C" {
 void* ck_beauty_interop_create(void) { return nullptr; }
