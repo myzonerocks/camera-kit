@@ -414,6 +414,32 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (result.presence < 0.5) return 1;
         if (result.landmark_count_out != face.landmark_count) return 1;
         if (result.timestamp_us != 1000) return 1;
+
+        // Beauty through the same public surface, fed by the session's own
+        // tracking result.
+        if (abi.ck_session_enable_beauty(session, ".vendor/gpupixel/src") != .ok) {
+            try out.print("abi beauty enable refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        _ = abi.ck_session_set_beauty(session, 0, 0.9);
+        _ = abi.ck_session_set_beauty(session, 1, 0.5);
+        const beauty_pixels = @as(usize, corpus.frame.width) * corpus.frame.height * 4;
+        const beautified = try gpa.alloc(u8, beauty_pixels);
+        defer gpa.free(beautified);
+        if (abi.ck_session_beautify_frame(session, corpus.frame.pixels.rgba8.ptr, corpus.frame.width, corpus.frame.height, beautified.ptr) != .ok) {
+            try out.print("abi beautify refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        var abi_delta: u64 = 0;
+        for (corpus.frame.pixels.rgba8, beautified) |a2, b3| {
+            abi_delta += @abs(@as(i32, a2) - @as(i32, b3));
+        }
+        const abi_mean = @as(f64, @floatFromInt(abi_delta)) / @as(f64, @floatFromInt(beauty_pixels));
+        try out.print("abi beauty: mean delta {d:.3}\n", .{abi_mean});
+        try out.flush();
+        if (abi_mean <= 0.5) return 1;
     }
 
 

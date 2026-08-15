@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define CK_ABI_MAJOR 0u
-#define CK_ABI_MINOR 4u
+#define CK_ABI_MINOR 5u
 #define CK_ABI_VERSION ((CK_ABI_MAJOR << 16) | CK_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against CK_ABI_MAJOR. */

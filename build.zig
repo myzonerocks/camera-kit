@@ -181,6 +181,7 @@ pub fn build(b: *std.Build) void {
     });
     abi_module.addImport("face", face_module);
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
+    abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
@@ -333,6 +334,15 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
             },
         });
+        const beauty_real_module = b.createModule(.{
+            .root_source_file = b.path("adapters/beauty/beauty.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "face", .module = face_module },
+                .{ .name = "face106", .module = face106_module },
+            },
+        });
         const abi_tracking_module = b.createModule(.{
             .root_source_file = b.path("core/abi/abi.zig"),
             .target = target,
@@ -343,6 +353,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "render", .module = render_stub_module },
                 .{ .name = "face", .module = face_module },
                 .{ .name = "tracking", .module = tracking_real_module },
+                .{ .name = "beauty", .module = beauty_real_module },
             },
         });
         const tracking_module = b.createModule(.{
@@ -467,6 +478,7 @@ pub fn build(b: *std.Build) void {
         const tracking_cores_wasm = trackingCoreModules(b, wasm_target, .ReleaseSmall, math_wasm);
         abi_wasm.addImport("face", tracking_cores_wasm.face);
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, math_wasm));
+        abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
         const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
         camerakit_wasm.entry = .disabled;
         camerakit_wasm.rdynamic = true;
@@ -619,8 +631,25 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             },
         });
         abi_android.addImport("tracking", tracking_android);
+        const face106_android = b.createModule(.{
+            .root_source_file = b.path("core/tracking/face106.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "face", .module = tracking_cores_android.face }},
+        });
+        const beauty_android_module = b.createModule(.{
+            .root_source_file = b.path("adapters/beauty/beauty.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "face", .module = tracking_cores_android.face },
+                .{ .name = "face106", .module = face106_android },
+            },
+        });
+        abi_android.addImport("beauty", beauty_android_module);
     } else {
         abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
+        abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
     const jni_module = b.createModule(.{
         .root_source_file = b.path("adapters/android/jni.zig"),
@@ -641,6 +670,9 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         jni_module.linkLibrary(buildFft2dLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildCpuinfoLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildPthreadpoolLib(b, android_target, optimize, libc_txt));
+        const beauty_archive = buildGpupixelLib(b, android_target, optimize, libc_txt);
+        addNdkPaths(b, beauty_archive.root_module, sysroot);
+        jni_module.linkLibrary(beauty_archive);
     }
 
     const bgfx_android = buildBgfxAndroid(b, android_target, optimize, sysroot);
@@ -721,6 +753,15 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .face = face_module,
         .tracker = tracker_module,
     };
+}
+
+fn beautyStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, face_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/beauty/beauty_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "face", .module = face_module }},
+    });
 }
 
 fn trackingStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, face_module: *std.Build.Module, math_module: *std.Build.Module) *std.Build.Module {
@@ -1849,6 +1890,22 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             },
         });
         abi_ios.addImport("tracking", tracking_ios);
+        const face106_ios = b.createModule(.{
+            .root_source_file = b.path("core/tracking/face106.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "face", .module = tracking_cores_ios.face }},
+        });
+        const beauty_ios_module = b.createModule(.{
+            .root_source_file = b.path("adapters/beauty/beauty.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "face", .module = tracking_cores_ios.face },
+                .{ .name = "face106", .module = face106_ios },
+            },
+        });
+        abi_ios.addImport("beauty", beauty_ios_module);
         for ([_]*std.Build.Step.Compile{
             buildTfliteLib(b, ios_target, optimize, flatc_exe.?, null),
             buildXnnpackLib(b, ios_target, optimize, null, &family_libs),
@@ -1866,6 +1923,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
         inference_libs.appendSlice(b.allocator, family_libs.items) catch @panic("oom");
     } else {
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
+        abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
     const camerakit_ios = b.addLibrary(.{
         .name = "camerakit",

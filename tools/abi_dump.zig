@@ -34,6 +34,10 @@ const abi_functions = [_][]const u8{
     "void ck_session_disable_face_tracking(ck_session *session)",
     "ck_status ck_session_track_frame(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
     "ck_status ck_session_face_result(ck_session *session, ck_face_result *out_result)",
+    "ck_status ck_session_enable_beauty(ck_session *session, const char *resource_path)",
+    "void ck_session_disable_beauty(ck_session *session)",
+    "ck_status ck_session_set_beauty(ck_session *session, int32_t effect, float value)",
+    "ck_status ck_session_beautify_frame(ck_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
 };
 
 fn writeSurface(w: anytype) !void {

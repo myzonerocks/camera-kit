@@ -15,11 +15,12 @@ const math = @import("math");
 const render = @import("render");
 const tracking = @import("tracking");
 const face = @import("face");
+const beauty = @import("beauty");
 
 pub const FaceResult = face.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 4;
+pub const abi_minor: u16 = 5;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -125,6 +126,7 @@ pub const Session = struct {
     current: ?CurrentFrame = null,
     copied_frames: u64 = 0,
     face_tracking: ?*tracking.Tracking = null,
+    beauty_chain: ?*beauty.Beauty = null,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -168,6 +170,8 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
 }
 
 pub fn destroySession(session: *Session) void {
+    if (session.beauty_chain) |chain| beauty.destroy(session.engine.gpa, chain);
+    session.beauty_chain = null;
     if (session.face_tracking) |worker| tracking.destroy(worker);
     session.face_tracking = null;
     releaseCurrentFrame(session);
@@ -478,6 +482,57 @@ pub export fn ck_session_face_result(session: ?*Session, out_result: ?*face.Resu
     return .ok;
 }
 
+/// Stands the beauty chain up for a session. The resource path names the
+/// directory holding the effect engine's shader and image assets; builds
+/// without the effects engine report unsupported.
+pub export fn ck_session_enable_beauty(session: ?*Session, resource_path: ?[*:0]const u8) Status {
+    const s = session orelse return .invalid_argument;
+    const path = resource_path orelse return .invalid_argument;
+    if (s.beauty_chain != null) return .ok;
+    s.beauty_chain = beauty.create(s.engine.gpa, path) catch |err| switch (err) {
+        error.Unsupported => return .unsupported,
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn ck_session_disable_beauty(session: ?*Session) void {
+    const s = session orelse return;
+    if (s.beauty_chain) |chain| beauty.destroy(s.engine.gpa, chain);
+    s.beauty_chain = null;
+}
+
+/// Effect identifiers follow the header: smooth, whiten, thin face, big
+/// eye, lipstick, blush. Values clamp to zero and one; zero disables the
+/// effect.
+pub export fn ck_session_set_beauty(session: ?*Session, effect: i32, value: f32) Status {
+    const s = session orelse return .invalid_argument;
+    const chain = s.beauty_chain orelse return .again;
+    if (effect < 0 or effect > 5) return .invalid_argument;
+    beauty.set(chain, @enumFromInt(effect), value);
+    return .ok;
+}
+
+/// Runs the beauty chain over one RGBA frame on the calling thread,
+/// reading the newest tracking result for the landmark driven effects
+/// when face tracking is enabled. The stated CPU path: live preview
+/// integration on the render thread is the device side of this row.
+pub export fn ck_session_beautify_frame(session: ?*Session, rgba_in: ?[*]const u8, width: u32, height: u32, rgba_out: ?[*]u8) Status {
+    const s = session orelse return .invalid_argument;
+    const source = rgba_in orelse return .invalid_argument;
+    const destination = rgba_out orelse return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    const chain = s.beauty_chain orelse return .again;
+
+    var result: face.Result = undefined;
+    var tracked: ?*const face.Result = null;
+    if (s.face_tracking) |worker| {
+        if (tracking.readResult(worker, &result)) tracked = &result;
+    }
+    beauty.process(chain, source, width, height, tracked, destination) catch return .invalid_argument;
+    return .ok;
+}
+
 const t = std.testing;
 
 test "alloc and free round-trip through the abi allocator" {
@@ -580,4 +635,17 @@ test "face tracking on a build without the inference stack refuses" {
     try t.expectEqual(Status.again, ck_session_track_frame(session, &desc, &planes, 2, &planes, 2));
     ck_session_disable_face_tracking(session);
     try t.expectEqual(Status.invalid_argument, ck_session_face_result(session, null));
+}
+
+test "beauty on a build without the effects engine refuses" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    try t.expectEqual(Status.unsupported, ck_session_enable_beauty(session, "res"));
+    try t.expectEqual(Status.again, ck_session_set_beauty(session, 0, 0.5));
+    var pixels = [_]u8{0} ** 16;
+    try t.expectEqual(Status.again, ck_session_beautify_frame(session, &pixels, 2, 2, &pixels));
+    ck_session_disable_beauty(session);
 }
