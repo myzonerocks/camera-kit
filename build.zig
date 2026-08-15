@@ -346,8 +346,12 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tracker", .module = tracker_module },
                 .{ .name = "math", .module = math_module },
                 .{ .name = "abi", .module = abi_tracking_module },
+                .{ .name = "face106", .module = face106_module },
             },
         });
+        tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
+        tracking_module.linkFramework("AppKit", .{});
+        tracking_module.linkFramework("OpenGL", .{});
         tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null));
         tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
         tracking_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
@@ -357,11 +361,9 @@ pub fn build(b: *std.Build) void {
         tracking_module.linkLibrary(buildFft2dLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildCpuinfoLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildPthreadpoolLib(b, target, optimize, null));
-        tracking_module.addIncludePath(b.path(".vendor/bimg/3rdparty/stb"));
-        tracking_module.addCSourceFile(.{
-            .file = b.path("harness/stb_image_impl.c"),
-            .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
-        });
+        // The image loader implementation arrives inside the beauty
+        // archive; the harness only includes the declarations.
+        tracking_module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
         const tracking_exe = b.addExecutable(.{ .name = "tracking_harness", .root_module = tracking_module });
         const run_tracking = b.addRunArtifact(tracking_exe);
         run_tracking.setCwd(b.path("."));
