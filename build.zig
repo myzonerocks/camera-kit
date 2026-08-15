@@ -225,7 +225,16 @@ pub fn build(b: *std.Build) void {
         break :blk true;
     };
     const shaderc_exe = addShadercTool(b, optimize);
-    _ = addFlatcTool(b);
+    const flatc_exe = addFlatcTool(b);
+    _ = flatc_exe;
+    {
+        const deps_step = b.step("inference-deps", "Build the inference runtime dependency libraries");
+        deps_step.dependOn(&b.addInstallArtifact(buildAbseilLib(b, target, optimize), .{}).step);
+        deps_step.dependOn(&b.addInstallArtifact(buildCpuinfoLib(b, target, optimize), .{}).step);
+        deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize), .{}).step);
+        deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize), .{}).step);
+        deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize), .{}).step);
+    }
     addIosStep(b, optimize, shaderc_exe);
     addAndroidStep(b, optimize, shaderc_exe);
 
@@ -402,6 +411,133 @@ fn buildBgfxAndroid(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
 // The schema compiler from the pinned flatbuffers tree, built for the host
 // to generate the inference runtime's schema headers at build time.
+fn listFilesRecursive(b: *std.Build, dir_path: []const u8, suffix: []const u8, exclude: []const []const u8, out: *std.ArrayList([]const u8)) void {
+    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var it = dir.iterate();
+    while (it.next(b.graph.io) catch return) |entry| {
+        const child = b.fmt("{s}/{s}", .{ dir_path, entry.name });
+        switch (entry.kind) {
+            .directory => listFilesRecursive(b, child, suffix, exclude, out),
+            .file => {
+                if (!std.mem.endsWith(u8, entry.name, suffix)) continue;
+                var banned = false;
+                for (exclude) |pattern| {
+                    if (std.mem.indexOf(u8, entry.name, pattern) != null) {
+                        banned = true;
+                        break;
+                    }
+                }
+                if (!banned) out.append(b.allocator, child) catch @panic("oom");
+            },
+            else => {},
+        }
+    }
+}
+
+// Abseil from the pinned tree: every runtime library source, tests and
+// tooling excluded, one static archive.
+fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libcpp = true;
+    module.addIncludePath(b.path(".vendor/abseil"));
+    var sources: std.ArrayList([]const u8) = .empty;
+    listFilesRecursive(b, ".vendor/abseil/absl", ".cc", &.{
+        "_test", "test_", "_benchmark", "benchmark", "_mock", "mock_", "matchers",
+        "test_util", "print_hash_of", "gaussian_distribution_gentables", "pool_urbg_gentables",
+        "_win.cc", "_emscripten.cc",
+    }, &sources);
+    std.mem.sort([]const u8, sources.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    for (sources.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
+    return b.addLibrary(.{ .name = "absl", .linkage = .static, .root_module = module });
+}
+
+fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.addIncludePath(b.path(".vendor/cpuinfo/include"));
+    module.addIncludePath(b.path(".vendor/cpuinfo/src"));
+    const flags = [_][]const u8{ "-std=c99", "-fno-sanitize=undefined", "-w", "-D_GNU_SOURCE", "-DCPUINFO_LOG_LEVEL=2" };
+    var files: std.ArrayList([]const u8) = .empty;
+    for ([_][]const u8{ "api.c", "cache.c", "init.c", "log.c" }) |file| {
+        files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
+    }
+    const os = target.result.os.tag;
+    if (os == .macos or os == .ios) {
+        for ([_][]const u8{ "mach/topology.c", "arm/cache.c", "arm/uarch.c", "arm/mach/init.c" }) |file| {
+            files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
+        }
+    } else if (os == .linux) {
+        for ([_][]const u8{
+            "linux/cpulist.c",       "linux/multiline.c", "linux/processors.c", "linux/smallfile.c",
+            "arm/cache.c",           "arm/uarch.c",       "arm/linux/chipset.c", "arm/linux/clusters.c",
+            "arm/linux/cpuinfo.c",   "arm/linux/hwcap.c", "arm/linux/init.c",    "arm/linux/midr.c",
+            "arm/linux/aarch64-isa.c",
+        }) |file| {
+            files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
+        }
+        if (target.result.abi.isAndroid()) {
+            files.append(b.allocator, ".vendor/cpuinfo/src/arm/android/properties.c") catch @panic("oom");
+        }
+    }
+    for (files.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
+    return b.addLibrary(.{ .name = "cpuinfo", .linkage = .static, .root_module = module });
+}
+
+fn buildPthreadpoolLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.addIncludePath(b.path(".vendor/pthreadpool/include"));
+    module.addIncludePath(b.path(".vendor/pthreadpool/src"));
+    module.addIncludePath(b.path(".vendor/fxdiv/include"));
+    const flags = [_][]const u8{ "-std=gnu11", "-fno-sanitize=undefined", "-w", "-DPTHREADPOOL_USE_GCD=0", "-DPTHREADPOOL_USE_EVENT=0", "-DPTHREADPOOL_USE_FUTEX=0" };
+    for ([_][]const u8{ "legacy-api.c", "portable-api.c", "memory.c", "pthreads.c" }) |file| {
+        module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/pthreadpool/src/{s}", .{file})), .flags = &flags });
+    }
+    return b.addLibrary(.{ .name = "pthreadpool", .linkage = .static, .root_module = module });
+}
+
+fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libcpp = true;
+    module.addIncludePath(b.path(".vendor/ruy"));
+    module.addIncludePath(b.path(".vendor/cpuinfo/include"));
+    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    var sources: std.ArrayList([]const u8) = .empty;
+    listFilesRecursive(b, ".vendor/ruy/ruy", ".cc", &.{
+        "_test", "test_", "benchmark", "example", "gtest", "pmu", "_lib.cc", "test.cc",
+    }, &sources);
+    std.mem.sort([]const u8, sources.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    for (sources.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
+    return b.addLibrary(.{ .name = "ruy", .linkage = .static, .root_module = module });
+}
+
+fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libcpp = true;
+    module.addIncludePath(b.path(".vendor/farmhash/src"));
+    module.addCSourceFile(.{
+        .file = b.path(".vendor/farmhash/src/farmhash.cc"),
+        .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DNAMESPACE_FOR_HASH_FUNCTIONS=farmhash" },
+    });
+    return b.addLibrary(.{ .name = "farmhash", .linkage = .static, .root_module = module });
+}
+
 fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
     b.build_root.handle.access(b.graph.io, ".vendor/flatbuffers/src/flatc_main.cpp", .{}) catch return null;
     const target = b.graph.host;
