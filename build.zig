@@ -167,8 +167,26 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const bundle_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/bundle.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const detector_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/detector.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const sampler_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/sampler.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
+    const bundle_tests = b.addTest(.{ .root_module = bundle_module });
+    const detector_tests = b.addTest(.{ .root_module = detector_module });
+    const sampler_tests = b.addTest(.{ .root_module = sampler_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
@@ -179,6 +197,9 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
+    test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
+    test_step.dependOn(&b.addRunArtifact(detector_tests).step);
+    test_step.dependOn(&b.addRunArtifact(sampler_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
@@ -226,9 +247,12 @@ pub fn build(b: *std.Build) void {
     };
     const shaderc_exe = addShadercTool(b, optimize);
     const flatc_exe = addFlatcTool(b);
-    _ = flatc_exe;
     {
         const deps_step = b.step("inference-deps", "Build the inference runtime dependency libraries");
+        deps_step.dependOn(&b.addInstallArtifact(buildFft2dLib(b, target, optimize), .{}).step);
+        if (flatc_exe) |flatc| {
+            deps_step.dependOn(&b.addInstallArtifact(buildTfliteLib(b, target, optimize, flatc), .{}).step);
+        }
         deps_step.dependOn(&b.addInstallArtifact(buildAbseilLib(b, target, optimize), .{}).step);
         deps_step.dependOn(&b.addInstallArtifact(buildCpuinfoLib(b, target, optimize), .{}).step);
         deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize), .{}).step);
@@ -791,6 +815,179 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     module.addCSourceFile(.{ .file = identifier_file, .flags = &c_flags });
 
     return b.addLibrary(.{ .name = "xnnpack", .linkage = .static, .root_module = module });
+}
+
+fn buildFft2dLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    const flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
+    for ([_][]const u8{ "alloc.c", "fftsg.c", "fftsg2d.c" }) |file| {
+        module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/fft2d/{s}", .{file})), .flags = &flags });
+    }
+    return b.addLibrary(.{ .name = "fft2d", .linkage = .static, .root_module = module });
+}
+
+// One directory of runtime sources, mirroring the pinned build's shallow
+// globs: every .c and .cc directly in the directory, minus test and tool
+// files. Exclusions match on the file name.
+const TfliteGroup = struct {
+    dir: []const u8,
+    exclude_contains: []const []const u8 = &.{},
+    exclude_prefix: []const []const u8 = &.{},
+};
+
+const tflite_groups = [_]TfliteGroup{
+    .{ .dir = ".", .exclude_contains = &.{ "tflite_with_xnnpack.", "with_selected_ops.", "tensorflow_profiler_logger.", "minimal_logging_" } },
+    .{ .dir = "core" },
+    .{ .dir = "core/acceleration/configuration", .exclude_contains = &.{"xnnpack_plugin"} },
+    .{ .dir = "core/api" },
+    .{ .dir = "core/async" },
+    .{ .dir = "core/async/c" },
+    .{ .dir = "core/async/interop" },
+    .{ .dir = "core/async/interop/c" },
+    .{ .dir = "core/c" },
+    .{ .dir = "core/experimental/acceleration/configuration" },
+    .{ .dir = "core/kernels" },
+    .{ .dir = "core/tools" },
+    .{ .dir = "c" },
+    .{ .dir = "delegates" },
+    .{ .dir = "delegates/external", .exclude_contains = &.{"_tester."} },
+    .{ .dir = "delegates/xnnpack", .exclude_contains = &.{"_tester."} },
+    .{ .dir = "experimental/remat" },
+    .{ .dir = "experimental/resource" },
+    .{ .dir = "kernels", .exclude_contains = &.{ "_test_util_internal.", "_ops_wrapper." }, .exclude_prefix = &.{"test_"} },
+    .{ .dir = "kernels/internal" },
+    .{ .dir = "kernels/internal/optimized" },
+    .{ .dir = "kernels/internal/optimized/integer_ops" },
+    .{ .dir = "kernels/internal/optimized/sparse_ops" },
+    .{ .dir = "kernels/internal/optimized/4bit", .exclude_contains = &.{ "neon_", "sse_" } },
+    .{ .dir = "kernels/internal/reference" },
+    .{ .dir = "kernels/internal/reference/integer_ops" },
+    .{ .dir = "kernels/internal/reference/sparse_ops" },
+};
+
+fn tfliteGroupSources(b: *std.Build, group: TfliteGroup, out: *std.ArrayList([]const u8)) void {
+    const dir_path = if (std.mem.eql(u8, group.dir, "."))
+        ".vendor/litert/tflite"
+    else
+        b.fmt(".vendor/litert/tflite/{s}", .{group.dir});
+    // A directory absent from the pinned tree is an empty group, exactly
+    // like the shallow glob it mirrors.
+    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(b.graph.io);
+    var it = dir.iterate();
+    files: while (it.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const name = entry.name;
+        if (!std.mem.endsWith(u8, name, ".c") and !std.mem.endsWith(u8, name, ".cc")) continue;
+        const stem = name[0 .. std.mem.lastIndexOfScalar(u8, name, '.').?];
+        if (std.mem.endsWith(u8, stem, "_test") or std.mem.endsWith(u8, stem, "test_util")) continue;
+        for (group.exclude_contains) |pattern| {
+            if (std.mem.indexOf(u8, name, pattern) != null) continue :files;
+        }
+        for (group.exclude_prefix) |pattern| {
+            if (std.mem.startsWith(u8, name, pattern)) continue :files;
+        }
+        out.append(b.allocator, b.fmt("{s}/{s}", .{ dir_path, name })) catch @panic("oom");
+    }
+}
+
+// The inference runtime itself: interpreter, builtin kernels, and the cpu
+// delegate, aggregated the same way the pinned build does. Graph rewriting
+// pieces the runtime still reaches for live in the sibling tensorflow pin.
+fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, flatc: *std.Build.Step.Compile) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.link_libcpp = true;
+    for ([_][]const u8{
+        ".vendor/litert",           ".vendor/tensorflow",         ".vendor/flatbuffers/include",
+        ".vendor/abseil",           ".vendor/eigen",              ".vendor/ruy",
+        ".vendor/gemmlowp",         ".vendor/ml-dtypes",          ".vendor/farmhash/src",
+        ".vendor/cpuinfo/include",  ".vendor/pthreadpool/include", ".vendor/xnnpack/include",
+        ".vendor/fp16/include",
+    }) |dir| {
+        module.addIncludePath(b.path(dir));
+    }
+
+    // The cpu delegate checks its weight cache against a schema compiled at
+    // build time by the pinned flatbuffers compiler.
+    const schema_run = b.addRunArtifact(flatc);
+    schema_run.addArgs(&.{ "-c", "--gen-mutable", "--gen-object-api", "-o" });
+    const schema_out = schema_run.addOutputDirectoryArg("weight_cache_schema");
+    schema_run.addFileArg(b.path(".vendor/litert/tflite/delegates/xnnpack/weight_cache_schema.fbs"));
+    const generated = b.addWriteFiles();
+    _ = generated.addCopyFile(schema_out.path(b, "weight_cache_schema_generated.h"), "tflite/delegates/xnnpack/weight_cache_schema_generated.h");
+    module.addIncludePath(generated.getDirectory());
+
+    module.addCMacro("EIGEN_NEON_GEBP_NR", "4");
+    module.addCMacro("TFLITE_WITH_RUY", "1");
+    module.addCMacro("TFLITE_KERNEL_USE_XNNPACK", "1");
+    module.addCMacro("TFLITE_BUILD_WITH_XNNPACK_DELEGATE", "1");
+    module.addCMacro("XNNPACK_DELEGATE_ENABLE_QS8", "1");
+    module.addCMacro("XNNPACK_DELEGATE_ENABLE_QU8", "1");
+    module.addCMacro("XNNPACK_DELEGATE_USE_LATEST_OPS", "1");
+    module.addCMacro("XNNPACK_DELEGATE_ENABLE_SUBGRAPH_RESHAPING", "1");
+    module.addCMacro("TFL_STATIC_LIBRARY_BUILD", "1");
+    module.addCMacro("TF_MAJOR_VERSION", "2");
+    module.addCMacro("TF_MINOR_VERSION", "19");
+    module.addCMacro("TF_PATCH_VERSION", "0");
+    module.addCMacro("TF_VERSION_SUFFIX", "\"\"");
+
+    var sources: std.ArrayList([]const u8) = .empty;
+    for (tflite_groups) |group| {
+        tfliteGroupSources(b, group, &sources);
+    }
+    const os = target.result.os.tag;
+    const logging_source: []const u8 = switch (os) {
+        .ios => "minimal_logging_ios.cc",
+        else => if (target.result.abi.isAndroid()) "minimal_logging_android.cc" else "minimal_logging_default.cc",
+    };
+    for ([_][]const u8{
+        "delegates/nnapi/nnapi_delegate_disabled.cc",
+        "nnapi/nnapi_implementation_disabled.cc",
+        "profiling/platform_profiler.cc",
+        "profiling/root_profiler.cc",
+        "profiling/telemetry/profiler.cc",
+        "profiling/telemetry/telemetry.cc",
+        "profiling/telemetry/c/telemetry_setting_internal.cc",
+        "kernels/internal/utils/sparsity_format_converter.cc",
+    }) |file| {
+        sources.append(b.allocator, b.fmt(".vendor/litert/tflite/{s}", .{file})) catch @panic("oom");
+    }
+    sources.append(b.allocator, b.fmt(".vendor/litert/tflite/{s}", .{logging_source})) catch @panic("oom");
+    if (target.result.abi.isAndroid()) {
+        sources.append(b.allocator, ".vendor/litert/tflite/profiling/atrace_profiler.cc") catch @panic("oom");
+    }
+    for ([_][]const u8{
+        "compiler/mlir/lite/allocation.cc",
+        "compiler/mlir/lite/core/api/error_reporter.cc",
+        "compiler/mlir/lite/core/api/flatbuffer_conversions.cc",
+        "compiler/mlir/lite/core/model_builder_base.cc",
+        "compiler/mlir/lite/experimental/remat/metadata_util.cc",
+        "compiler/mlir/lite/mmap_allocation.cc",
+        "compiler/mlir/lite/schema/schema_utils.cc",
+        "compiler/mlir/lite/utils/string_utils.cc",
+    }) |file| {
+        sources.append(b.allocator, b.fmt(".vendor/tensorflow/tensorflow/{s}", .{file})) catch @panic("oom");
+    }
+    std.mem.sort([]const u8, sources.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
+    const cxx_flags = [_][]const u8{ "-std=c++20", "-fno-sanitize=undefined", "-w" };
+    for (sources.items) |file| {
+        const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".c")) &c_flags else &cxx_flags;
+        module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
+    }
+    if (os == .ios) {
+        module.addCSourceFile(.{
+            .file = b.path(".vendor/litert/tflite/profiling/signpost_profiler.mm"),
+            .flags = &.{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" },
+        });
+    }
+    return b.addLibrary(.{ .name = "tflite", .linkage = .static, .root_module = module });
 }
 
 fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
