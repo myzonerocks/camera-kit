@@ -1,9 +1,136 @@
 import { Core, PreviewSession } from "../src/index.ts";
+import { FACE_LANDMARK_COUNT } from "../src/tracking.ts";
 
 const status = document.getElementById("status")!;
 const canvas = document.getElementById("preview") as HTMLCanvasElement;
+const overlay = document.getElementById("overlay") as HTMLCanvasElement;
 
 let proofLogged = false;
+
+interface TrackingReply {
+  kind: string;
+  message?: string;
+  presence: number;
+  landmarkCount: number;
+  landmarks: Float32Array;
+}
+
+/// The tracking worker hosts the wasm module; frames go over as
+/// transferred buffers and results come back parsed. Replies arrive in
+/// send order, so a queue of resolvers pairs them up.
+class TrackerLink {
+  private worker: Worker;
+  private resolvers: Array<(reply: TrackingReply) => void> = [];
+  busy = false;
+
+  private constructor(worker: Worker) {
+    this.worker = worker;
+    worker.onmessage = (event: MessageEvent<TrackingReply>) => {
+      if (event.data.kind !== "result") return;
+      this.busy = false;
+      this.resolvers.shift()?.(event.data);
+    };
+  }
+
+  static async create(): Promise<TrackerLink> {
+    const [moduleBytes, taskBundle] = await Promise.all([
+      fetch(new URL("./camerakit_tracking.wasm", import.meta.url)).then((r) => r.arrayBuffer()),
+      fetch(new URL("./face_landmarker.task", import.meta.url)).then((r) => r.arrayBuffer()),
+    ]);
+    const worker = new Worker(new URL("./tracking-worker.js", import.meta.url), { type: "module" });
+    await new Promise<void>((resolve, reject) => {
+      worker.onerror = (event) => reject(new Error(`worker: ${event.message}`));
+      worker.onmessage = (event: MessageEvent<{ kind: string; message?: string }>) => {
+        if (event.data.kind === "booted") {
+          (window as unknown as Record<string, unknown>).workerBooted = true;
+          return;
+        }
+        if (event.data.kind === "stage") {
+          (window as unknown as Record<string, unknown>).workerStage = (event.data as { stage?: string }).stage;
+          return;
+        }
+        if (event.data.kind === "ready") resolve();
+        else reject(new Error(event.data.message ?? "tracking worker failed"));
+      };
+      worker.postMessage({ kind: "init", moduleBytes, taskBundle }, [moduleBytes, taskBundle]);
+    });
+    return new TrackerLink(worker);
+  }
+
+  send(rgba: Uint8ClampedArray, width: number, height: number, timestampUs: number): Promise<TrackingReply> {
+    this.busy = true;
+    const copy = new Uint8Array(rgba).buffer;
+    return new Promise((resolve) => {
+      this.resolvers.push(resolve);
+      this.worker.postMessage({ kind: "frame", rgba: copy, width, height, timestampUs }, [copy]);
+    });
+  }
+}
+
+/// Landmarks come back in frame pixels; the overlay scales them into its
+/// own square and paints one dot each.
+function drawOverlay(reply: TrackingReply, frameWidth: number, frameHeight: number): void {
+  const ctx = overlay.getContext("2d")!;
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  if (reply.landmarkCount === 0 || reply.presence < 0.5) return;
+  const scaleX = overlay.width / frameWidth;
+  const scaleY = overlay.height / frameHeight;
+  ctx.fillStyle = "#fff";
+  for (let index = 0; index < reply.landmarkCount; index += 1) {
+    const x = reply.landmarks[index * 3] * scaleX;
+    const y = reply.landmarks[index * 3 + 1] * scaleY;
+    ctx.fillRect(x - 1, y - 1, 2, 2);
+  }
+}
+
+async function startTracking(preview: PreviewSession): Promise<void> {
+  const link = await TrackerLink.create();
+  const scratch = document.createElement("canvas");
+  const ctx = scratch.getContext("2d", { willReadFrequently: true })!;
+  let trackingAnnounced = false;
+
+  // One analysis frame in flight at a time, always the newest; the live
+  // loop samples the camera element at analysis size.
+  const analysisWidth = 480;
+  const feed = () => {
+    requestAnimationFrame(feed);
+    if (link.busy) return;
+    const video = preview.video;
+    if (video.readyState < 2 || video.videoWidth === 0) return;
+    const analysisHeight = Math.round((analysisWidth * video.videoHeight) / video.videoWidth);
+    scratch.width = analysisWidth;
+    scratch.height = analysisHeight;
+    ctx.drawImage(video, 0, 0, analysisWidth, analysisHeight);
+    const pixels = ctx.getImageData(0, 0, analysisWidth, analysisHeight);
+    void link.send(pixels.data, analysisWidth, analysisHeight, Math.round(performance.now() * 1000)).then((reply) => {
+      drawOverlay(reply, analysisWidth, analysisHeight);
+      if (!trackingAnnounced) {
+        trackingAnnounced = true;
+        console.log(`CKWEB tracking running: serial results flowing, presence ${reply.presence.toFixed(3)}`);
+      }
+    });
+  };
+  requestAnimationFrame(feed);
+
+  // The still-image path the prover drives: one fetched image through the
+  // same worker, resolved with the parsed result.
+  (window as unknown as Record<string, unknown>).trackImage = async (url: string) => {
+    const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+    const still = document.createElement("canvas");
+    still.width = bitmap.width;
+    still.height = bitmap.height;
+    const stillCtx = still.getContext("2d", { willReadFrequently: true })!;
+    stillCtx.drawImage(bitmap, 0, 0);
+    const pixels = stillCtx.getImageData(0, 0, still.width, still.height);
+    const reply = await link.send(pixels.data, still.width, still.height, 0);
+    return {
+      presence: reply.presence,
+      landmarkCount: reply.landmarkCount,
+      expected: FACE_LANDMARK_COUNT,
+    };
+  };
+  (window as unknown as Record<string, unknown>).trackingUp = true;
+}
 
 async function run(): Promise<void> {
   const core = await Core.load(new URL("./camerakit.wasm", import.meta.url));
@@ -46,6 +173,10 @@ async function run(): Promise<void> {
     },
   });
   await preview.start();
+  startTracking(preview).catch((err) => {
+    (window as unknown as Record<string, unknown>).trackingError = String(err);
+    console.log(`tracking unavailable: ${String(err)}`);
+  });
 }
 
 run().catch((err) => {

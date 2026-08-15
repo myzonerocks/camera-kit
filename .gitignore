@@ -55,7 +55,10 @@ shells/kotlin/local.properties
 shells/ts/node_modules/
 shells/ts/dist/
 shells/ts/demo/dist.js
+shells/ts/demo/tracking-worker.js
 shells/ts/demo/camerakit.wasm
+shells/ts/demo/camerakit_tracking.wasm
+shells/ts/demo/face_landmarker.task
 shells/ts/**/*.wasm.map
 
 # Model assets are synced from .models at app build time, never tracked.

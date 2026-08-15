@@ -43,8 +43,22 @@ function wasiImports(getMemory: () => WebAssembly.Memory): WebAssembly.ModuleImp
       crypto.getRandomValues(bytes);
       return 0;
     },
-    fd_write: (_fd: number, _iovs: number, _iovsLen: number, writtenPtr: number): number => {
-      new DataView(getMemory().buffer).setUint32(writtenPtr, 0, true);
+    fd_write: (fd: number, iovs: number, iovsLen: number, writtenPtr: number): number => {
+      // Consume every byte or the writer retries forever; log lines
+      // surface on the console where they help.
+      const view = new DataView(getMemory().buffer);
+      let total = 0;
+      let text = "";
+      for (let at = 0; at < iovsLen; at += 1) {
+        const ptr = view.getUint32(iovs + at * 8, true);
+        const len = view.getUint32(iovs + at * 8 + 4, true);
+        total += len;
+        if (len > 0 && fd <= 2) {
+          text += new TextDecoder().decode(new Uint8Array(getMemory().buffer, ptr, Math.min(len, 4096)));
+        }
+      }
+      if (text.trim().length > 0) console.log(`tracking module: ${text.trim()}`);
+      view.setUint32(writtenPtr, total, true);
       return 0;
     },
     fd_close: (): number => 0,
@@ -60,7 +74,26 @@ function wasiImports(getMemory: () => WebAssembly.Memory): WebAssembly.ModuleImp
       return 0;
     },
     environ_get: (): number => 0,
+    args_sizes_get: (countPtr: number, sizePtr: number): number => {
+      const view = new DataView(getMemory().buffer);
+      view.setUint32(countPtr, 0, true);
+      view.setUint32(sizePtr, 0, true);
+      return 0;
+    },
+    args_get: (): number => 0,
   };
+}
+
+/// Anything else the module's startup declares but never drives answers
+/// with the not-supported code, so instantiation is total without hiding
+/// a call that matters.
+function totalWasi(getMemory: () => WebAssembly.Memory): WebAssembly.ModuleImports {
+  const implemented = wasiImports(getMemory);
+  return new Proxy(implemented, {
+    get(target, property: string) {
+      return target[property] ?? (() => 52);
+    },
+  });
 }
 
 export class FaceTracker {
@@ -75,18 +108,26 @@ export class FaceTracker {
   /** Instantiates the module and stands the engines up from the task
    * bundle bytes. Call inside a Worker: creation parses three models and
    * takes real time, and process runs inference synchronously. */
+  /** Optional stage reporting for hosts that want startup visibility. */
+  static onStage: ((stage: string) => void) | null = null;
+
   static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<FaceTracker> {
     let memory: WebAssembly.Memory | undefined;
+    FaceTracker.onStage?.("instantiating");
     const { instance } = await WebAssembly.instantiate(moduleBytes, {
-      wasi_snapshot_preview1: wasiImports(() => memory!),
+      wasi_snapshot_preview1: totalWasi(() => memory!),
     });
+    FaceTracker.onStage?.("instantiated");
     const exports = instance.exports as unknown as TrackingExports;
     memory = exports.memory;
 
+    FaceTracker.onStage?.("engines starting");
     const taskPtr = exports.ck_tracking_alloc(taskBundle.length);
     if (taskPtr === 0) throw new Error("tracking module allocation failed");
     new Uint8Array(exports.memory.buffer, taskPtr, taskBundle.length).set(taskBundle);
+    FaceTracker.onStage?.("bundle staged");
     const handle = exports.ck_tracking_create(taskPtr, taskBundle.length);
+    FaceTracker.onStage?.("engines returned");
     exports.ck_tracking_free(taskPtr, taskBundle.length);
     if (handle === 0) throw new Error("tracking bundle rejected");
 
