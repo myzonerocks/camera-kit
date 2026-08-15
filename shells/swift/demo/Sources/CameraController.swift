@@ -29,12 +29,15 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     private(set) var state: State = .idle
     private(set) var submittedFrames = 0
+    private(set) var frameWidth = 0
+    private(set) var frameHeight = 0
     private var mirrored = false
     private var rotationQuarterTurns: UInt32 = 0
     var onStateChange: ((State) -> Void)?
 
     func start(engineSession: OpaquePointer?, position: AVCaptureDevice.Position = .back) {
         self.engineSession = engineSession
+        enableFaceTracking()
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -57,6 +60,20 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     func stop() {
         captureSession.stopRunning()
         transition(to: .idle)
+    }
+
+    private func enableFaceTracking() {
+        guard let engineSession,
+              let url = Bundle.main.url(forResource: "face_landmarker", withExtension: "task"),
+              let bundleData = try? Data(contentsOf: url)
+        else {
+            log.info("face tracking bundle not present")
+            return
+        }
+        let status = bundleData.withUnsafeBytes { raw in
+            ck_session_enable_face_tracking(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count, 0)
+        }
+        log.info("face tracking enable status \(status.rawValue)")
     }
 
     private func transition(to newState: State) {
@@ -147,6 +164,8 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
+        frameWidth = width
+        frameHeight = height
 
         var yTextureRef: CVMetalTexture?
         var uvTextureRef: CVMetalTexture?
@@ -194,6 +213,22 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         )
         if ck_session_submit_frame(engineSession, &desc, &planes) == CK_OK {
             submittedFrames += 1
+        }
+
+        // Tracking reads the same frame's planes on the CPU; the worker
+        // copies before this callback returns and the buffer recycles.
+        if CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly) == kCVReturnSuccess {
+            if let yBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0),
+               let uvBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1) {
+                let yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+                let uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+                _ = ck_session_track_frame(
+                    engineSession, &desc,
+                    yBase.assumingMemoryBound(to: UInt8.self), UInt32(yStride),
+                    uvBase.assumingMemoryBound(to: UInt8.self), UInt32(uvStride)
+                )
+            }
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)
         }
     }
 }

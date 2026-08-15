@@ -58,6 +58,9 @@ shells/ts/demo/dist.js
 shells/ts/demo/camerakit.wasm
 shells/ts/**/*.wasm.map
 
+# Model assets are synced from .models at app build time, never tracked.
+shells/kotlin/demo/src/main/assets/
+
 # Raster images are fetched corpus or scratch artifacts, never source.
 *.jpg
 *.jpeg

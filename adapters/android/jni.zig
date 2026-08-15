@@ -154,6 +154,56 @@ export fn Java_kit_camera_CameraKit_nativeSubmitHardwareBuffer(
     return @intFromEnum(abi.ck_session_submit_hardware_buffer(sessionFromHandle(session), &desc, buffer));
 }
 
+export fn Java_kit_camera_CameraKit_nativeEnableFaceTracking(env: *JniEnv, cls: jobject, session: i64, task_buffer: jobject, task_len: i32, threads: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, task_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.ck_session_enable_face_tracking(sessionFromHandle(session), bytes, @intCast(task_len), threads));
+}
+
+export fn Java_kit_camera_CameraKit_nativeDisableFaceTracking(env: *JniEnv, cls: jobject, session: i64) void {
+    _ = env;
+    _ = cls;
+    abi.ck_session_disable_face_tracking(sessionFromHandle(session));
+}
+
+export fn Java_kit_camera_CameraKit_nativeTrackFrame(
+    env: *JniEnv,
+    cls: jobject,
+    session: i64,
+    y_buffer: jobject,
+    y_stride: i32,
+    uv_buffer: jobject,
+    uv_stride: i32,
+    width: i32,
+    height: i32,
+    color_standard: i32,
+    color_range: i32,
+    timestamp_us: i64,
+) i32 {
+    _ = cls;
+    const y = getDirectBufferAddress(env, y_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const uv = getDirectBufferAddress(env, uv_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var desc: abi.FrameDesc = .{
+        .width = @intCast(width),
+        .height = @intCast(height),
+        .pixel_format = 0,
+        .color_standard = @intCast(color_standard),
+        .color_range = @intCast(color_range),
+        .flags = 0,
+        .timestamp_us = timestamp_us,
+    };
+    return @intFromEnum(abi.ck_session_track_frame(sessionFromHandle(session), &desc, y, @intCast(y_stride), uv, @intCast(uv_stride)));
+}
+
+/// The result buffer is a direct buffer of at least the frozen result
+/// size; the shell reads the fields straight out of it.
+export fn Java_kit_camera_CameraKit_nativeFaceResult(env: *JniEnv, cls: jobject, session: i64, result_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, result_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const result: *abi.FaceResult = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.ck_session_face_result(sessionFromHandle(session), result));
+}
+
 export fn Java_kit_camera_CameraKit_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;

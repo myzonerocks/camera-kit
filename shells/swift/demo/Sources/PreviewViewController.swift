@@ -13,6 +13,9 @@ final class PreviewViewController: UIViewController {
     private let log = Logger(subsystem: "kit.camera.demo", category: "preview")
     private let camera = CameraController()
     private let statusLabel = UILabel()
+    private let faceLayer = CAShapeLayer()
+    private var faceResult = ck_face_result()
+    private var lastFaceSerial: UInt64 = 0
 
     private var engine: OpaquePointer?
     private var session: OpaquePointer?
@@ -58,6 +61,10 @@ final class PreviewViewController: UIViewController {
         camera.onStateChange = { [weak self] state in
             self?.statusLabel.text = "capture \(state.rawValue)"
         }
+
+        faceLayer.fillColor = UIColor.white.cgColor
+        faceLayer.strokeColor = nil
+        view.layer.addSublayer(faceLayer)
     }
 
     override func viewDidLayoutSubviews() {
@@ -115,6 +122,7 @@ final class PreviewViewController: UIViewController {
         lastFrameStart = start
 
         _ = ck_session_report_frame(session, frameTimeUs, ck_thermal(rawValue: UInt32(ProcessInfo.processInfo.thermalState.ckThermal)))
+        drawFaceOverlay()
         guard ck_engine_render_frame(engine, session) == CK_OK else { return }
         renderedFrames += 1
         fpsWindowFrames += 1
@@ -131,6 +139,37 @@ final class PreviewViewController: UIViewController {
             fpsWindowStart = now
             fpsWindowFrames = 0
         }
+    }
+
+    /// Landmarks arrive in sensor pixels; the sensor sits one quarter turn
+    /// from portrait, the same turn the preview applies.
+    private func drawFaceOverlay() {
+        guard ck_session_face_result(session, &faceResult) == CK_OK else { return }
+        guard faceResult.frame_serial != lastFaceSerial else { return }
+        lastFaceSerial = faceResult.frame_serial
+        guard faceResult.landmark_count > 0, faceResult.presence >= 0.5 else {
+            faceLayer.path = nil
+            return
+        }
+
+        let path = CGMutablePath()
+        let bounds = view.bounds
+        withUnsafeBytes(of: &faceResult.landmarks) { raw in
+            let points = raw.bindMemory(to: Float.self)
+            let sensorWidth = CGFloat(max(camera.frameWidth, 1))
+            let sensorHeight = CGFloat(max(camera.frameHeight, 1))
+            let scaleX = bounds.width / sensorHeight
+            let scaleY = bounds.height / sensorWidth
+            for index in 0 ..< Int(faceResult.landmark_count) {
+                let x = CGFloat(points[index * 3])
+                let y = CGFloat(points[index * 3 + 1])
+                // Quarter turn: sensor x runs down the portrait screen.
+                let viewX = (sensorHeight - y) * scaleX
+                let viewY = x * scaleY
+                path.addEllipse(in: CGRect(x: viewX - 1.5, y: viewY - 1.5, width: 3, height: 3))
+            }
+        }
+        faceLayer.path = path
     }
 
     @objc private func appDidEnterBackground() {

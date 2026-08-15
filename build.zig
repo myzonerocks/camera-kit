@@ -256,16 +256,16 @@ pub fn build(b: *std.Build) void {
     {
         const deps_step = b.step("inference-deps", "Build the inference runtime dependency libraries");
         if (have_inference_stack) {
-            deps_step.dependOn(&b.addInstallArtifact(buildFft2dLib(b, target, optimize), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildFft2dLib(b, target, optimize, null), .{}).step);
             if (flatc_exe) |flatc| {
-                deps_step.dependOn(&b.addInstallArtifact(buildTfliteLib(b, target, optimize, flatc), .{}).step);
+                deps_step.dependOn(&b.addInstallArtifact(buildTfliteLib(b, target, optimize, flatc, null), .{}).step);
             }
-            deps_step.dependOn(&b.addInstallArtifact(buildAbseilLib(b, target, optimize), .{}).step);
-            deps_step.dependOn(&b.addInstallArtifact(buildCpuinfoLib(b, target, optimize), .{}).step);
-            deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize), .{}).step);
-            deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize), .{}).step);
-            deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize), .{}).step);
-            deps_step.dependOn(&b.addInstallArtifact(buildXnnpackLib(b, target, optimize), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildAbseilLib(b, target, optimize, null), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildCpuinfoLib(b, target, optimize, null), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize, null), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize, null), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize, null), .{}).step);
+            deps_step.dependOn(&b.addInstallArtifact(buildXnnpackLib(b, target, optimize, null, null), .{}).step);
         } else {
             deps_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
         }
@@ -326,14 +326,14 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "abi", .module = abi_tracking_module },
             },
         });
-        tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?));
-        tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize));
-        tracking_module.linkLibrary(buildAbseilLib(b, target, optimize));
-        tracking_module.linkLibrary(buildRuyLib(b, target, optimize));
-        tracking_module.linkLibrary(buildFarmhashLib(b, target, optimize));
-        tracking_module.linkLibrary(buildFft2dLib(b, target, optimize));
-        tracking_module.linkLibrary(buildCpuinfoLib(b, target, optimize));
-        tracking_module.linkLibrary(buildPthreadpoolLib(b, target, optimize));
+        tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null));
+        tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
+        tracking_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
+        tracking_module.linkLibrary(buildRuyLib(b, target, optimize, null));
+        tracking_module.linkLibrary(buildFarmhashLib(b, target, optimize, null));
+        tracking_module.linkLibrary(buildFft2dLib(b, target, optimize, null));
+        tracking_module.linkLibrary(buildCpuinfoLib(b, target, optimize, null));
+        tracking_module.linkLibrary(buildPthreadpoolLib(b, target, optimize, null));
         tracking_module.addIncludePath(b.path(".vendor/bimg/3rdparty/stb"));
         tracking_module.addCSourceFile(.{
             .file = b.path("harness/stb_image_impl.c"),
@@ -346,8 +346,8 @@ pub fn build(b: *std.Build) void {
     } else {
         tracking_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
     }
-    addIosStep(b, optimize, shaderc_exe);
-    addAndroidStep(b, optimize, shaderc_exe);
+    addIosStep(b, optimize, shaderc_exe, flatc_exe);
+    addAndroidStep(b, optimize, shaderc_exe, flatc_exe);
 
     // The web core: the same export layer compiled to wasm32 with every ck_
     // symbol visible to the embedder.
@@ -443,7 +443,7 @@ fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8) vo
     module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "lib", "aarch64-linux-android", "29" }) });
 }
 
-fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile) void {
+fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
     const android_step = b.step("android", "Build libcamerakit.so for android arm64-v8a");
     const shaderc_tool = shaderc_exe orelse {
         android_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
@@ -488,9 +488,48 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .{ .name = "render", .module = render_android },
         },
     });
+    const libc_txt = b.addWriteFiles().add("android-libc.txt", b.fmt("include_dir={s}/usr/include\nsys_include_dir={s}/usr/include/aarch64-linux-android\ncrt_dir={s}/usr/lib/aarch64-linux-android/29\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n", .{ sysroot, sysroot, sysroot }));
+
     const tracking_cores_android = trackingCoreModules(b, android_target, optimize, math_android);
     abi_android.addImport("face", tracking_cores_android.face);
-    abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
+    const have_inference_stack = blk: {
+        for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
+            b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
+        }
+        break :blk true;
+    };
+    const flatc_android = flatc_exe;
+    const inference_android = have_inference_stack and flatc_android != null;
+    if (inference_android) {
+        const runtime_android = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/runtime.zig"),
+            .target = android_target,
+            .optimize = optimize,
+        });
+        runtime_android.link_libc = true;
+        runtime_android.addIncludePath(b.path(".vendor/litert"));
+        addNdkPaths(b, runtime_android, sysroot);
+        runtime_android.addCMacro("_Nonnull", "");
+        runtime_android.addCMacro("_Nullable", "");
+        const tracking_android = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/tracking.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = tracking_cores_android.bundle },
+                .{ .name = "runtime", .module = runtime_android },
+                .{ .name = "detector", .module = tracking_cores_android.detector },
+                .{ .name = "sampler", .module = tracking_cores_android.sampler },
+                .{ .name = "face", .module = tracking_cores_android.face },
+                .{ .name = "tracker", .module = tracking_cores_android.tracker },
+                .{ .name = "graph", .module = graph_android },
+                .{ .name = "math", .module = math_android },
+            },
+        });
+        abi_android.addImport("tracking", tracking_android);
+    } else {
+        abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
+    }
     const jni_module = b.createModule(.{
         .root_source_file = b.path("adapters/android/jni.zig"),
         .target = android_target,
@@ -499,8 +538,17 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     });
     jni_module.link_libc = true;
     addNdkPaths(b, jni_module, sysroot);
-
-    const libc_txt = b.addWriteFiles().add("android-libc.txt", b.fmt("include_dir={s}/usr/include\nsys_include_dir={s}/usr/include/aarch64-linux-android\ncrt_dir={s}/usr/lib/aarch64-linux-android/29\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n", .{ sysroot, sysroot, sysroot }));
+    if (inference_android) {
+        jni_module.link_libcpp = true;
+        jni_module.linkLibrary(buildTfliteLib(b, android_target, optimize, flatc_android.?, libc_txt));
+        jni_module.linkLibrary(buildXnnpackLib(b, android_target, optimize, libc_txt, null));
+        jni_module.linkLibrary(buildAbseilLib(b, android_target, optimize, libc_txt));
+        jni_module.linkLibrary(buildRuyLib(b, android_target, optimize, libc_txt));
+        jni_module.linkLibrary(buildFarmhashLib(b, android_target, optimize, libc_txt));
+        jni_module.linkLibrary(buildFft2dLib(b, android_target, optimize, libc_txt));
+        jni_module.linkLibrary(buildCpuinfoLib(b, android_target, optimize, libc_txt));
+        jni_module.linkLibrary(buildPthreadpoolLib(b, android_target, optimize, libc_txt));
+    }
 
     const bgfx_android = buildBgfxAndroid(b, android_target, optimize, sysroot);
     bgfx_android.setLibCFile(libc_txt);
@@ -620,9 +668,11 @@ fn listFilesRecursive(b: *std.Build, dir_path: []const u8, suffix: []const u8, e
 
 // Abseil from the pinned tree: every runtime library source, tests and
 // tooling excluded, one static archive.
-fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     module.addIncludePath(b.path(".vendor/abseil"));
     var sources: std.ArrayList([]const u8) = .empty;
     listFilesRecursive(b, ".vendor/abseil/absl", ".cc", &.{
@@ -639,12 +689,16 @@ fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     for (sources.items) |file| {
         module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
     }
-    return b.addLibrary(.{ .name = "absl", .linkage = .static, .root_module = module });
+    const lib = b.addLibrary(.{ .name = "absl", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
 }
 
-fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libc = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     module.addIncludePath(b.path(".vendor/cpuinfo/include"));
     module.addIncludePath(b.path(".vendor/cpuinfo/src"));
     const flags = [_][]const u8{ "-std=c99", "-fno-sanitize=undefined", "-w", "-D_GNU_SOURCE", "-DCPUINFO_LOG_LEVEL=2" };
@@ -653,7 +707,29 @@ fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
     }
     const os = target.result.os.tag;
-    if (os == .macos or os == .ios) {
+    const arch = target.result.cpu.arch;
+    if (arch == .x86_64) {
+        for ([_][]const u8{
+            "x86/init.c",       "x86/info.c",              "x86/vendor.c",
+            "x86/uarch.c",      "x86/name.c",              "x86/topology.c",
+            "x86/isa.c",        "x86/cache/init.c",        "x86/cache/descriptor.c",
+            "x86/cache/deterministic.c",
+        }) |file| {
+            files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
+        }
+        if (os == .linux) {
+            for ([_][]const u8{
+                "linux/cpulist.c", "linux/multiline.c", "linux/processors.c", "linux/smallfile.c",
+                "x86/linux/init.c", "x86/linux/cpuinfo.c",
+            }) |file| {
+                files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
+            }
+        } else if (os == .macos) {
+            for ([_][]const u8{ "mach/topology.c", "x86/mach/init.c" }) |file| {
+                files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
+            }
+        }
+    } else if (os == .macos or os == .ios) {
         for ([_][]const u8{ "mach/topology.c", "arm/cache.c", "arm/uarch.c", "arm/mach/init.c" }) |file| {
             files.append(b.allocator, b.fmt(".vendor/cpuinfo/src/{s}", .{file})) catch @panic("oom");
         }
@@ -673,12 +749,16 @@ fn buildCpuinfoLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     for (files.items) |file| {
         module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
     }
-    return b.addLibrary(.{ .name = "cpuinfo", .linkage = .static, .root_module = module });
+    const lib = b.addLibrary(.{ .name = "cpuinfo", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
 }
 
-fn buildPthreadpoolLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn buildPthreadpoolLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libc = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     module.addIncludePath(b.path(".vendor/pthreadpool/include"));
     module.addIncludePath(b.path(".vendor/pthreadpool/src"));
     module.addIncludePath(b.path(".vendor/fxdiv/include"));
@@ -686,12 +766,16 @@ fn buildPthreadpoolLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     for ([_][]const u8{ "legacy-api.c", "portable-api.c", "memory.c", "pthreads.c" }) |file| {
         module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/pthreadpool/src/{s}", .{file})), .flags = &flags });
     }
-    return b.addLibrary(.{ .name = "pthreadpool", .linkage = .static, .root_module = module });
+    const lib = b.addLibrary(.{ .name = "pthreadpool", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
 }
 
-fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     module.addIncludePath(b.path(".vendor/ruy"));
     module.addIncludePath(b.path(".vendor/cpuinfo/include"));
     const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
@@ -707,18 +791,24 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for (sources.items) |file| {
         module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
     }
-    return b.addLibrary(.{ .name = "ruy", .linkage = .static, .root_module = module });
+    const lib = b.addLibrary(.{ .name = "ruy", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
 }
 
-fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     module.addIncludePath(b.path(".vendor/farmhash/src"));
     module.addCSourceFile(.{
         .file = b.path(".vendor/farmhash/src/farmhash.cc"),
         .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
     });
-    return b.addLibrary(.{ .name = "farmhash", .linkage = .static, .root_module = module });
+    const lib = b.addLibrary(.{ .name = "farmhash", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
 }
 
 // Reads one SET(<name> ...) source list out of a cmake file in a pinned
@@ -808,6 +898,8 @@ const xnnpack_x86_64_families = [_]XnnpackFamily{
 fn xnnpackConfigureModule(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     module.link_libc = true;
     module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     for ([_][]const u8{
         ".vendor/xnnpack",             ".vendor/xnnpack/include", ".vendor/xnnpack/src",
         ".vendor/pthreadpool/include",
@@ -866,7 +958,7 @@ fn xnnpackConfigureModule(b: *std.Build, module: *std.Build.Module, target: std.
     if (target.result.os.tag == .linux) module.addCMacro("_GNU_SOURCE", "1");
 }
 
-fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath, family_sink: ?*std.ArrayList(*std.Build.Step.Compile)) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     xnnpackConfigureModule(b, module, target);
     const is_arm = target.result.cpu.arch == .aarch64;
@@ -919,17 +1011,28 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         var added = false;
         for (sources.items) |file| {
             if ((seen.getOrPut(file) catch @panic("oom")).found_existing) continue;
-            const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".cc")) &cxx_flags else micro_c_flags.items;
+            // Assembly runs through the integrated assembler, which takes
+            // its instruction set from the architecture flag, not from the
+            // module's cpu features.
+            const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".cc"))
+                &cxx_flags
+            else if (std.mem.endsWith(u8, file, ".S"))
+                &[_][]const u8{ "-w", "-march=armv8.2-a+fp16+dotprod" }
+            else
+                micro_c_flags.items;
             family_module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
             added = true;
         }
         if (wants_features and added) {
             const family_name = family.list[0 .. family.list.len - "_microkernels.cmake".len];
-            module.linkLibrary(b.addLibrary(.{
+            const family_lib = b.addLibrary(.{
                 .name = b.fmt("xnnpack-{s}", .{family_name}),
                 .linkage = .static,
                 .root_module = family_module,
-            }));
+            });
+            if (libc) |file| family_lib.setLibCFile(file);
+            if (family_sink) |sink| sink.append(b.allocator, family_lib) catch @panic("oom");
+            module.linkLibrary(family_lib);
         }
     }
 
@@ -972,17 +1075,23 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const identifier_file = b.addWriteFiles().add("xnnpack_build_identifier.c", id_source.items);
     module.addCSourceFile(.{ .file = identifier_file, .flags = &c_flags });
 
-    return b.addLibrary(.{ .name = "xnnpack", .linkage = .static, .root_module = module });
+    const lib = b.addLibrary(.{ .name = "xnnpack", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
 }
 
-fn buildFft2dLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+fn buildFft2dLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libc = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     const flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
     for ([_][]const u8{ "alloc.c", "fftsg.c", "fftsg2d.c" }) |file| {
         module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/fft2d/{s}", .{file})), .flags = &flags });
     }
-    return b.addLibrary(.{ .name = "fft2d", .linkage = .static, .root_module = module });
+    const lib = b.addLibrary(.{ .name = "fft2d", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
 }
 
 // One directory of runtime sources, mirroring the pinned build's shallow
@@ -1053,10 +1162,12 @@ fn tfliteGroupSources(b: *std.Build, group: TfliteGroup, out: *std.ArrayList([]c
 // The inference runtime itself: interpreter, builtin kernels, and the cpu
 // delegate, aggregated the same way the pinned build does. Graph rewriting
 // pieces the runtime still reaches for live in the sibling tensorflow pin.
-fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, flatc: *std.Build.Step.Compile) *std.Build.Step.Compile {
+fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, flatc: *std.Build.Step.Compile, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libc = true;
     module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     for ([_][]const u8{
         ".vendor/litert",           ".vendor/tensorflow",          ".vendor/tensorflow/third_party/xla",
         ".vendor/flatbuffers/include",
@@ -1146,7 +1257,9 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
             .flags = &.{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" },
         });
     }
-    return b.addLibrary(.{ .name = "tflite", .linkage = .static, .root_module = module });
+    const lib = b.addLibrary(.{ .name = "tflite", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
 }
 
 fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
@@ -1183,8 +1296,13 @@ fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
     return exe;
 }
 
+/// The iPhoneOS SDK for device builds, taken from the ios-sdk option so it
+/// reaches exactly the apple-target modules; a graph-wide sysroot would
+/// leak into the host tools compiled along the way.
+var apple_sdk: ?[]const u8 = null;
+
 fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
-    const sdk = b.sysroot orelse return;
+    const sdk = apple_sdk orelse b.sysroot orelse return;
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "include" }) });
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
 }
@@ -1274,14 +1392,15 @@ fn listFiles(b: *std.Build, dir_path: []const u8, suffix: []const u8) ?[][]const
 // the version is written, and a mismatching compiler fails closed here. The
 // shadow lane (weekly build against Zig master) is the one sanctioned bypass,
 // via CK_ALLOW_ZIG_MISMATCH=1.
-fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile) void {
+fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
     const ios_step = b.step("ios", "Build camerakit and bgfx static libraries for iOS devices");
     const shaderc_tool = shaderc_exe orelse {
         ios_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
         return;
     };
-    if (b.sysroot == null) {
-        const missing = b.addFail("camera-kit: run zig build ios --sysroot \"$(xcrun --sdk iphoneos --show-sdk-path)\"");
+    apple_sdk = b.option([]const u8, "ios-sdk", "Path to the iPhoneOS SDK for device builds") orelse b.sysroot;
+    if (apple_sdk == null) {
+        const missing = b.addFail("camera-kit: run zig build ios -Dios-sdk=\"$(xcrun --sdk iphoneos --show-sdk-path)\"");
         ios_step.dependOn(&missing.step);
         return;
     }
@@ -1324,16 +1443,68 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
     });
     const tracking_cores_ios = trackingCoreModules(b, ios_target, optimize, math_ios);
     abi_ios.addImport("face", tracking_cores_ios.face);
-    abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
+    const have_inference_stack = blk: {
+        for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
+            b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
+        }
+        break :blk true;
+    };
+    const inference_ios = have_inference_stack and flatc_exe != null;
+    var inference_libs: std.ArrayList(*std.Build.Step.Compile) = .empty;
+    if (inference_ios) {
+        var family_libs: std.ArrayList(*std.Build.Step.Compile) = .empty;
+        const runtime_ios = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/runtime.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+        });
+        runtime_ios.link_libc = true;
+        runtime_ios.addIncludePath(b.path(".vendor/litert"));
+        addAppleSdkPaths(b, runtime_ios);
+        const tracking_ios = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/tracking.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "bundle", .module = tracking_cores_ios.bundle },
+                .{ .name = "runtime", .module = runtime_ios },
+                .{ .name = "detector", .module = tracking_cores_ios.detector },
+                .{ .name = "sampler", .module = tracking_cores_ios.sampler },
+                .{ .name = "face", .module = tracking_cores_ios.face },
+                .{ .name = "tracker", .module = tracking_cores_ios.tracker },
+                .{ .name = "graph", .module = graph_ios },
+                .{ .name = "math", .module = math_ios },
+            },
+        });
+        abi_ios.addImport("tracking", tracking_ios);
+        for ([_]*std.Build.Step.Compile{
+            buildTfliteLib(b, ios_target, optimize, flatc_exe.?, null),
+            buildXnnpackLib(b, ios_target, optimize, null, &family_libs),
+            buildAbseilLib(b, ios_target, optimize, null),
+            buildRuyLib(b, ios_target, optimize, null),
+            buildFarmhashLib(b, ios_target, optimize, null),
+            buildFft2dLib(b, ios_target, optimize, null),
+            buildCpuinfoLib(b, ios_target, optimize, null),
+            buildPthreadpoolLib(b, ios_target, optimize, null),
+        }) |lib| {
+            inference_libs.append(b.allocator, lib) catch @panic("oom");
+        }
+        inference_libs.appendSlice(b.allocator, family_libs.items) catch @panic("oom");
+    } else {
+        abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
+    }
     const camerakit_ios = b.addLibrary(.{
         .name = "camerakit",
         .linkage = .static,
         .root_module = abi_ios,
     });
     const bgfx_ios = buildBgfxLib(b, ios_target, optimize);
+    var device_libs: std.ArrayList(*std.Build.Step.Compile) = .empty;
+    device_libs.appendSlice(b.allocator, &.{ camerakit_ios, bgfx_ios }) catch @panic("oom");
+    device_libs.appendSlice(b.allocator, inference_libs.items) catch @panic("oom");
     // Apple's linker requires 8-byte archive member alignment; the system
     // ranlib rewrites zig's archives into the accepted layout.
-    for ([_]*std.Build.Step.Compile{ camerakit_ios, bgfx_ios }) |lib| {
+    for (device_libs.items) |lib| {
         const install = b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = "ios" } } });
         const fix = b.addSystemCommand(&.{ "ranlib", b.getInstallPath(.{ .custom = "ios" }, lib.out_filename) });
         fix.step.dependOn(&install.step);

@@ -7,6 +7,9 @@ targets:
     type: application
     platform: iOS
     sources: [Sources]
+    resources:
+      - path: ../../../.models/face_landmarker.task
+        optional: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: kit.camera.demo
@@ -18,6 +21,22 @@ targets:
         OTHER_LDFLAGS:
           - "-lcamerakit"
           - "-lbgfx"
+          - "-ltflite"
+          - "-lxnnpack"
+          - "-lxnnpack-fp16arith"
+          - "-lxnnpack-neonfp16arith"
+          - "-lxnnpack-neonfp16arith_aarch64"
+          - "-lxnnpack-neondot"
+          - "-lxnnpack-neondot_aarch64"
+          - "-lxnnpack-neondotfp16arith"
+          - "-lxnnpack-neoni8mm"
+          - "-lxnnpack-aarch64"
+          - "-labsl"
+          - "-lruy"
+          - "-lfarmhash"
+          - "-lfft2d"
+          - "-lcpuinfo"
+          - "-lpthreadpool"
           - "-lc++"
           - "-framework"
           - "Metal"
