@@ -1,0 +1,10 @@
+.{
+    .name = "litert",
+    .repo = "https://github.com/google-ai-edge/LiteRT",
+    .version = "main 2026-08-15",
+    .commit = "7f43b53c9d4fabd1349e5d4328e290ab8a4946a8",
+    .archive_sha256 = "f90ce6f0ee23a7bf7f5b7ee6d9b94f373f19fb796528428b7b07e53a4716370e",
+    .license = "Apache-2.0",
+    .license_file = "LICENSE",
+    .license_sha256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+}
