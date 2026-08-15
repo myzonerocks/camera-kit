@@ -191,12 +191,22 @@ pub fn build(b: *std.Build) void {
             .{ .name = "detector", .module = detector_module },
         },
     });
+    const tracker_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/tracker.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_module },
+            .{ .name = "face", .module = face_module },
+        },
+    });
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
     const detector_tests = b.addTest(.{ .root_module = detector_module });
     const sampler_tests = b.addTest(.{ .root_module = sampler_module });
     const face_tests = b.addTest(.{ .root_module = face_module });
+    const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
@@ -211,6 +221,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(detector_tests).step);
     test_step.dependOn(&b.addRunArtifact(sampler_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
+    test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
@@ -306,6 +317,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "detector", .module = detector_module },
                 .{ .name = "sampler", .module = sampler_module },
                 .{ .name = "face", .module = face_module },
+                .{ .name = "tracker", .module = tracker_module },
             },
         });
         tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?));

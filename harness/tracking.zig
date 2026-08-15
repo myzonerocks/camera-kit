@@ -12,6 +12,7 @@ const runtime = @import("runtime");
 const detector = @import("detector");
 const sampler = @import("sampler");
 const face = @import("face");
+const tracker = @import("tracker");
 
 const stb = @cImport(@cInclude("stb_image.h"));
 
@@ -184,6 +185,30 @@ pub fn main(init_args: std.process.Init) !u8 {
         try out.flush();
         if (!case.faces) {
             if (found.len != 0) return 1;
+
+            // A lock pointed at a frame with no face must drop: the
+            // landmark model's presence score is the loop's only tether.
+            var lock: tracker.Tracker = .{};
+            lock.onDetection(.{
+                .center_x = @as(f32, @floatFromInt(image.width)) * 0.5,
+                .center_y = @as(f32, @floatFromInt(image.height)) * 0.5,
+                .side = @as(f32, @floatFromInt(image.width)) * 0.4,
+                .rotation = 0,
+            });
+            sampler.sampleRegion(image, lock.cropForFrame().?, .unit, landmark_side, landmark_tensor);
+            try landmarks_engine.writeInput(0, std.mem.sliceAsBytes(landmark_tensor));
+            try landmarks_engine.invoke();
+            const no_face_raw = (try landmarks_engine.outputFloats(1))[0];
+            const no_face_presence = if (no_face_raw < 0.0 or no_face_raw > 1.0)
+                1.0 / (1.0 + @exp(-no_face_raw))
+            else
+                no_face_raw;
+            var discard: [face.landmark_count]face.Landmark = undefined;
+            face.decodeLandmarks(try landmarks_engine.outputFloats(0), lock.cropForFrame().?, @floatFromInt(landmark_side), &discard);
+            const after = lock.onLandmarks(no_face_presence, &discard);
+            try out.print("  lock on empty frame: presence {d:.3}, status {s}\n", .{ no_face_presence, @tagName(after) });
+            try out.flush();
+            if (after != .searching) return 1;
             continue;
         }
         if (found.len == 0) return 1;
@@ -232,6 +257,34 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (inside != landmarks.len) return 1;
         if (eye_gap < region.side * 0.05) return 1;
         if (scores_in_range != scores.len) return 1;
+
+        // Tracking pass: the next frame's crop comes from these landmarks,
+        // no detector run. On a still frame the refined crop must keep the
+        // lock and land the same geometry.
+        var lock: tracker.Tracker = .{};
+        lock.onDetection(region);
+        if (lock.onLandmarks(presence, &landmarks) != .tracking) return 1;
+        const refined = lock.cropForFrame().?;
+        sampler.sampleRegion(image, refined, .unit, landmark_side, landmark_tensor);
+        try landmarks_engine.writeInput(0, std.mem.sliceAsBytes(landmark_tensor));
+        try landmarks_engine.invoke();
+        const tracked_raw = (try landmarks_engine.outputFloats(1))[0];
+        const tracked_presence = if (tracked_raw < 0.0 or tracked_raw > 1.0)
+            1.0 / (1.0 + @exp(-tracked_raw))
+        else
+            tracked_raw;
+        var tracked: [face.landmark_count]face.Landmark = undefined;
+        face.decodeLandmarks(try landmarks_engine.outputFloats(0), refined, @floatFromInt(landmark_side), &tracked);
+        if (lock.onLandmarks(tracked_presence, &tracked) != .tracking) return 1;
+        const tracked_gap = @abs(tracked[face.rotation_end_landmark].x - tracked[face.rotation_start_landmark].x);
+        const gap_drift = @abs(tracked_gap - eye_gap) / eye_gap;
+        try out.print(
+            "  tracking pass: presence {d:.3}, eye gap {d:.0}px, drift {d:.3}\n",
+            .{ tracked_presence, tracked_gap, gap_drift },
+        );
+        try out.flush();
+        if (tracked_presence < tracker.presence_floor) return 1;
+        if (gap_drift > 0.1) return 1;
     }
 
     try out.print("tracking harness: corpus clean through detect, landmarks, blendshapes\n", .{});
