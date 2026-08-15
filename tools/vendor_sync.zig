@@ -33,6 +33,7 @@ const license_allowlist = [_][]const u8{ "MIT", "BSD-2-Clause", "BSD-3-Clause", 
 // the allowlist, recorded in the decisions log. Nothing else inherits it.
 const license_exceptions = [_]struct { name: []const u8, license: []const u8 }{
     .{ .name = "eigen", .license = "MPL-2.0" },
+    .{ .name = "fft2d", .license = "Ooura" },
 };
 
 const max_archive_bytes: usize = 1 << 29;
@@ -208,6 +209,7 @@ const t = std.testing;
 
 test "named exceptions admit exactly one vendor and license pair" {
     try t.expect(Sync.licenseExcepted("eigen", "MPL-2.0"));
+    try t.expect(Sync.licenseExcepted("fft2d", "Ooura"));
     try t.expect(!Sync.licenseExcepted("eigen", "GPL-3.0"));
     try t.expect(!Sync.licenseExcepted("somelib", "MPL-2.0"));
 }
