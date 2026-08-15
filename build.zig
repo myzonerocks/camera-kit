@@ -1033,6 +1033,13 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 
     module.linkLibrary(buildLibyuvLib(b, target, optimize, libc));
 
+    // The engine's c boundary compiles into the same archive.
+    if (apple) {
+        module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim_apple.mm"), .flags = flags.items });
+    } else {
+        module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim.cc"), .flags = flags.items });
+    }
+
     const lib = b.addLibrary(.{ .name = "gpupixel", .linkage = .static, .root_module = module });
     if (libc) |file| lib.setLibCFile(file);
     return lib;
