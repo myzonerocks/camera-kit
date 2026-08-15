@@ -126,7 +126,7 @@ final class PreviewViewController: UIViewController {
             statusLabel.text = String(format: "capture %@  %.1f fps", camera.state.rawValue, fps)
             if !proofLogged, camera.submittedFrames > 60, fps > 20 {
                 proofLogged = true
-                log.info("CKDEMO PROOF live preview: \(self.camera.submittedFrames) camera frames rendered at \(String(format: "%.1f", fps)) fps")
+                log.info("CKDEMO preview active: \(self.camera.submittedFrames) camera frames rendered at \(String(format: "%.1f", fps)) fps")
             }
             fpsWindowStart = now
             fpsWindowFrames = 0

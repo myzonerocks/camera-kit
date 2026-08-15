@@ -91,6 +91,15 @@ pub const Renderer = struct {
         return error.RendererUnavailable;
     }
 
+    pub fn submitHardwareBuffer(r: *Renderer, hardware_buffer: *anyopaque, width: u32, height: u32, conversion: math.color.Conversion) !TextureHandle {
+        _ = r;
+        _ = hardware_buffer;
+        _ = width;
+        _ = height;
+        _ = conversion;
+        return error.Unsupported;
+    }
+
     pub fn touch(r: *Renderer) void {
         _ = r;
     }

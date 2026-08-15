@@ -64,7 +64,7 @@ for (let waited = 0; waited < 30_000; waited += 1000) {
     returnByValue: true,
   })) as { result?: { value?: string } };
   const title = result.result?.value ?? "";
-  if (title.includes("CKWEB PROOF")) {
+  if (title.includes("CKWEB preview active")) {
     proof = title;
     break;
   }

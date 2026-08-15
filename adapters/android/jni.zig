@@ -12,6 +12,7 @@ const JniEnv = opaque {};
 const jobject = ?*anyopaque;
 
 extern fn ANativeWindow_fromSurface(env: *JniEnv, surface: jobject) ?*anyopaque;
+extern fn AHardwareBuffer_fromHardwareBuffer(env: *JniEnv, hardware_buffer: jobject) ?*anyopaque;
 extern fn ANativeWindow_release(window: ?*anyopaque) void;
 
 // JNIEnv points at a pointer to the JNI function table. Only one entry is
@@ -125,6 +126,32 @@ export fn Java_kit_camera_CameraKit_nativeSubmitFrameCopy(
         .timestamp_us = timestamp_us,
     };
     return @intFromEnum(abi.ck_session_submit_frame_copy(sessionFromHandle(session), &desc, y, @intCast(y_stride), uv, @intCast(uv_stride)));
+}
+
+export fn Java_kit_camera_CameraKit_nativeSubmitHardwareBuffer(
+    env: *JniEnv,
+    cls: jobject,
+    session: i64,
+    hardware_buffer: jobject,
+    width: i32,
+    height: i32,
+    flags: i32,
+    color_standard: i32,
+    color_range: i32,
+    timestamp_us: i64,
+) i32 {
+    _ = cls;
+    const buffer = AHardwareBuffer_fromHardwareBuffer(env, hardware_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var desc: abi.FrameDesc = .{
+        .width = @intCast(width),
+        .height = @intCast(height),
+        .pixel_format = 0,
+        .color_standard = @intCast(color_standard),
+        .color_range = @intCast(color_range),
+        .flags = @bitCast(flags),
+        .timestamp_us = timestamp_us,
+    };
+    return @intFromEnum(abi.ck_session_submit_hardware_buffer(sessionFromHandle(session), &desc, buffer));
 }
 
 export fn Java_kit_camera_CameraKit_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {

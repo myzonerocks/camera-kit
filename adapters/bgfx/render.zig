@@ -56,8 +56,18 @@ pub const PreviewFrame = union(enum) {
     },
 };
 
+const is_android = builtin.os.tag == .linux and builtin.abi.isAndroid();
+
+const VkZeroCopy = if (is_android) struct {
+    converter: android_vk.Converter,
+    textures: [android_vk.ring_depth]c.bgfx_texture_handle_t = @splat(.{ .idx = invalid_handle }),
+    width: u32 = 0,
+    height: u32 = 0,
+} else struct {};
+
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
+    zero_copy: ?VkZeroCopy = null,
     width: u32,
     height: u32,
     layout: c.bgfx_vertex_layout_t,
@@ -73,14 +83,24 @@ pub const Renderer = struct {
         var bgfx_init: c.bgfx_init_t = undefined;
         c.bgfx_init_ctor(&bgfx_init);
         // Metal on apple targets. Android probes for the Vulkan
-        // capabilities zero-copy import rests on and takes the GL backend
-        // as the declared fallback when they are missing.
+        // capabilities zero-copy import rests on, brings up the adapter's
+        // own device, and takes the GL backend as the declared fallback
+        // when either is missing.
+        var vk_context: if (is_android) ?android_vk.Context else void = if (is_android) null else {};
+        if (is_android) {
+            if (@import("vulkan_probe.zig").vulkanReady()) {
+                vk_context = android_vk.Context.init() catch null;
+            }
+        }
         bgfx_init.type = if (builtin.os.tag == .macos or builtin.os.tag == .ios)
             c.BGFX_RENDERER_TYPE_METAL
-        else if (builtin.os.tag == .linux and builtin.abi.isAndroid())
-            (if (@import("vulkan_probe.zig").vulkanReady()) c.BGFX_RENDERER_TYPE_VULKAN else c.BGFX_RENDERER_TYPE_OPENGLES)
+        else if (is_android)
+            (if (vk_context != null) c.BGFX_RENDERER_TYPE_VULKAN else c.BGFX_RENDERER_TYPE_OPENGLES)
         else
             c.BGFX_RENDERER_TYPE_COUNT;
+        if (is_android) {
+            if (vk_context) |ctx| bgfx_init.platformData.context = ctx.rendererDevice();
+        }
         bgfx_init.resolution.width = options.width;
         bgfx_init.resolution.height = options.height;
         bgfx_init.resolution.reset = if (options.vsync) c.BGFX_RESET_VSYNC else c.BGFX_RESET_NONE;
@@ -115,8 +135,22 @@ pub const Renderer = struct {
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
 
+        var zero_copy: ?VkZeroCopy = null;
+        if (is_android) {
+            if (vk_context) |ctx| {
+                if (android_vk.Converter.init(ctx)) |converter| {
+                    zero_copy = .{ .converter = converter };
+                } else |_| {
+                    var mutable = ctx;
+                    mutable.deinit();
+                    return error.RendererInit;
+                }
+            }
+        }
+
         return .{
             .gpa = gpa,
+            .zero_copy = zero_copy,
             .width = options.width,
             .height = options.height,
             .layout = layout,
@@ -138,6 +172,14 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(r: *Renderer) void {
+        if (is_android) {
+            if (r.zero_copy) |*zc| {
+                for (zc.textures) |texture| {
+                    if (texture.idx != invalid_handle) c.bgfx_destroy_texture(texture);
+                }
+                zc.converter.deinit();
+            }
+        }
         if (r.upload_cache) |cache| {
             c.bgfx_destroy_texture(cache.y);
             c.bgfx_destroy_texture(cache.uv);
@@ -149,6 +191,12 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
         c.bgfx_shutdown();
+        if (is_android) {
+            if (r.zero_copy) |*zc| {
+                var ctx = zc.converter.ctx;
+                ctx.deinit();
+            }
+        }
         r.* = undefined;
     }
 
@@ -265,6 +313,44 @@ pub const Renderer = struct {
         c.bgfx_update_texture_2d(cache.uv, 0, 0, 0, 0, width / 2, height / 2, uv_mem, std.math.maxInt(u16));
 
         return .{ .y = cache.y, .uv = cache.uv };
+    }
+
+    /// Zero-copy submission of a camera hardware buffer: the adapter
+    /// converts on its own queue and the returned handle is the ring
+    /// texture holding the rgba frame. Unsupported formats and devices
+    /// surface as errors the caller counts onto the declared copy path.
+    pub fn submitHardwareBuffer(r: *Renderer, hardware_buffer: *anyopaque, width: u32, height: u32, conversion: math.color.Conversion) !c.bgfx_texture_handle_t {
+        if (!is_android) return error.Unsupported;
+        const zc = if (r.zero_copy) |*z| z else return error.Unsupported;
+        const m = conversion.homogeneous();
+        var matrix: [16]f32 = undefined;
+        var index: usize = 0;
+        inline for (0..4) |col| {
+            inline for (0..4) |row| {
+                matrix[index] = m.cols[col][row];
+                index += 1;
+            }
+        }
+        zc.converter.setConversion(matrix);
+        const slot = try zc.converter.convert(@ptrCast(hardware_buffer), width, height);
+        if (zc.width != width or zc.height != height) {
+            for (&zc.textures, 0..) |*texture, ring_slot| {
+                if (texture.idx != invalid_handle) c.bgfx_destroy_texture(texture.*);
+                texture.* = c.bgfx_create_texture_2d(
+                    @intCast(width),
+                    @intCast(height),
+                    false,
+                    1,
+                    c.BGFX_TEXTURE_FORMAT_RGBA8,
+                    c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP,
+                    null,
+                    zc.converter.targetImage(@intCast(ring_slot)),
+                );
+            }
+            zc.width = width;
+            zc.height = height;
+        }
+        return zc.textures[slot];
     }
 
     pub fn touch(r: *Renderer) void {
