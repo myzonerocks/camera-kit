@@ -195,7 +195,7 @@ const Target = struct {
 };
 
 pub const Converter = struct {
-    ctx: *Context,
+    ctx: Context,
     module: c.VkShaderModule,
     set_layout: c.VkDescriptorSetLayout,
     pipeline_layout: c.VkPipelineLayout,
@@ -216,7 +216,7 @@ pub const Converter = struct {
     slot: u32 = 0,
     converted_frames: u64 = 0,
 
-    pub fn init(ctx: *Context) Error!Converter {
+    pub fn init(ctx: Context) Error!Converter {
         const parsed = blob.parse(blobs.cs_nv12_to_rgba_spirv) catch return error.ShaderRejected;
         if (parsed.kind != 'C') return error.ShaderRejected;
         // The pipeline layout below encodes the compiler's binding

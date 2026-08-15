@@ -34,7 +34,7 @@ async function run(): Promise<void> {
         const lit = pixel[0] + pixel[1] + pixel[2] > 0;
         if (lit) {
           proofLogged = true;
-          const line = `CKWEB PROOF live preview: ${cameraFrames} camera frames at ${fps.toFixed(1)} fps, center pixel ${pixel[0]},${pixel[1]},${pixel[2]}`;
+          const line = `CKWEB preview active: ${cameraFrames} camera frames at ${fps.toFixed(1)} fps, center pixel ${pixel[0]},${pixel[1]},${pixel[2]}`;
           console.log(line);
           document.title = line;
           const div = document.createElement("div");

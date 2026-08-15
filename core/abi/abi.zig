@@ -15,7 +15,7 @@ const math = @import("math");
 const render = @import("render");
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 2;
+pub const abi_minor: u16 = 3;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -366,6 +366,30 @@ pub export fn ck_session_submit_frame_copy(session: ?*Session, desc: ?*const Fra
         .conversion = math.color.yuvToRgb(standard, range),
     } } };
     s.copied_frames += 1;
+    return .ok;
+}
+
+/// Zero-copy camera submission for platforms delivering hardware buffers.
+/// The render adapter converts on the gpu; a status other than ok means the
+/// caller falls back to the declared copy path for this stream.
+pub export fn ck_session_submit_hardware_buffer(session: ?*Session, desc: ?*const FrameDesc, hardware_buffer: ?*anyopaque) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const buffer = hardware_buffer orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+
+    const standard: math.color.Standard = switch (d.color_standard) {
+        0 => .bt601,
+        2 => .bt2020,
+        else => .bt709,
+    };
+    const range: math.color.Range = if (d.color_range == 1) .full else .video;
+    const texture = r.submitHardwareBuffer(buffer, d.width, d.height, math.color.yuvToRgb(standard, range)) catch {
+        return .renderer_unavailable;
+    };
+    releaseCurrentFrame(s);
+    s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .bgra = .{ .texture = texture } } };
     return .ok;
 }
 
