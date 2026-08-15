@@ -24,5 +24,23 @@
             .sha256 = "2628cf3ce5f695f604cbea2841e00befcaa3624bf80caf3664bef2656d59bf84",
             .license = "Apache-2.0",
         },
+        .{
+            .name = "corpus/face_frontal_a.jpg",
+            .url = "https://upload.wikimedia.org/wikipedia/commons/b/bd/Official_portrait_of_NASA_astronaut_Jack_Hathaway_%28jsc2025e068207_alt%29.jpg",
+            .sha256 = "107a9a03a1a1114a082382a3d505bbeee3d4ed0cc0dd89aabad405ea586b7dd9",
+            .license = "Public-domain-US-government",
+        },
+        .{
+            .name = "corpus/face_frontal_b.jpg",
+            .url = "https://upload.wikimedia.org/wikipedia/commons/9/9c/Kalpana_Chawla%2C_NASA_photo_portrait_in_orange_suit.jpg",
+            .sha256 = "1934e3673544a04adb45c6a97f5c179c64a7a7f50db033e841a1a1b4457d4303",
+            .license = "Public-domain-US-government",
+        },
+        .{
+            .name = "corpus/no_face_control.jpg",
+            .url = "https://upload.wikimedia.org/wikipedia/commons/9/97/The_Earth_seen_from_Apollo_17.jpg",
+            .sha256 = "51049ed4e34514880bfbe39d34e2dd2c56e31f55919e7f4f0b34ef1698cb9f50",
+            .license = "Public-domain-US-government",
+        },
     },
 }

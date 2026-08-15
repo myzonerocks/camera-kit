@@ -45,12 +45,24 @@ const Fetch = struct {
         return std.mem.eql(u8, &sha256Hex(data), expected);
     }
 
+    fn licenseAllowed(license: []const u8) bool {
+        // Models and corpus imagery may only enter under terms that allow
+        // redistribution without conditions we cannot meet in a fetch.
+        for ([_][]const u8{ "Apache-2.0", "Public-domain-US-government" }) |allowed| {
+            if (std.mem.eql(u8, license, allowed)) return true;
+        }
+        return false;
+    }
+
     fn syncOne(f: *Fetch, model: Model) !void {
-        if (!std.mem.eql(u8, model.license, "Apache-2.0")) {
+        if (!licenseAllowed(model.license)) {
             f.fail("{s}: license '{s}' is not on the allowlist", .{ model.name, model.license });
             return;
         }
         const path = try std.fmt.allocPrint(f.arena, ".models/{s}", .{model.name});
+        if (std.fs.path.dirname(path)) |parent| {
+            Io.Dir.cwd().createDirPath(f.io, parent) catch {};
+        }
         if (f.digestMatches(path, model.sha256)) {
             std.debug.print("fetch-models: {s} ok\n", .{model.name});
             return;
@@ -107,6 +119,13 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     }
     return 0;
+}
+
+test "the license allowlist admits exactly the shipped terms" {
+    try std.testing.expect(Fetch.licenseAllowed("Apache-2.0"));
+    try std.testing.expect(Fetch.licenseAllowed("Public-domain-US-government"));
+    try std.testing.expect(!Fetch.licenseAllowed("CC-BY-4.0"));
+    try std.testing.expect(!Fetch.licenseAllowed(""));
 }
 
 test "digests hash to the expected hex" {

@@ -50,6 +50,7 @@ const forbidden_extensions = [_][]const u8{
     ".7z",   ".a",      ".so",     ".dylib", ".dll",
     ".o",    ".jar",    ".aar",    ".apk",  ".ipa",
     ".wasm", ".ptau",   ".pt",     ".h5",   ".out",
+    ".jpg",  ".jpeg",   ".png",    ".webp", ".bmp",
 };
 
 // Ignored-by-design prefixes that are skipped before the foreign-layer check;

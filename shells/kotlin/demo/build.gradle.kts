@@ -31,3 +31,11 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.appcompat:appcompat:1.7.1")
 }
+
+// The face model bundle ships as an app asset, synced from the repo's
+// fetched model set so the apk always carries the pinned bytes.
+val syncFaceModel by tasks.registering(Copy::class) {
+    from(rootProject.projectDir.resolve("../../.models/face_landmarker.task"))
+    into(layout.projectDirectory.dir("src/main/assets"))
+}
+tasks.named("preBuild") { dependsOn(syncFaceModel) }

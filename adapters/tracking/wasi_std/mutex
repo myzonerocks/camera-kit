@@ -1,0 +1,36 @@
+// Single-thread standard mutex surface for the web tracking module. The
+// wasi build of the standard library omits the thread headers entirely,
+// while the runtime sources name these types even though this module runs
+// on one thread inside a worker and never contends. Locks here are
+// bookkeeping-free; everything generic over a mutex type, the lock guards
+// and tags among them, still comes from the real header below.
+#pragma once
+
+// The real header still carries the thread-independent pieces, once_flag
+// among them; only the lock types below are missing without threads.
+#include_next <mutex>
+
+#include <cstdlib>
+#include <utility>
+
+namespace std {
+
+class mutex {
+ public:
+  constexpr mutex() noexcept = default;
+  mutex(const mutex&) = delete;
+  mutex& operator=(const mutex&) = delete;
+  void lock() {}
+  bool try_lock() { return true; }
+  void unlock() {}
+};
+
+class recursive_mutex {
+ public:
+  recursive_mutex() = default;
+  void lock() {}
+  bool try_lock() { return true; }
+  void unlock() {}
+};
+
+}  // namespace std

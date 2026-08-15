@@ -1,0 +1,10 @@
+.{
+    .name = "neon2sse",
+    .repo = "https://github.com/intel/ARM_NEON_2_x86_SSE",
+    .version = "master 2026-08-13",
+    .commit = "183fc88bcb90dbfaefba33a292eae8a5ce94bd67",
+    .archive_sha256 = "49495500a61b06d0f5c82d1ed341582a139b8fb9b9c812a0b58983f9c7eb5594",
+    .license = "BSD-3-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "7022f51b439a5915e933ecc270c83e24ca0cb2cceeb08b0132dcd4dbb03ed2dc",
+}

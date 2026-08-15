@@ -14,6 +14,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kit.camera.Engine
+import kit.camera.FaceResult
 import kit.camera.Session
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
@@ -25,6 +26,7 @@ import java.util.concurrent.Executors
 class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private val tag = "CKDROID"
     private lateinit var surfaceView: SurfaceView
+    private lateinit var overlay: FaceOverlayView
     private var engine: Engine? = null
     private var session: Session? = null
     private val analysisExecutor = Executors.newSingleThreadExecutor()
@@ -46,8 +48,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val root = android.widget.FrameLayout(this)
         surfaceView = SurfaceView(this)
-        setContentView(surfaceView)
+        overlay = FaceOverlayView(this)
+        root.addView(surfaceView)
+        root.addView(overlay)
+        setContentView(root)
         surfaceView.holder.addCallback(this)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -70,8 +76,20 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val created = Engine.create()
         created.initRenderer(holder.surface, width, height)
         engine = created
-        session = Session.create(created)
+        val createdSession = Session.create(created)
+        session = createdSession
         Log.i(tag, "renderer up ${width}x$height")
+        assets.open("face_landmarker.task").use { stream ->
+            val bytes = stream.readBytes()
+            val bundle = ByteBuffer.allocateDirect(bytes.size)
+            bundle.put(bytes)
+            bundle.flip()
+            if (createdSession.enableFaceTracking(bundle)) {
+                Log.i(tag, "face tracking up")
+            } else {
+                Log.i(tag, "face tracking unavailable in this build")
+            }
+        }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -95,6 +113,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val frameTimeUs = if (lastFrameNanos == 0L) 0 else ((frameTimeNanos - lastFrameNanos) / 1000).toInt()
         lastFrameNanos = frameTimeNanos
         session?.reportFrame(frameTimeUs, 0)
+        session?.let { overlay.poll(it) }
         if (engine.renderFrame(session)) {
             renderedFrames += 1
             fpsWindowFrames += 1
@@ -127,6 +146,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 image.use {
                     val session = session ?: return@use
 
+                    var previewSubmitted = false
                     if (!zeroCopyRefused && android.os.Build.VERSION.SDK_INT >= 28) {
                         val hardwareBuffer = it.image?.hardwareBuffer
                         if (hardwareBuffer != null) {
@@ -140,10 +160,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                             if (submitted) {
                                 cameraFrames += 1
                                 if (cameraFrames == 1) Log.i(tag, "capture state running zero copy")
-                                return@use
+                                previewSubmitted = true
+                            } else {
+                                zeroCopyRefused = true
+                                Log.i(tag, "zero copy refused, copy path takes over")
                             }
-                            zeroCopyRefused = true
-                            Log.i(tag, "zero copy refused, copy path takes over")
                         }
                     }
 
@@ -201,16 +222,24 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         uvCopy.flip()
                         uvStride = chromaWidth * 2
                     }
-                    val submitted = session.submitFrameCopy(
+                    if (!previewSubmitted) {
+                        val submitted = session.submitFrameCopy(
+                            yCopy, y.rowStride, uvCopy, uvStride,
+                            it.width, it.height,
+                            it.imageInfo.rotationDegrees, mirrored = false,
+                            it.imageInfo.timestamp / 1000,
+                        )
+                        if (submitted) {
+                            cameraFrames += 1
+                            if (cameraFrames == 1) Log.i(tag, "capture state running")
+                        }
+                    }
+                    overlay.frameGeometry(it.width, it.height, it.imageInfo.rotationDegrees)
+                    session.trackFrame(
                         yCopy, y.rowStride, uvCopy, uvStride,
                         it.width, it.height,
-                        it.imageInfo.rotationDegrees, mirrored = false,
                         it.imageInfo.timestamp / 1000,
                     )
-                    if (submitted) {
-                        cameraFrames += 1
-                        if (cameraFrames == 1) Log.i(tag, "capture state running")
-                    }
                 }
             }
             provider.unbindAll()

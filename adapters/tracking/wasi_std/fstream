@@ -1,0 +1,60 @@
+// File streams for a target with no files: the standard library here
+// declares these templates without defining them. Every open fails, every
+// read hits end of stream, so the handful of loading paths that probe for
+// configuration files conclude cleanly that there are none.
+#pragma once
+
+#include <ios>
+#include <istream>
+#include <ostream>
+#include <string>
+
+// Definitions land in the standard library's own versioning namespace so
+// they merge with its forward declarations rather than standing beside
+// them.
+_LIBCPP_BEGIN_NAMESPACE_STD
+
+template <class CharT, class Traits>
+class basic_ifstream : public basic_istream<CharT, Traits> {
+ public:
+  basic_ifstream() : basic_istream<CharT, Traits>(nullptr) {
+    this->setstate(ios_base::failbit);
+  }
+  explicit basic_ifstream(const char*, ios_base::openmode = ios_base::in)
+      : basic_ifstream() {}
+  explicit basic_ifstream(const basic_string<CharT>& name, ios_base::openmode mode = ios_base::in)
+      : basic_ifstream(name.c_str(), mode) {}
+  bool is_open() const { return false; }
+  void open(const char*, ios_base::openmode = ios_base::in) {
+    this->setstate(ios_base::failbit);
+  }
+  void open(const basic_string<CharT>&, ios_base::openmode = ios_base::in) {
+    this->setstate(ios_base::failbit);
+  }
+  void close() {}
+};
+
+template <class CharT, class Traits>
+class basic_ofstream : public basic_ostream<CharT, Traits> {
+ public:
+  basic_ofstream() : basic_ostream<CharT, Traits>(nullptr) {
+    this->setstate(ios_base::failbit);
+  }
+  explicit basic_ofstream(const char*, ios_base::openmode = ios_base::out)
+      : basic_ofstream() {}
+  explicit basic_ofstream(const basic_string<CharT>& name, ios_base::openmode mode = ios_base::out)
+      : basic_ofstream(name.c_str(), mode) {}
+  bool is_open() const { return false; }
+  void open(const char*, ios_base::openmode = ios_base::out) {
+    this->setstate(ios_base::failbit);
+  }
+  void open(const basic_string<CharT>&, ios_base::openmode = ios_base::out) {
+    this->setstate(ios_base::failbit);
+  }
+  void close() {}
+};
+
+using ifstream = basic_ifstream<char, char_traits<char>>;
+using ofstream = basic_ofstream<char, char_traits<char>>;
+
+_LIBCPP_END_NAMESPACE_STD

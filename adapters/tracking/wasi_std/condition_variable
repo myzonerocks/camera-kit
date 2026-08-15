@@ -1,0 +1,46 @@
+// Single-thread standard condition variable surface for the web tracking
+// module. On one thread a wait whose predicate is false could never be
+// satisfied, so it stops hard instead of hanging; signaled paths and
+// already-true predicates cost nothing.
+#pragma once
+
+#include <cstdlib>
+
+#include <mutex>
+
+namespace std {
+
+enum class cv_status { no_timeout, timeout };
+
+class condition_variable {
+ public:
+  condition_variable() = default;
+  condition_variable(const condition_variable&) = delete;
+  void notify_one() noexcept {}
+  void notify_all() noexcept {}
+  void wait(unique_lock<mutex>&) { abort(); }
+  template <class Predicate>
+  void wait(unique_lock<mutex>&, Predicate predicate) {
+    if (!predicate()) abort();
+  }
+  template <class Clock>
+  cv_status wait_until(unique_lock<mutex>&, const Clock&) {
+    return cv_status::timeout;
+  }
+  template <class Clock, class Predicate>
+  bool wait_until(unique_lock<mutex>&, const Clock&, Predicate predicate) {
+    return predicate();
+  }
+  template <class Duration>
+  cv_status wait_for(unique_lock<mutex>&, const Duration&) {
+    return cv_status::timeout;
+  }
+  template <class Duration, class Predicate>
+  bool wait_for(unique_lock<mutex>&, const Duration&, Predicate predicate) {
+    return predicate();
+  }
+};
+
+using condition_variable_any = condition_variable;
+
+}  // namespace std

@@ -29,6 +29,13 @@ const Pin = struct {
 // including anything unknown.
 const license_allowlist = [_][]const u8{ "MIT", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "Zlib" };
 
+// Named exceptions: a specific vendor may carry a specific license outside
+// the allowlist, recorded in the decisions log. Nothing else inherits it.
+const license_exceptions = [_]struct { name: []const u8, license: []const u8 }{
+    .{ .name = "eigen", .license = "MPL-2.0" },
+    .{ .name = "fft2d", .license = "Ooura" },
+};
+
 const max_archive_bytes: usize = 1 << 29;
 
 const Sync = struct {
@@ -51,6 +58,13 @@ const Sync = struct {
     fn fileDigestMatches(s: *Sync, path: []const u8, expected: []const u8) bool {
         const data = Io.Dir.cwd().readFileAlloc(s.io, path, s.arena, .limited(max_archive_bytes)) catch return false;
         return std.mem.eql(u8, &sha256Hex(data), expected);
+    }
+
+    fn licenseExcepted(name: []const u8, license: []const u8) bool {
+        for (license_exceptions) |exception| {
+            if (std.mem.eql(u8, exception.name, name) and std.mem.eql(u8, exception.license, license)) return true;
+        }
+        return false;
     }
 
     fn licenseAllowed(license: []const u8) bool {
@@ -93,7 +107,7 @@ const Sync = struct {
             s.fail("{s}: pin name '{s}' does not match its directory", .{ name, pin.name });
             return;
         }
-        if (!licenseAllowed(pin.license)) {
+        if (!licenseAllowed(pin.license) and !licenseExcepted(pin.name, pin.license)) {
             s.fail("{s}: license '{s}' is not on the allowlist", .{ name, pin.license });
             return;
         }
@@ -192,6 +206,13 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 const t = std.testing;
+
+test "named exceptions admit exactly one vendor and license pair" {
+    try t.expect(Sync.licenseExcepted("eigen", "MPL-2.0"));
+    try t.expect(Sync.licenseExcepted("fft2d", "Ooura"));
+    try t.expect(!Sync.licenseExcepted("eigen", "GPL-3.0"));
+    try t.expect(!Sync.licenseExcepted("somelib", "MPL-2.0"));
+}
 
 test "license allowlist admits permissive and rejects the rest" {
     try t.expect(Sync.licenseAllowed("MIT"));

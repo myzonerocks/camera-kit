@@ -45,3 +45,39 @@ jobs:
             zigcache-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: gate suite
         run: zig build ci
+
+  tracking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .local/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .vendor
+            .vendor-archives
+          key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
+      - name: vendor sync
+        run: zig build vendor-sync
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: models-${{ hashFiles('third_party/models.lock') }}
+      - name: fetch models
+        run: zig build fetch-models
+      - uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zigcache-tracking-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+          restore-keys: |
+            zigcache-tracking-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
+      - name: tracking harness
+        run: zig build tracking-harness
