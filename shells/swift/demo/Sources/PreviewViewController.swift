@@ -13,6 +13,7 @@ final class PreviewViewController: UIViewController {
     private let log = Logger(subsystem: "kit.camera.demo", category: "preview")
     private let camera = CameraController()
     private let statusLabel = UILabel()
+    private let beautyStack = UIStackView()
     private let faceLayer = CAShapeLayer()
     private var faceResult = ck_face_result()
     private var lastFaceSerial: UInt64 = 0
@@ -65,6 +66,47 @@ final class PreviewViewController: UIViewController {
         faceLayer.fillColor = UIColor.white.cgColor
         faceLayer.strokeColor = nil
         view.layer.addSublayer(faceLayer)
+
+        setupBeautyControls()
+    }
+
+    // Each slider reaches ck_session_set_beauty directly; the effect only
+    // shows up once something reads the RGBA back out through
+    // ck_session_beautify_frame, which the zero-copy Metal preview here
+    // does not do yet (that CPU round trip is the live-preview GPU
+    // integration work, still ahead of this row).
+    private func setupBeautyControls() {
+        beautyStack.axis = .vertical
+        beautyStack.spacing = 4
+        beautyStack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(beautyStack)
+        NSLayoutConstraint.activate([
+            beautyStack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            beautyStack.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            beautyStack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+        ])
+        for (index, name) in ["smooth", "whiten", "thin face", "big eye", "lipstick", "blush"].enumerated() {
+            let label = UILabel()
+            label.text = name
+            label.textColor = .white
+            label.font = .systemFont(ofSize: 12)
+            label.widthAnchor.constraint(equalToConstant: 70).isActive = true
+
+            let slider = UISlider()
+            slider.minimumValue = 0
+            slider.maximumValue = 1
+            slider.tag = index
+            slider.addTarget(self, action: #selector(beautySliderChanged(_:)), for: .valueChanged)
+
+            let row = UIStackView(arrangedSubviews: [label, slider])
+            row.axis = .horizontal
+            row.spacing = 8
+            beautyStack.addArrangedSubview(row)
+        }
+    }
+
+    @objc private func beautySliderChanged(_ slider: UISlider) {
+        _ = ck_session_set_beauty(session, Int32(slider.tag), slider.value)
     }
 
     override func viewDidLayoutSubviews() {

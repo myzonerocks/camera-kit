@@ -38,6 +38,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     func start(engineSession: OpaquePointer?, position: AVCaptureDevice.Position = .back) {
         self.engineSession = engineSession
         enableFaceTracking()
+        enableBeauty()
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -74,6 +75,19 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             ck_session_enable_face_tracking(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count, 0)
         }
         log.info("face tracking enable status \(status.rawValue)")
+    }
+
+    // The engine's own loader appends "res/" to whatever root it is given,
+    // so the bundle root is the argument, not the res folder itself.
+    private func enableBeauty() {
+        guard let engineSession else { return }
+        let resourceRoot = Bundle.main.bundlePath
+        guard FileManager.default.fileExists(atPath: resourceRoot + "/res") else {
+            log.info("beauty resources not present")
+            return
+        }
+        let status = ck_session_enable_beauty(engineSession, resourceRoot)
+        log.info("beauty enable status \(status.rawValue)")
     }
 
     private func transition(to newState: State) {

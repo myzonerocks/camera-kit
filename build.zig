@@ -1865,6 +1865,11 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
         .root_source_file = b.path("core/abi/abi.zig"),
         .target = ios_target,
         .optimize = optimize,
+        // Zig's own panic backtrace symbolizer needs a dyld introspection
+        // symbol iphoneos's SDK stub never exports (device dyld has it,
+        // the link-time TBD doesn't); stripped, the library never reaches
+        // for it. The ABI reports failures through ck_status, not panics.
+        .strip = true,
         .imports = &.{
             .{ .name = "graph", .module = graph_ios },
             .{ .name = "math", .module = math_ios },
@@ -1931,6 +1936,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             buildFarmhashLib(b, ios_target, optimize, null),
             buildFlatbuffersLib(b, ios_target, optimize, null),
             buildGpupixelLib(b, ios_target, optimize, null),
+            buildLibyuvLib(b, ios_target, optimize, null),
             buildFft2dLib(b, ios_target, optimize, null),
             buildCpuinfoLib(b, ios_target, optimize, null),
             buildPthreadpoolLib(b, ios_target, optimize, null),
