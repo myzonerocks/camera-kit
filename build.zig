@@ -204,6 +204,26 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const lens_validator_module = b.createModule(.{
+        .root_source_file = b.path("lenses/validator/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "manifest", .module = lens_manifest_module },
+            .{ .name = "trigger", .module = lens_trigger_module },
+        },
+    });
+    const lens_validator_exe = b.addExecutable(.{
+        .name = "lens_validator",
+        .root_module = lens_validator_module,
+    });
+    b.installArtifact(lens_validator_exe);
+    const lens_validate_step = b.step("lens-validate", "Validate a .glens bundle (-- <bundle-path>)");
+    const lens_validate_run = b.addRunArtifact(lens_validator_exe);
+    lens_validate_run.setCwd(b.path("."));
+    if (b.args) |args| lens_validate_run.addArgs(args);
+    lens_validate_step.dependOn(&lens_validate_run.step);
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
     const detector_tests = b.addTest(.{ .root_module = detector_module });
@@ -221,6 +241,7 @@ pub fn build(b: *std.Build) void {
     const lens_manifest_tests = b.addTest(.{ .root_module = lens_manifest_module });
     const lens_trigger_tests = b.addTest(.{ .root_module = lens_trigger_module });
     const lens_animation_tests = b.addTest(.{ .root_module = lens_animation_module });
+    const lens_validator_tests = b.addTest(.{ .root_module = lens_validator_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
@@ -240,6 +261,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(lens_manifest_tests).step);
     test_step.dependOn(&b.addRunArtifact(lens_trigger_tests).step);
     test_step.dependOn(&b.addRunArtifact(lens_animation_tests).step);
+    test_step.dependOn(&b.addRunArtifact(lens_validator_tests).step);
 
     // Adapters compile against the vendored trees. Without them the rest of
     // the build still works, vendor-sync included; only the steps that need
