@@ -48,6 +48,10 @@ object CameraKit {
         timestampUs: Long,
     ): Int
     external fun nativeFaceResult(session: Long, resultBuffer: ByteBuffer): Int
+    external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
+    external fun nativeDisableBeauty(session: Long)
+    external fun nativeSetBeauty(session: Long, effect: Int, value: Float): Int
+    external fun nativeBeautifyFrame(session: Long, rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Int
     external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -168,6 +172,27 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
     ): Boolean = CameraKit.nativeTrackFrame(
         handle, y, yStride, uv, uvStride, width, height, 1, 0, timestampUs,
     ) == 0
+
+    /** Stands the beauty chain up; [resourceDir] holds the effect engine's
+     * shader and image assets on disk. */
+    fun enableBeauty(resourceDir: String): Boolean {
+        val bytes = resourceDir.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocateDirect(bytes.size + 1)
+        buffer.put(bytes)
+        buffer.put(0)
+        buffer.rewind()
+        return CameraKit.nativeEnableBeauty(handle, buffer, bytes.size) == 0
+    }
+
+    fun disableBeauty() = CameraKit.nativeDisableBeauty(handle)
+
+    /** Effects in order: smooth 0, whiten 1, thin face 2, big eye 3,
+     * lipstick 4, blush 5; values clamp to zero and one. */
+    fun setBeauty(effect: Int, value: Float): Boolean =
+        CameraKit.nativeSetBeauty(handle, effect, value) == 0
+
+    fun beautifyFrame(rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Boolean =
+        CameraKit.nativeBeautifyFrame(handle, rgbaIn, rgbaOut, width, height) == 0
 
     /** Fills [result] with the newest tracking output; false until the
      * worker publishes its first result. */

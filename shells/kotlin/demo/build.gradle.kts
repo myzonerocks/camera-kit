@@ -39,3 +39,13 @@ val syncFaceModel by tasks.registering(Copy::class) {
     into(layout.projectDirectory.dir("src/main/assets"))
 }
 tasks.named("preBuild") { dependsOn(syncFaceModel) }
+
+// The beauty engine's shader and lookup assets, synced from the pinned
+// vendor tree. Assets ship read-only inside the apk; the app extracts
+// them to a real path at first run since the effects engine opens them
+// with plain file i/o, not the asset manager.
+val syncBeautyRes by tasks.registering(Copy::class) {
+    from(rootProject.projectDir.resolve("../../.vendor/gpupixel/src/res"))
+    into(layout.projectDirectory.dir("src/main/assets/res"))
+}
+tasks.named("preBuild") { dependsOn(syncBeautyRes) }

@@ -2,11 +2,17 @@ package kit.camera.demo
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Bundle
 import android.util.Log
 import android.view.Choreographer
+import android.view.Gravity
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -48,11 +54,12 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = android.widget.FrameLayout(this)
+        val root = FrameLayout(this)
         surfaceView = SurfaceView(this)
         overlay = FaceOverlayView(this)
         root.addView(surfaceView)
         root.addView(overlay)
+        setupBeautyControls(root)
         setContentView(root)
         surfaceView.holder.addCallback(this)
 
@@ -90,6 +97,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 Log.i(tag, "face tracking unavailable in this build")
             }
         }
+        extractBeautyResources()?.let { resourceRoot ->
+            if (createdSession.enableBeauty(resourceRoot)) {
+                Log.i(tag, "beauty up")
+            } else {
+                Log.i(tag, "beauty unavailable in this build")
+            }
+        }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -106,6 +120,61 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         engine?.close()
         session = null
         engine = null
+    }
+
+    // Assets ship read-only inside the apk; the effects engine opens its
+    // shader and lookup files with plain file i/o, so they need a real
+    // path. Copied once per install, reused after.
+    private fun extractBeautyResources(): String? {
+        val resDir = java.io.File(filesDir, "res")
+        if (!resDir.exists()) {
+            val names = try { assets.list("res") } catch (e: java.io.IOException) { null }
+            if (names.isNullOrEmpty()) return null
+            resDir.mkdirs()
+            for (name in names) {
+                assets.open("res/$name").use { input ->
+                    java.io.File(resDir, name).outputStream().use { output -> input.copyTo(output) }
+                }
+            }
+        }
+        return filesDir.absolutePath
+    }
+
+    // Each slider reaches Session.setBeauty directly; the effect only
+    // shows up once something reads the rgba back out through
+    // beautifyFrame, which this cpu copy path preview does not do yet.
+    private fun setupBeautyControls(root: FrameLayout) {
+        val names = listOf("smooth", "whiten", "thin face", "big eye", "lipstick", "blush")
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 24, 24, 24)
+        }
+        for ((index, name) in names.withIndex()) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            row.addView(TextView(this).apply {
+                text = name
+                setTextColor(Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(160, LinearLayout.LayoutParams.WRAP_CONTENT)
+            })
+            row.addView(SeekBar(this).apply {
+                max = 100
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                        session?.setBeauty(index, progress / 100f)
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            })
+            stack.addView(row)
+        }
+        root.addView(
+            stack,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.BOTTOM
+            },
+        )
     }
 
     private fun renderTick(frameTimeNanos: Long) {

@@ -86,6 +86,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "abi", .module = abi_module }},
     });
+    const camerakit_header_text = b.build_root.handle.readFileAlloc(b.graph.io, "include/camerakit.h", b.allocator, .limited(1 << 20)) catch @panic("include/camerakit.h unreadable");
+    const abi_dump_options = b.addOptions();
+    abi_dump_options.addOption([]const u8, "camerakit_header", camerakit_header_text);
+    abi_dump_module.addOptions("build_options", abi_dump_options);
     const abi_dump_exe = b.addExecutable(.{
         .name = "abi_dump",
         .root_module = abi_dump_module,
@@ -173,8 +177,15 @@ pub fn build(b: *std.Build) void {
     const sampler_module = tracking_cores.sampler;
     const face_module = tracking_cores.face;
     const tracker_module = tracking_cores.tracker;
+    const face106_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/face106.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "face", .module = face_module }},
+    });
     abi_module.addImport("face", face_module);
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
+    abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
@@ -182,6 +193,7 @@ pub fn build(b: *std.Build) void {
     const sampler_tests = b.addTest(.{ .root_module = sampler_module });
     const face_tests = b.addTest(.{ .root_module = face_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
+    const face106_tests = b.addTest(.{ .root_module = face106_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
@@ -197,6 +209,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(sampler_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
+    test_step.dependOn(&b.addRunArtifact(face106_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
@@ -272,6 +285,31 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    {
+        const beauty_step = b.step("beauty-lib", "Build the beauty effects engine library");
+        const gpupixel_present = blk: {
+            b.build_root.handle.access(b.graph.io, ".vendor/gpupixel/src/CMakeLists.txt", .{}) catch break :blk false;
+            break :blk true;
+        };
+        if (gpupixel_present) {
+            beauty_step.dependOn(&b.addInstallArtifact(buildGpupixelLib(b, target, optimize, null), .{}).step);
+            if (ndkSysroot(b)) |sysroot| {
+                const android_target = b.resolveTargetQuery(.{
+                    .cpu_arch = .aarch64,
+                    .os_tag = .linux,
+                    .abi = .android,
+                    .android_api_level = 29,
+                });
+                const libc_txt = b.addWriteFiles().add("android-libc-beauty.txt", b.fmt("include_dir={s}/usr/include\nsys_include_dir={s}/usr/include/aarch64-linux-android\ncrt_dir={s}/usr/lib/aarch64-linux-android/29\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n", .{ sysroot, sysroot, sysroot }));
+                const beauty_android = buildGpupixelLib(b, android_target, optimize, libc_txt);
+                addNdkPaths(b, beauty_android.root_module, sysroot);
+                beauty_step.dependOn(&b.addInstallArtifact(beauty_android, .{ .dest_dir = .{ .override = .{ .custom = "android-beauty" } } }).step);
+            }
+        } else {
+            beauty_step.dependOn(&b.addFail("beauty engine vendor is not synced; run: zig build vendor-sync").step);
+        }
+    }
+
     // The tracking harness stands the face pipeline up on the host: model
     // bundle in, engines interrogated, decode exercised end to end.
     const tracking_step = b.step("tracking-harness", "Build and run the tracking harness (face pipeline on host)");
@@ -300,6 +338,15 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
             },
         });
+        const beauty_real_module = b.createModule(.{
+            .root_source_file = b.path("adapters/beauty/beauty.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "face", .module = face_module },
+                .{ .name = "face106", .module = face106_module },
+            },
+        });
         const abi_tracking_module = b.createModule(.{
             .root_source_file = b.path("core/abi/abi.zig"),
             .target = target,
@@ -312,6 +359,11 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tracking", .module = tracking_real_module },
             },
         });
+        if (target.result.os.tag == .macos) {
+            abi_tracking_module.addImport("beauty", beauty_real_module);
+        } else {
+            abi_tracking_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
+        }
         const tracking_module = b.createModule(.{
             .root_source_file = b.path("harness/tracking.zig"),
             .target = target,
@@ -325,8 +377,21 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tracker", .module = tracker_module },
                 .{ .name = "math", .module = math_module },
                 .{ .name = "abi", .module = abi_tracking_module },
+                .{ .name = "face106", .module = face106_module },
             },
         });
+        if (target.result.os.tag == .macos) {
+            tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
+            tracking_module.linkFramework("AppKit", .{});
+            tracking_module.linkFramework("OpenGL", .{});
+        } else {
+            // The beauty archive carries the image loader implementation
+            // where it links; elsewhere the harness compiles its own.
+            tracking_module.addCSourceFile(.{
+                .file = b.path("harness/stb_image_impl.c"),
+                .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
+            });
+        }
         tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null));
         tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
         tracking_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
@@ -336,11 +401,9 @@ pub fn build(b: *std.Build) void {
         tracking_module.linkLibrary(buildFft2dLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildCpuinfoLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildPthreadpoolLib(b, target, optimize, null));
-        tracking_module.addIncludePath(b.path(".vendor/bimg/3rdparty/stb"));
-        tracking_module.addCSourceFile(.{
-            .file = b.path("harness/stb_image_impl.c"),
-            .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
-        });
+        // The image loader implementation arrives inside the beauty
+        // archive; the harness only includes the declarations.
+        tracking_module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
         const tracking_exe = b.addExecutable(.{ .name = "tracking_harness", .root_module = tracking_module });
         const run_tracking = b.addRunArtifact(tracking_exe);
         run_tracking.setCwd(b.path("."));
@@ -432,6 +495,7 @@ pub fn build(b: *std.Build) void {
         const tracking_cores_wasm = trackingCoreModules(b, wasm_target, .ReleaseSmall, math_wasm);
         abi_wasm.addImport("face", tracking_cores_wasm.face);
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, math_wasm));
+        abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
         const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
         camerakit_wasm.entry = .disabled;
         camerakit_wasm.rdynamic = true;
@@ -584,8 +648,25 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             },
         });
         abi_android.addImport("tracking", tracking_android);
+        const face106_android = b.createModule(.{
+            .root_source_file = b.path("core/tracking/face106.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "face", .module = tracking_cores_android.face }},
+        });
+        const beauty_android_module = b.createModule(.{
+            .root_source_file = b.path("adapters/beauty/beauty.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "face", .module = tracking_cores_android.face },
+                .{ .name = "face106", .module = face106_android },
+            },
+        });
+        abi_android.addImport("beauty", beauty_android_module);
     } else {
         abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
+        abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
     const jni_module = b.createModule(.{
         .root_source_file = b.path("adapters/android/jni.zig"),
@@ -606,6 +687,9 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         jni_module.linkLibrary(buildFft2dLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildCpuinfoLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildPthreadpoolLib(b, android_target, optimize, libc_txt));
+        const beauty_archive = buildGpupixelLib(b, android_target, optimize, libc_txt);
+        addNdkPaths(b, beauty_archive.root_module, sysroot);
+        jni_module.linkLibrary(beauty_archive);
     }
 
     const bgfx_android = buildBgfxAndroid(b, android_target, optimize, sysroot);
@@ -686,6 +770,15 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .face = face_module,
         .tracker = tracker_module,
     };
+}
+
+fn beautyStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, face_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/beauty/beauty_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "face", .module = face_module }},
+    });
 }
 
 fn trackingStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, face_module: *std.Build.Module, math_module: *std.Build.Module) *std.Build.Module {
@@ -887,6 +980,182 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 // The flatbuffers runtime pieces the schema code links against; the
 // headers carry almost everything, this archive holds the rest.
+
+// The beauty effects engine from its pinned tree: the core graph, the
+// filter set, raw data source and sinks, compiled per platform against the
+// system gl it targets. The bundled face detector never builds; landmarks
+// come from the tracking pipeline. Its color converter dependency builds
+// from the sources the sink actually reaches for.
+fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    for ([_][]const u8{
+        ".vendor/gpupixel/include",
+        ".vendor/gpupixel/src",
+        ".vendor/gpupixel/third_party/ghc",
+        ".vendor/gpupixel/third_party/libyuv/include",
+        ".vendor/gpupixel/third_party/stb/include",
+    }) |dir| {
+        module.addIncludePath(b.path(dir));
+    }
+    const os = target.result.os.tag;
+    const platform_define: []const u8 = switch (os) {
+        .macos => "GPUPIXEL_MAC",
+        .ios => "GPUPIXEL_IOS",
+        else => if (target.result.abi.isAndroid()) "GPUPIXEL_ANDROID" else "GPUPIXEL_LINUX",
+    };
+    module.addCMacro(platform_define, "1");
+
+    var flags: std.ArrayList([]const u8) = .empty;
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    // The gl include header imports the apple ui frameworks, so every
+    // translation unit on those targets is objective c++.
+    if (os == .macos or os == .ios) {
+        flags.appendSlice(b.allocator, &.{ "-std=gnu++17", "-fno-objc-arc" }) catch @panic("oom");
+    }
+
+    const sources = [_][]const u8{
+        "core/gpupixel.cc",
+        "core/gpupixel_context.cc",
+        "core/gpupixel_program.cc",
+        "core/gpupixel_framebuffer.cc",
+        "core/gpupixel_framebuffer_factory.cc",
+        "source/source.cc",
+        "source/source_raw_data.cc",
+        "source/source_image.cc",
+        "sink/sink_raw_data.cc",
+        "sink/sink_raw_data_yuv.cc",
+        "sink/sink_render.cc",
+        "sink/sink.cc",
+        "utils/math_toolbox.cc",
+        "utils/dispatch_queue.cc",
+        "utils/util.cc",
+        "filter/contrast_filter.cc",
+        "filter/glass_sphere_filter.cc",
+        "filter/brightness_filter.cc",
+        "filter/ios_blur_filter.cc",
+        "filter/hsb_filter.cc",
+        "filter/sobel_edge_detection_filter.cc",
+        "filter/sphere_refraction_filter.cc",
+        "filter/directional_sobel_edge_detection_filter.cc",
+        "filter/blusher_filter.cc",
+        "filter/box_high_pass_filter.cc",
+        "filter/luminance_range_filter.cc",
+        "filter/box_blur_filter.cc",
+        "filter/sketch_filter.cc",
+        "filter/directional_non_maximum_suppression_filter.cc",
+        "filter/toon_filter.cc",
+        "filter/pixellation_filter.cc",
+        "filter/beauty_face_unit_filter.cc",
+        "filter/single_component_gaussian_blur_filter.cc",
+        "filter/non_maximum_suppression_filter.cc",
+        "filter/canny_edge_detection_filter.cc",
+        "filter/filter.cc",
+        "filter/bilateral_filter.cc",
+        "filter/color_matrix_filter.cc",
+        "filter/exposure_filter.cc",
+        "filter/rgb_filter.cc",
+        "filter/face_makeup_filter.cc",
+        "filter/hue_filter.cc",
+        "filter/nearby_sampling3x3_filter.cc",
+        "filter/posterize_filter.cc",
+        "filter/color_invert_filter.cc",
+        "filter/single_component_gaussian_blur_mono_filter.cc",
+        "filter/gaussian_blur_mono_filter.cc",
+        "filter/convolution3x3_filter.cc",
+        "filter/weak_pixel_inclusion_filter.cc",
+        "filter/halftone_filter.cc",
+        "filter/saturation_filter.cc",
+        "filter/emboss_filter.cc",
+        "filter/grayscale_filter.cc",
+        "filter/lipstick_filter.cc",
+        "filter/box_mono_blur_filter.cc",
+        "filter/box_difference_filter.cc",
+        "filter/crosshatch_filter.cc",
+        "filter/filter_group.cc",
+        "filter/gaussian_blur_filter.cc",
+        "filter/beauty_face_filter.cc",
+        "filter/face_reshape_filter.cc",
+        "filter/white_balance_filter.cc",
+        "filter/smooth_toon_filter.cc",
+    };
+    // The compiler picks the language from the extension, and these
+    // sources import ui frameworks on the apple targets, so each compiles
+    // through a generated objective c++ includer there.
+    const apple = os == .macos or os == .ios;
+    const wrappers = b.addWriteFiles();
+    for (sources) |file| {
+        if (apple) {
+            const name = std.mem.trimEnd(u8, file[std.mem.lastIndexOfScalar(u8, file, '/').? + 1 ..], ".c");
+            const wrapper = wrappers.add(
+                b.fmt("{s}.mm", .{name}),
+                b.fmt("#include \"{s}\"\n", .{b.pathFromRoot(b.fmt(".vendor/gpupixel/src/{s}", .{file}))}),
+            );
+            module.addCSourceFile(.{ .file = wrapper, .flags = flags.items });
+        } else {
+            module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/gpupixel/src/{s}", .{file})), .flags = flags.items });
+        }
+    }
+    if (target.result.abi.isAndroid()) {
+        module.addCSourceFile(.{ .file = b.path(".vendor/gpupixel/src/sink/sink_surface.cc"), .flags = flags.items });
+    }
+
+    module.linkLibrary(buildLibyuvLib(b, target, optimize, libc));
+
+    // The engine's c boundary compiles into the same archive.
+    if (apple) {
+        module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim_apple.mm"), .flags = flags.items });
+    } else {
+        module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim.cc"), .flags = flags.items });
+    }
+
+    const lib = b.addLibrary(.{ .name = "gpupixel", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
+}
+
+// The color converter the beauty engine's raw sinks call into, from the
+// engine's own tree. Its row kernels carry inline assembly for the newer
+// vector instructions with runtime dispatch deciding what executes, so the
+// module compiles with those features available; the scalable extensions
+// stay out entirely.
+fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
+    const yuv_target = if (target.result.cpu.arch == .aarch64) blk: {
+        var query = target.query;
+        query.cpu_model = .baseline;
+        query.cpu_features_add = std.Target.aarch64.featureSet(&.{ .dotprod, .i8mm });
+        break :blk b.resolveTargetQuery(query);
+    } else target;
+    const module = b.createModule(.{ .target = yuv_target, .optimize = optimize });
+    module.link_libc = true;
+    module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    module.addIncludePath(b.path(".vendor/gpupixel/third_party/libyuv/include"));
+    var yuv_sources: std.ArrayList([]const u8) = .empty;
+    listFilesRecursive(b, ".vendor/gpupixel/third_party/libyuv/source", ".cc", &.{
+        "_test", "_unittest", "mjpeg",
+    }, &yuv_sources);
+    std.mem.sort([]const u8, yuv_sources.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    const yuv_flags = [_][]const u8{
+        "-std=c++17",           "-fno-sanitize=undefined", "-w",
+        "-DLIBYUV_DISABLE_SVE", "-DLIBYUV_DISABLE_SME",
+    };
+    for (yuv_sources.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &yuv_flags });
+    }
+    const lib = b.addLibrary(.{ .name = "yuv", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
+}
+
 fn buildFlatbuffersLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libcpp = true;
@@ -1464,6 +1733,8 @@ fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
     const sdk = apple_sdk orelse b.sysroot orelse return;
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "include" }) });
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
+    // Newer sdks split pieces of the ui frameworks into sub frameworks.
+    module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "SubFrameworks" }) });
 }
 
 fn buildBgfxLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
@@ -1594,6 +1865,11 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
         .root_source_file = b.path("core/abi/abi.zig"),
         .target = ios_target,
         .optimize = optimize,
+        // Zig's own panic backtrace symbolizer needs a dyld introspection
+        // symbol iphoneos's SDK stub never exports (device dyld has it,
+        // the link-time TBD doesn't); stripped, the library never reaches
+        // for it. The ABI reports failures through ck_status, not panics.
+        .strip = true,
         .imports = &.{
             .{ .name = "graph", .module = graph_ios },
             .{ .name = "math", .module = math_ios },
@@ -1636,6 +1912,22 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             },
         });
         abi_ios.addImport("tracking", tracking_ios);
+        const face106_ios = b.createModule(.{
+            .root_source_file = b.path("core/tracking/face106.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "face", .module = tracking_cores_ios.face }},
+        });
+        const beauty_ios_module = b.createModule(.{
+            .root_source_file = b.path("adapters/beauty/beauty.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "face", .module = tracking_cores_ios.face },
+                .{ .name = "face106", .module = face106_ios },
+            },
+        });
+        abi_ios.addImport("beauty", beauty_ios_module);
         for ([_]*std.Build.Step.Compile{
             buildTfliteLib(b, ios_target, optimize, flatc_exe.?, null),
             buildXnnpackLib(b, ios_target, optimize, null, &family_libs),
@@ -1643,6 +1935,8 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             buildRuyLib(b, ios_target, optimize, null),
             buildFarmhashLib(b, ios_target, optimize, null),
             buildFlatbuffersLib(b, ios_target, optimize, null),
+            buildGpupixelLib(b, ios_target, optimize, null),
+            buildLibyuvLib(b, ios_target, optimize, null),
             buildFft2dLib(b, ios_target, optimize, null),
             buildCpuinfoLib(b, ios_target, optimize, null),
             buildPthreadpoolLib(b, ios_target, optimize, null),
@@ -1652,6 +1946,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
         inference_libs.appendSlice(b.allocator, family_libs.items) catch @panic("oom");
     } else {
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
+        abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
     const camerakit_ios = b.addLibrary(.{
         .name = "camerakit",

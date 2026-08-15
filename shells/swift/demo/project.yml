@@ -6,9 +6,14 @@ targets:
   CameraKitDemo:
     type: application
     platform: iOS
-    sources: [Sources]
-    resources:
+    sources:
+      - path: Sources
       - path: ../../../.models/face_landmarker.task
+        buildPhase: resources
+        optional: true
+      - path: ../../../.vendor/gpupixel/src/res
+        type: folder
+        buildPhase: resources
         optional: true
     settings:
       base:
@@ -20,6 +25,8 @@ targets:
         LIBRARY_SEARCH_PATHS: ["$(PROJECT_DIR)/../../../zig-out/ios"]
         OTHER_LDFLAGS:
           - "-lcamerakit"
+          - "-lgpupixel"
+          - "-lyuv"
           - "-lbgfx"
           - "-ltflite"
           - "-lxnnpack"
@@ -35,6 +42,7 @@ targets:
           - "-lruy"
           - "-lfarmhash"
           - "-lfft2d"
+          - "-lflatbuffers"
           - "-lcpuinfo"
           - "-lpthreadpool"
           - "-lc++"
@@ -50,6 +58,8 @@ targets:
           - "VideoToolbox"
           - "-framework"
           - "AVFoundation"
+          - "-framework"
+          - "OpenGLES"
         TARGETED_DEVICE_FAMILY: "1"
     info:
       path: Sources/Info.plist

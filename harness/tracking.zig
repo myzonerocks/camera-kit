@@ -17,7 +17,19 @@ const tracker = @import("tracker");
 const abi = @import("abi");
 const math = @import("math");
 
+const face106 = @import("face106");
+const builtin = @import("builtin");
+
+/// The beauty chain needs a windowing gl context; the harness proves it
+/// where one exists and the tracking pipeline everywhere.
+const beauty_available = builtin.os.tag == .macos;
+
 const stb = @cImport(@cInclude("stb_image.h"));
+
+extern fn ck_beauty_create(resource_path: ?[*:0]const u8) ?*anyopaque;
+extern fn ck_beauty_destroy(handle: ?*anyopaque) void;
+extern fn ck_beauty_set(handle: ?*anyopaque, effect: i32, value: f32) void;
+extern fn ck_beauty_process(handle: ?*anyopaque, rgba_in: [*]const u8, width: i32, height: i32, landmarks106: ?[*]const f32, rgba_out: [*]u8) i32;
 
 var harness_io: std.Io = undefined;
 
@@ -407,6 +419,106 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (result.presence < 0.5) return 1;
         if (result.landmark_count_out != face.landmark_count) return 1;
         if (result.timestamp_us != 1000) return 1;
+
+        // Beauty through the same public surface, fed by the session's own
+        // tracking result.
+        if (comptime !beauty_available) {
+            try out.print("tracking harness: corpus clean through detect, landmarks, blendshapes\n", .{});
+            try out.flush();
+            return 0;
+        }
+        if (abi.ck_session_enable_beauty(session, ".vendor/gpupixel/src") != .ok) {
+            try out.print("abi beauty enable refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        _ = abi.ck_session_set_beauty(session, 0, 0.9);
+        _ = abi.ck_session_set_beauty(session, 1, 0.5);
+        const beauty_pixels = @as(usize, corpus.frame.width) * corpus.frame.height * 4;
+        const beautified = try gpa.alloc(u8, beauty_pixels);
+        defer gpa.free(beautified);
+        if (abi.ck_session_beautify_frame(session, corpus.frame.pixels.rgba8.ptr, corpus.frame.width, corpus.frame.height, beautified.ptr) != .ok) {
+            try out.print("abi beautify refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        var abi_delta: u64 = 0;
+        for (corpus.frame.pixels.rgba8, beautified) |a2, b3| {
+            abi_delta += @abs(@as(i32, a2) - @as(i32, b3));
+        }
+        const abi_mean = @as(f64, @floatFromInt(abi_delta)) / @as(f64, @floatFromInt(beauty_pixels));
+        try out.print("abi beauty: mean delta {d:.3}\n", .{abi_mean});
+        try out.flush();
+        if (abi_mean <= 0.5) return 1;
+    }
+
+
+    // The beauty chain over the tracked portrait: all effects at zero must
+    // return the frame essentially untouched, and turning the skin smooth
+    // up must actually change it, with the tracked contour feeding the
+    // landmark driven effects.
+    if (comptime beauty_available) {
+        const corpus = try loadCorpusFrame(gpa, ".models/corpus/face_frontal_b.jpg");
+        defer corpus.deinit();
+        const image = corpus.frame;
+
+        sampler.sampleRegion(image, face.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
+        try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
+        try detector_engine.invoke();
+        const found = detector.decode(
+            try detector_engine.outputFloats(0),
+            try detector_engine.outputFloats(1),
+            anchors,
+            @floatFromInt(input_side),
+            0.5,
+            candidates,
+        );
+        if (found.len == 0) return 1;
+        const region = face.regionFromDetection(found[0], face.frameSquare(image.width, image.height));
+        sampler.sampleRegion(image, region, .unit, landmark_side, landmark_tensor);
+        try landmarks_engine.writeInput(0, std.mem.sliceAsBytes(landmark_tensor));
+        try landmarks_engine.invoke();
+        var landmarks: [face.landmark_count]face.Landmark = undefined;
+        face.decodeLandmarks(try landmarks_engine.outputFloats(0), region, @floatFromInt(landmark_side), &landmarks);
+        var contour: [face106.point_count * 2]f32 = undefined;
+        face106.fill(&landmarks, @floatFromInt(image.width), @floatFromInt(image.height), &contour);
+
+        const beauty = ck_beauty_create(".vendor/gpupixel/src") orelse return 1;
+        defer ck_beauty_destroy(beauty);
+        const pixel_count = @as(usize, image.width) * image.height * 4;
+        const out_a = try gpa.alloc(u8, pixel_count);
+        defer gpa.free(out_a);
+        const source_pixels = image.pixels.rgba8;
+
+        if (ck_beauty_process(beauty, source_pixels.ptr, @intCast(image.width), @intCast(image.height), &contour, out_a.ptr) != 0) {
+            try out.print("beauty: identity process refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        var identity_delta: u64 = 0;
+        for (source_pixels, out_a) |a, b2| {
+            identity_delta += @abs(@as(i32, a) - @as(i32, b2));
+        }
+        const identity_mean = @as(f64, @floatFromInt(identity_delta)) / @as(f64, @floatFromInt(pixel_count));
+
+        ck_beauty_set(beauty, 0, 0.9);
+        ck_beauty_set(beauty, 1, 0.5);
+        const out_b = try gpa.alloc(u8, pixel_count);
+        defer gpa.free(out_b);
+        if (ck_beauty_process(beauty, source_pixels.ptr, @intCast(image.width), @intCast(image.height), &contour, out_b.ptr) != 0) {
+            try out.print("beauty: effect process refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        var effect_delta: u64 = 0;
+        for (source_pixels, out_b) |a, b2| {
+            effect_delta += @abs(@as(i32, a) - @as(i32, b2));
+        }
+        const effect_mean = @as(f64, @floatFromInt(effect_delta)) / @as(f64, @floatFromInt(pixel_count));
+        try out.print("beauty: identity mean delta {d:.3}, smooth+whiten mean delta {d:.3}\n", .{ identity_mean, effect_mean });
+        try out.flush();
+        if (identity_mean > 2.0) return 1;
+        if (effect_mean <= identity_mean + 0.5) return 1;
     }
 
     try out.print("tracking harness: corpus clean through detect, landmarks, blendshapes\n", .{});

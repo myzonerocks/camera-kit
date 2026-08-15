@@ -204,6 +204,40 @@ export fn Java_kit_camera_CameraKit_nativeFaceResult(env: *JniEnv, cls: jobject,
     return @intFromEnum(abi.ck_session_face_result(sessionFromHandle(session), result));
 }
 
+export fn Java_kit_camera_CameraKit_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
+    _ = cls;
+    _ = path_len;
+    const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.ck_session_enable_beauty(sessionFromHandle(session), @ptrCast(path)));
+}
+
+export fn Java_kit_camera_CameraKit_nativeDisableBeauty(env: *JniEnv, cls: jobject, session: i64) void {
+    _ = env;
+    _ = cls;
+    abi.ck_session_disable_beauty(sessionFromHandle(session));
+}
+
+export fn Java_kit_camera_CameraKit_nativeSetBeauty(env: *JniEnv, cls: jobject, session: i64, effect: i32, value: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.ck_session_set_beauty(sessionFromHandle(session), effect, value));
+}
+
+export fn Java_kit_camera_CameraKit_nativeBeautifyFrame(
+    env: *JniEnv,
+    cls: jobject,
+    session: i64,
+    rgba_in: jobject,
+    rgba_out: jobject,
+    width: i32,
+    height: i32,
+) i32 {
+    _ = cls;
+    const source = getDirectBufferAddress(env, rgba_in) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const destination = getDirectBufferAddress(env, rgba_out) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.ck_session_beautify_frame(sessionFromHandle(session), source, @intCast(width), @intCast(height), destination));
+}
+
 export fn Java_kit_camera_CameraKit_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;
