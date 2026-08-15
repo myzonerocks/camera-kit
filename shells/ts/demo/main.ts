@@ -45,6 +45,10 @@ class TrackerLink {
           (window as unknown as Record<string, unknown>).workerBooted = true;
           return;
         }
+        if (event.data.kind === "stage") {
+          (window as unknown as Record<string, unknown>).workerStage = (event.data as { stage?: string }).stage;
+          return;
+        }
         if (event.data.kind === "ready") resolve();
         else reject(new Error(event.data.message ?? "tracking worker failed"));
       };

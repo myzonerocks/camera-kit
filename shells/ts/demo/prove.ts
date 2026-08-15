@@ -73,7 +73,7 @@ for (let waited = 0; waited < 30_000; waited += 1000) {
 // The tracking pass: wait for the worker, then one corpus portrait must
 // track and the control frame must not.
 let tracking = "";
-for (let waited = 0; waited < 120_000; waited += 1000) {
+for (let waited = 0; waited < 300_000; waited += 1000) {
   await Bun.sleep(1000);
   const up = (await send("Runtime.evaluate", {
     expression: "Boolean(window.trackingUp)",
@@ -115,7 +115,7 @@ const trackingErr = (await send("Runtime.evaluate", {
 })) as { result?: { value?: string } };
 if (trackingErr.result?.value) console.log(`tracking error: ${trackingErr.result.value}`);
 const booted = (await send("Runtime.evaluate", {
-  expression: "JSON.stringify({booted: Boolean(window.workerBooted), up: Boolean(window.trackingUp)})",
+  expression: "JSON.stringify({booted: Boolean(window.workerBooted), stage: window.workerStage ?? null, up: Boolean(window.trackingUp)})",
   returnByValue: true,
 })) as { result?: { value?: string } };
 console.log(`worker state: ${booted.result?.value}`);

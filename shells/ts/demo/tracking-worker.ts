@@ -6,6 +6,8 @@
 
 import { FaceTracker } from "../src/tracking";
 
+FaceTracker.onStage = (stage) => self.postMessage({ kind: "stage", stage });
+
 let tracker: FaceTracker | null = null;
 
 self.postMessage({ kind: "booted" });
@@ -31,6 +33,7 @@ self.onmessage = async (event: MessageEvent<InitMessage | FrameMessage>) => {
   const message = event.data;
   if (message.kind === "init") {
     try {
+      self.postMessage({ kind: "stage", stage: "init received" });
       tracker = await FaceTracker.create(message.moduleBytes, new Uint8Array(message.taskBundle));
       self.postMessage({ kind: "ready" });
     } catch (error) {
