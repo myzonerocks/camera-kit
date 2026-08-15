@@ -50,6 +50,10 @@ const Node = struct {
     output_kinds: [max_ports]DataKind,
     output_count: u8,
     input_connected: [max_ports]bool,
+    // Removed nodes are tombstoned, not compacted: every other live node's
+    // NodeIndex must stay valid across a removal, since callers (a lens's
+    // own bookkeeping, in particular) hold onto indices across edits.
+    alive: bool = true,
 };
 
 pub const Graph = struct {
@@ -58,6 +62,10 @@ pub const Graph = struct {
     edges: std.ArrayList(Edge) = .empty,
     schedule: std.ArrayList(NodeIndex) = .empty,
     schedule_valid: bool = false,
+    // Tombstoned slots, ready for addNode to reuse before growing the
+    // array - a lens spliced and unspliced repeatedly costs no unbounded
+    // growth.
+    free_nodes: std.ArrayList(NodeIndex) = .empty,
 
     pub fn init(gpa: Allocator) Graph {
         return .{ .gpa = gpa };
@@ -67,6 +75,7 @@ pub const Graph = struct {
         g.nodes.deinit(g.gpa);
         g.edges.deinit(g.gpa);
         g.schedule.deinit(g.gpa);
+        g.free_nodes.deinit(g.gpa);
     }
 
     pub fn addNode(g: *Graph, desc: NodeDesc) EditError!NodeIndex {
@@ -83,10 +92,43 @@ pub const Graph = struct {
         };
         for (desc.inputs, 0..) |p, i| node.input_kinds[i] = p.kind;
         for (desc.outputs, 0..) |p, i| node.output_kinds[i] = p.kind;
+        g.schedule_valid = false;
+        if (g.free_nodes.pop()) |reused| {
+            g.nodes.items[reused] = node;
+            return reused;
+        }
         const index: NodeIndex = @intCast(g.nodes.items.len);
         try g.nodes.append(g.gpa, node);
-        g.schedule_valid = false;
         return index;
+    }
+
+    /// Edit-time. Drops the node and every edge touching it, and resets
+    /// input_connected on the far side of any edge that fed out of it, so
+    /// a later splice can reconnect that input. index becomes eligible for
+    /// addNode reuse; using it again before that is a caller bug (asserted
+    /// in Debug/ReleaseSafe, since the freed slot's contents are otherwise
+    /// silently overwritten by whatever addNode reuses it for next).
+    pub fn removeNode(g: *Graph, index: NodeIndex) void {
+        std.debug.assert(g.nodes.items[index].alive);
+        g.nodes.items[index].alive = false;
+
+        var write: usize = 0;
+        for (g.edges.items) |e| {
+            if (e.from_node == index or e.to_node == index) {
+                if (e.to_node != index) g.nodes.items[e.to_node].input_connected[e.to_port] = false;
+                continue;
+            }
+            g.edges.items[write] = e;
+            write += 1;
+        }
+        g.edges.shrinkRetainingCapacity(write);
+
+        g.free_nodes.append(g.gpa, index) catch {
+            // Losing the slot to reuse is a bounded cost (the array simply
+            // keeps that one entry tombstoned forever), never a correctness
+            // problem, so an allocation failure here is not fatal.
+        };
+        g.schedule_valid = false;
     }
 
     /// Connects an output port to an input port. Kinds must match and an
@@ -124,8 +166,12 @@ pub const Graph = struct {
     fn computeSchedule(g: *Graph) EditError!void {
         const n = g.nodes.items.len;
         const m = g.edges.items.len;
+        var alive_count: usize = 0;
+        for (g.nodes.items) |node| {
+            if (node.alive) alive_count += 1;
+        }
         g.schedule.clearRetainingCapacity();
-        try g.schedule.ensureTotalCapacity(g.gpa, n);
+        try g.schedule.ensureTotalCapacity(g.gpa, alive_count);
 
         // Successor lists in compressed form: counting pass, prefix sums,
         // fill pass. Edge insertion order is preserved, so ties in the
@@ -156,7 +202,7 @@ pub const Graph = struct {
         var head: usize = 0;
         var tail: usize = 0;
         for (indegree, 0..) |d, i| {
-            if (d == 0) {
+            if (d == 0 and g.nodes.items[i].alive) {
                 queue[tail] = @intCast(i);
                 tail += 1;
             }
@@ -175,7 +221,7 @@ pub const Graph = struct {
             }
         }
 
-        if (g.schedule.items.len != n) return error.CycleDetected;
+        if (g.schedule.items.len != alive_count) return error.CycleDetected;
         g.schedule_valid = true;
     }
 
@@ -274,4 +320,55 @@ test "schedule is identical across recomputation" {
     g.schedule_valid = false;
     const second = try g.executionOrder();
     try t.expectEqualSlices(NodeIndex, first, second);
+}
+
+test "removing a node drops it from the schedule and its edges" {
+    var g = Graph.init(t.allocator);
+    defer g.deinit();
+
+    const camera = try g.addNode(cameraDesc());
+    const beauty = try g.addNode(.{ .role = .transform, .inputs = &.{.{ .kind = .texture }}, .outputs = &.{.{ .kind = .texture }} });
+    const display = try g.addNode(.{ .role = .sink, .inputs = &.{.{ .kind = .texture }} });
+    try g.connect(camera, 0, beauty, 0);
+    try g.connect(beauty, 0, display, 0);
+
+    g.removeNode(beauty);
+    const order = try g.executionOrder();
+    try t.expectEqual(@as(usize, 2), order.len);
+    for (order) |n| try t.expect(n != beauty);
+
+    // display's input freed up, so the camera can feed it directly now.
+    try g.connect(camera, 0, display, 0);
+    try t.expectEqual(@as(usize, 2), (try g.executionOrder()).len);
+}
+
+test "a removed node's slot is reused, so repeated splice/unsplice does not grow the graph" {
+    var g = Graph.init(t.allocator);
+    defer g.deinit();
+
+    const first = try g.addNode(cameraDesc());
+    g.removeNode(first);
+    const second = try g.addNode(.{ .role = .sink, .inputs = &.{.{ .kind = .texture }} });
+    try t.expectEqual(first, second);
+    try t.expectEqual(@as(usize, 1), g.nodeCount());
+}
+
+test "a reused slot starts clean: no edge or cycle state survives from before removal" {
+    var g = Graph.init(t.allocator);
+    defer g.deinit();
+
+    const a = try g.addNode(.{ .role = .transform, .inputs = &.{.{ .kind = .texture }}, .outputs = &.{.{ .kind = .texture }} });
+    const b = try g.addNode(.{ .role = .transform, .inputs = &.{.{ .kind = .texture }}, .outputs = &.{.{ .kind = .texture }} });
+    try g.connect(a, 0, b, 0);
+    try t.expectError(error.CycleDetected, g.connect(b, 0, a, 0));
+
+    g.removeNode(b);
+    const reused = try g.addNode(.{ .role = .transform, .inputs = &.{.{ .kind = .texture }}, .outputs = &.{.{ .kind = .texture }} });
+    try t.expectEqual(b, reused);
+
+    // a's prior edge into b is gone with b, so this is a fresh, acyclic
+    // connection, not a repeat of the edge that used to exist.
+    try g.connect(a, 0, reused, 0);
+    const order = try g.executionOrder();
+    try t.expectEqual(@as(usize, 2), order.len);
 }
