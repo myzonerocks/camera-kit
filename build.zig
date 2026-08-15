@@ -187,6 +187,12 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
 
+    const lens_manifest_module = b.createModule(.{
+        .root_source_file = b.path("core/lens/manifest.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
     const detector_tests = b.addTest(.{ .root_module = detector_module });
@@ -201,6 +207,7 @@ pub fn build(b: *std.Build) void {
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
     const vendor_sync_tests = b.addTest(.{ .root_module = vendor_sync_module });
     const fetch_models_tests = b.addTest(.{ .root_module = fetch_models_module });
+    const lens_manifest_tests = b.addTest(.{ .root_module = lens_manifest_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
@@ -217,6 +224,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
     test_step.dependOn(&b.addRunArtifact(vendor_sync_tests).step);
     test_step.dependOn(&b.addRunArtifact(fetch_models_tests).step);
+    test_step.dependOn(&b.addRunArtifact(lens_manifest_tests).step);
 
     // Adapters compile against the vendored trees. Without them the rest of
     // the build still works, vendor-sync included; only the steps that need
