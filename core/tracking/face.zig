@@ -13,6 +13,37 @@ pub const landmark_count = 478;
 pub const blendshape_count = 52;
 pub const region_scale = 1.5;
 
+/// The blendshape model's output order, extracted from the pinned model
+/// itself (face_blendshapes.tflite carries no separate label file; the
+/// names live in a raw flatbuffers string vector inside the model, found
+/// by locating the length-52 offset vector and walking it) rather than
+/// assumed from the published category list, though it matches it.
+pub const blendshape_names = [blendshape_count][]const u8{
+    "_neutral",         "browDownLeft",      "browDownRight",     "browInnerUp",
+    "browOuterUpLeft",  "browOuterUpRight",  "cheekPuff",         "cheekSquintLeft",
+    "cheekSquintRight", "eyeBlinkLeft",      "eyeBlinkRight",     "eyeLookDownLeft",
+    "eyeLookDownRight", "eyeLookInLeft",     "eyeLookInRight",    "eyeLookOutLeft",
+    "eyeLookOutRight",  "eyeLookUpLeft",     "eyeLookUpRight",    "eyeSquintLeft",
+    "eyeSquintRight",   "eyeWideLeft",       "eyeWideRight",      "jawForward",
+    "jawLeft",          "jawOpen",           "jawRight",          "mouthClose",
+    "mouthDimpleLeft",  "mouthDimpleRight",  "mouthFrownLeft",    "mouthFrownRight",
+    "mouthFunnel",      "mouthLeft",         "mouthLowerDownLeft", "mouthLowerDownRight",
+    "mouthPressLeft",   "mouthPressRight",   "mouthPucker",       "mouthRight",
+    "mouthRollLower",   "mouthRollUpper",    "mouthShrugLower",   "mouthShrugUpper",
+    "mouthSmileLeft",   "mouthSmileRight",   "mouthStretchLeft",  "mouthStretchRight",
+    "mouthUpperUpLeft", "mouthUpperUpRight", "noseSneerLeft",     "noseSneerRight",
+};
+
+/// The blendshape's index in blendshape_names/Result.blendshapes, or null
+/// for an unknown name. Linear scan over 52 short strings, called only at
+/// lens load time (trigger compilation), never per frame.
+pub fn blendshapeIndex(name: []const u8) ?u8 {
+    for (blendshape_names, 0..) |candidate, i| {
+        if (std.mem.eql(u8, candidate, name)) return @intCast(i);
+    }
+    return null;
+}
+
 pub const Landmark = struct { x: f32, y: f32, z: f32 };
 
 /// One published tracking result, the shape that crosses the C boundary.
@@ -146,6 +177,16 @@ pub fn blendshapeInput(landmarks: *const [landmark_count]Landmark, out: *[blends
 }
 
 const t = std.testing;
+
+test "blendshape names are unique and resolve to their own index" {
+    for (blendshape_names, 0..) |name, i| {
+        try t.expectEqual(@as(?u8, @intCast(i)), blendshapeIndex(name));
+    }
+    try t.expectEqual(@as(?u8, null), blendshapeIndex("not_a_real_blendshape"));
+    try t.expectEqualStrings("_neutral", blendshape_names[0]);
+    try t.expectEqualStrings("jawOpen", blendshape_names[25]);
+    try t.expectEqualStrings("noseSneerRight", blendshape_names[51]);
+}
 
 test "the blendshape subset is strictly increasing within the mesh" {
     var previous: i32 = -1;

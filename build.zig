@@ -192,6 +192,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const lens_trigger_module = b.createModule(.{
+        .root_source_file = b.path("core/lens/trigger.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "face", .module = face_module }},
+    });
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
@@ -208,6 +214,7 @@ pub fn build(b: *std.Build) void {
     const vendor_sync_tests = b.addTest(.{ .root_module = vendor_sync_module });
     const fetch_models_tests = b.addTest(.{ .root_module = fetch_models_module });
     const lens_manifest_tests = b.addTest(.{ .root_module = lens_manifest_module });
+    const lens_trigger_tests = b.addTest(.{ .root_module = lens_trigger_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
@@ -225,6 +232,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(vendor_sync_tests).step);
     test_step.dependOn(&b.addRunArtifact(fetch_models_tests).step);
     test_step.dependOn(&b.addRunArtifact(lens_manifest_tests).step);
+    test_step.dependOn(&b.addRunArtifact(lens_trigger_tests).step);
 
     // Adapters compile against the vendored trees. Without them the rest of
     // the build still works, vendor-sync included; only the steps that need

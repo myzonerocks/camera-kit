@@ -146,7 +146,7 @@ O(1) per trigger with no allocation:
 
 ```jsonc
 {
-  "when": "face.blendshape('mouthOpen') > 0.6",
+  "when": "face.blendshape('jawOpen') > 0.6",
   "action": { "kind": "param_ramp", "target": "smooth_amount", "to": 1.0, "duration_ms": 200 }
 }
 ```
