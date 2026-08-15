@@ -7,9 +7,10 @@ completeness and merges as a single squash PR.
 - [x] Math: SIMD vectors, matrices, quaternions, poses, color conversion
 - [x] Frame graph: nodes, typed edges, cached schedule, pooled textures and buffers, the degradation ladder
 - [x] C ABI: camerakit.h, the ck_ exports, the ABI diff gate
-- [ ] Render and assets: bgfx backend node, glTF loading
-- [ ] Tracking and beauty: MediaPipe and GPUPixel behind C shims, model fetching against a tracked lock
-- [ ] Lens format: the .glens spec, runtime, validator, reference lenses, fuzzers
+- [x] Render and assets: bgfx backend node, glTF loading, capture ingress on all three shells
+- [x] Tracking: MediaPipe-class face pipeline behind a C shim, model fetching against a tracked lock
+- [x] Beauty: GPUPixel behind a C shim, host/iOS/Android; live compositing through bgfx (not yet CPU-side data path only) is the current work
+- [ ] Lens format: the .glens spec, manifest/trigger/animation runtime shipped; graph splice/unsplice, validator, fuzzers, and reference lenses remain
 - [ ] Shells: Swift, Kotlin, and TypeScript packages with demo apps
 - [ ] Conformance: headless harness, frame corpora, performance enforcement
 
