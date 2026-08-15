@@ -9,6 +9,11 @@ const builtin = @import("builtin");
 const math = @import("math");
 const blobs = @import("shader_blobs");
 
+pub const android_vk = if (builtin.os.tag == .linux and builtin.abi.isAndroid())
+    @import("android_vk.zig")
+else
+    struct {};
+
 pub const c = @cImport({
     @cInclude("bgfx/c99/bgfx.h");
 });
