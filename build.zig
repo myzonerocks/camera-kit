@@ -225,6 +225,7 @@ pub fn build(b: *std.Build) void {
         break :blk true;
     };
     const shaderc_exe = addShadercTool(b, optimize);
+    _ = addFlatcTool(b);
     addIosStep(b, optimize, shaderc_exe);
     addAndroidStep(b, optimize, shaderc_exe);
 
@@ -397,6 +398,42 @@ fn buildBgfxAndroid(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     lib.root_module.addCMacro("_Nonnull", "");
     lib.root_module.addCMacro("_Nullable", "");
     return lib;
+}
+
+// The schema compiler from the pinned flatbuffers tree, built for the host
+// to generate the inference runtime's schema headers at build time.
+fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
+    b.build_root.handle.access(b.graph.io, ".vendor/flatbuffers/src/flatc_main.cpp", .{}) catch return null;
+    const target = b.graph.host;
+    const module = b.createModule(.{ .target = target, .optimize = .ReleaseFast });
+    module.link_libcpp = true;
+    module.addIncludePath(b.path(".vendor/flatbuffers/include"));
+    module.addIncludePath(b.path(".vendor/flatbuffers"));
+    module.addIncludePath(b.path(".vendor/flatbuffers/grpc"));
+    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    const sources = [_][]const u8{
+        "src/idl_parser.cpp",          "src/idl_gen_text.cpp",     "src/reflection.cpp",
+        "src/util.cpp",                "src/idl_gen_binary.cpp",   "src/idl_gen_cpp.cpp",
+        "src/idl_gen_csharp.cpp",      "src/idl_gen_dart.cpp",     "src/idl_gen_kotlin.cpp",
+        "src/idl_gen_kotlin_kmp.cpp",  "src/idl_gen_go.cpp",       "src/idl_gen_java.cpp",
+        "src/idl_gen_ts.cpp",          "src/idl_gen_php.cpp",      "src/idl_gen_python.cpp",
+        "src/idl_gen_lobster.cpp",     "src/idl_gen_rust.cpp",     "src/idl_gen_fbs.cpp",
+        "src/idl_gen_grpc.cpp",        "src/idl_gen_json_schema.cpp", "src/idl_gen_swift.cpp",
+        "src/file_name_saving_file_manager.cpp", "src/file_binary_writer.cpp", "src/file_writer.cpp",
+        "src/flatc.cpp",               "src/flatc_main.cpp",       "src/binary_annotator.cpp",
+        "src/annotated_binary_text_gen.cpp", "src/bfbs_gen_lua.cpp", "src/bfbs_gen_nim.cpp",
+        "src/code_generators.cpp",     "include/codegen/python.cc",
+        "grpc/src/compiler/cpp_generator.cc", "grpc/src/compiler/go_generator.cc",
+        "grpc/src/compiler/java_generator.cc", "grpc/src/compiler/python_generator.cc",
+        "grpc/src/compiler/swift_generator.cc", "grpc/src/compiler/ts_generator.cc",
+    };
+    for (sources) |file| {
+        module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/flatbuffers/{s}", .{file})), .flags = &flags });
+    }
+    const exe = b.addExecutable(.{ .name = "flatc", .root_module = module });
+    const step = b.step("flatc", "Build the schema compiler from the pinned flatbuffers tree");
+    step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+    return exe;
 }
 
 fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
