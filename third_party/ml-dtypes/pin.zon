@@ -1,0 +1,10 @@
+.{
+    .name = "ml-dtypes",
+    .repo = "https://github.com/jax-ml/ml_dtypes",
+    .version = "litert 2026-08",
+    .commit = "00d98cd92ade342fef589c0470379abb27baebe9",
+    .archive_sha256 = "f6e5880666661351e6cd084ac4178ddc4dabcde7e9a73722981c0d1500cf5937",
+    .license = "Apache-2.0",
+    .license_file = "LICENSE",
+    .license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+}

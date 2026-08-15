@@ -1,0 +1,10 @@
+.{
+    .name = "gemmlowp",
+    .repo = "https://github.com/google/gemmlowp",
+    .version = "litert 2026-08",
+    .commit = "16e8662c34917be0065110bfcd9cc27d30f52fdf",
+    .archive_sha256 = "c3feb896a1b42595cf9a508ed64ed0dc3cd84fffdb8eed790d02d0534ab322ce",
+    .license = "Apache-2.0",
+    .license_file = "LICENSE",
+    .license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+}

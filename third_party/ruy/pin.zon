@@ -1,0 +1,10 @@
+.{
+    .name = "ruy",
+    .repo = "https://github.com/google/ruy",
+    .version = "litert 2026-08",
+    .commit = "3286a34cc8de6149ac6844107dfdffac91531e72",
+    .archive_sha256 = "7c6f82bb6243befdd34472d631db8c18f22eeddf78608f082e5dd72ecb22b3a3",
+    .license = "Apache-2.0",
+    .license_file = "LICENSE",
+    .license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+}
