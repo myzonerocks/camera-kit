@@ -265,6 +265,7 @@ pub fn build(b: *std.Build) void {
             deps_step.dependOn(&b.addInstallArtifact(buildPthreadpoolLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildRuyLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildFarmhashLib(b, target, optimize, null), .{}).step);
+        deps_step.dependOn(&b.addInstallArtifact(buildFlatbuffersLib(b, target, optimize, null), .{}).step);
             deps_step.dependOn(&b.addInstallArtifact(buildXnnpackLib(b, target, optimize, null, null), .{}).step);
         } else {
             deps_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
@@ -331,6 +332,7 @@ pub fn build(b: *std.Build) void {
         tracking_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildRuyLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildFarmhashLib(b, target, optimize, null));
+        tracking_module.linkLibrary(buildFlatbuffersLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildFft2dLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildCpuinfoLib(b, target, optimize, null));
         tracking_module.linkLibrary(buildPthreadpoolLib(b, target, optimize, null));
@@ -388,6 +390,7 @@ pub fn build(b: *std.Build) void {
         exports_wasi.linkLibrary(buildXnnpackLib(b, wasi_target, wasi_optimize, null, null));
         exports_wasi.linkLibrary(buildAbseilLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildFarmhashLib(b, wasi_target, wasi_optimize, null));
+        exports_wasi.linkLibrary(buildFlatbuffersLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildFft2dLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildPthreadpoolLib(b, wasi_target, wasi_optimize, null));
         const tracking_wasm = b.addExecutable(.{ .name = "camerakit_tracking", .root_module = exports_wasi });
@@ -596,6 +599,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         jni_module.linkLibrary(buildAbseilLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildRuyLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildFarmhashLib(b, android_target, optimize, libc_txt));
+        jni_module.linkLibrary(buildFlatbuffersLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildFft2dLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildCpuinfoLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildPthreadpoolLib(b, android_target, optimize, libc_txt));
@@ -705,7 +709,7 @@ fn listFilesRecursive(b: *std.Build, dir_path: []const u8, suffix: []const u8, e
                 if (!std.mem.endsWith(u8, entry.name, suffix)) continue;
                 var banned = false;
                 for (exclude) |pattern| {
-                    if (std.mem.indexOf(u8, entry.name, pattern) != null) {
+                    if (std.mem.indexOf(u8, child, pattern) != null) {
                         banned = true;
                         break;
                     }
@@ -741,6 +745,8 @@ fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     // No signals to install a handler for on the web target.
     if (target.result.cpu.arch.isWasm()) {
         absl_excludes.append(b.allocator, "failure_signal_handler.cc") catch @panic("oom");
+        module.addCMacro("_WASI_EMULATED_SIGNAL", "1");
+        module.addCMacro("_WASI_EMULATED_MMAN", "1");
     }
     listFilesRecursive(b, ".vendor/abseil/absl", ".cc", absl_excludes.items, &sources);
     std.mem.sort([]const u8, sources.items, {}, struct {
@@ -869,6 +875,23 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     return lib;
 }
 
+// The flatbuffers runtime pieces the schema code links against; the
+// headers carry almost everything, this archive holds the rest.
+fn buildFlatbuffersLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    module.addIncludePath(b.path(".vendor/flatbuffers/include"));
+    module.addCSourceFile(.{
+        .file = b.path(".vendor/flatbuffers/src/util.cpp"),
+        .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
+    });
+    const lib = b.addLibrary(.{ .name = "flatbuffers", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
+}
+
 fn buildFarmhashLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libcpp = true;
@@ -981,6 +1004,7 @@ const xnnpack_wasm_families = [_]XnnpackFamily{
 fn xnnpackConfigureModule(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     module.link_libc = true;
     module.link_libcpp = true;
+    if (target.result.cpu.arch.isWasm()) module.addIncludePath(b.path("adapters/tracking/wasi_std"));
     if (target.result.abi.isAndroid()) module.pic = true;
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     for ([_][]const u8{
@@ -1261,7 +1285,13 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     // The single-thread standard thread surface: the wasi standard library
     // omits these headers, and this module runs on one thread by design.
-    if (target.result.cpu.arch.isWasm()) module.addIncludePath(b.path("adapters/tracking/wasi_std"));
+    var wasm_compat_flags: []const []const u8 = &.{};
+    if (target.result.cpu.arch.isWasm()) {
+        module.addIncludePath(b.path("adapters/tracking/wasi_std"));
+        module.addCMacro("TFLITE_MMAP_DISABLED", "1");
+        module.addCMacro("_WASI_EMULATED_MMAN", "1");
+        wasm_compat_flags = &.{ "-include", b.pathFromRoot("adapters/tracking/wasi_std/wasi_compat.h") };
+    }
     for ([_][]const u8{
         ".vendor/litert",           ".vendor/tensorflow",          ".vendor/tensorflow/third_party/xla",
         ".vendor/flatbuffers/include",
@@ -1343,6 +1373,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
     var cxx_flags: std.ArrayList([]const u8) = .empty;
     cxx_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    cxx_flags.appendSlice(b.allocator, wasm_compat_flags) catch @panic("oom");
     if (target.result.cpu.arch == .x86_64) {
         cxx_flags.appendSlice(b.allocator, &.{ "-include", immintrinPath(b) }) catch @panic("oom");
     }
@@ -1582,6 +1613,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             buildAbseilLib(b, ios_target, optimize, null),
             buildRuyLib(b, ios_target, optimize, null),
             buildFarmhashLib(b, ios_target, optimize, null),
+            buildFlatbuffersLib(b, ios_target, optimize, null),
             buildFft2dLib(b, ios_target, optimize, null),
             buildCpuinfoLib(b, ios_target, optimize, null),
             buildPthreadpoolLib(b, ios_target, optimize, null),
