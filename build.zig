@@ -316,6 +316,11 @@ pub fn build(b: *std.Build) void {
         tracking_module.linkLibrary(buildFft2dLib(b, target, optimize));
         tracking_module.linkLibrary(buildCpuinfoLib(b, target, optimize));
         tracking_module.linkLibrary(buildPthreadpoolLib(b, target, optimize));
+        tracking_module.addIncludePath(b.path(".vendor/bimg/3rdparty/stb"));
+        tracking_module.addCSourceFile(.{
+            .file = b.path("harness/stb_image_impl.c"),
+            .flags = &.{ "-std=c99", "-fno-sanitize=undefined", "-w" },
+        });
         const tracking_exe = b.addExecutable(.{ .name = "tracking_harness", .root_module = tracking_module });
         const run_tracking = b.addRunArtifact(tracking_exe);
         run_tracking.setCwd(b.path("."));

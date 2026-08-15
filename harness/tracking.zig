@@ -13,7 +13,32 @@ const detector = @import("detector");
 const sampler = @import("sampler");
 const face = @import("face");
 
+const stb = @cImport(@cInclude("stb_image.h"));
+
 var harness_io: std.Io = undefined;
+
+const CorpusFrame = struct {
+    frame: sampler.Frame,
+    fn deinit(corpus: CorpusFrame) void {
+        stb.stbi_image_free(@constCast(corpus.frame.pixels.ptr));
+    }
+};
+
+fn loadCorpusFrame(gpa: std.mem.Allocator, path: []const u8) !CorpusFrame {
+    const encoded = try std.Io.Dir.cwd().readFileAlloc(harness_io, path, gpa, .limited(32 << 20));
+    defer gpa.free(encoded);
+    var width: c_int = 0;
+    var height: c_int = 0;
+    var channels: c_int = 0;
+    const pixels = stb.stbi_load_from_memory(encoded.ptr, @intCast(encoded.len), &width, &height, &channels, 4) orelse
+        return error.UndecodableCorpusFrame;
+    const len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
+    return .{ .frame = .{
+        .pixels = pixels[0..len],
+        .width = @intCast(width),
+        .height = @intCast(height),
+    } };
+}
 
 fn reportEngine(name: []const u8, engine: *const runtime.Engine) !void {
     var buffer: [256]u8 = undefined;
@@ -118,14 +143,98 @@ pub fn main(init_args: std.process.Init) !u8 {
     defer gpa.free(candidates);
     const detections = detector.decode(raw_boxes, raw_scores, anchors, @floatFromInt(input_side), 0.5, candidates);
 
-    var buffer: [128]u8 = undefined;
+    var buffer: [512]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(harness_io, &buffer);
     const out = &stdout.interface;
     try out.print("blank frame detections: {d}\n", .{detections.len});
     try out.flush();
     if (detections.len != 0) return 1;
 
-    try out.print("tracking harness: engines up, decode clean\n", .{});
+    // The pinned corpus: two frontal portraits that must track end to end,
+    // one control frame that must produce nothing.
+    const landmark_side: u32 = blk: {
+        const tensor = runtime.c.TfLiteInterpreterGetInputTensor(landmarks_engine.interpreter, 0) orelse
+            return error.UnexpectedModel;
+        break :blk @intCast(runtime.c.TfLiteTensorDim(tensor, 1));
+    };
+    const landmark_tensor = try gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3);
+    defer gpa.free(landmark_tensor);
+
+    for ([_]struct { path: []const u8, faces: bool }{
+        .{ .path = ".models/corpus/face_frontal_a.jpg", .faces = true },
+        .{ .path = ".models/corpus/face_frontal_b.jpg", .faces = true },
+        .{ .path = ".models/corpus/no_face_control.jpg", .faces = false },
+    }) |case| {
+        const corpus = try loadCorpusFrame(gpa, case.path);
+        defer corpus.deinit();
+        const image = corpus.frame;
+
+        sampler.sampleRegion(image, face.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
+        try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
+        try detector_engine.invoke();
+        const found = detector.decode(
+            try detector_engine.outputFloats(0),
+            try detector_engine.outputFloats(1),
+            anchors,
+            @floatFromInt(input_side),
+            0.5,
+            candidates,
+        );
+        try out.print("{s}: {d}x{d}, detections {d}\n", .{ case.path, image.width, image.height, found.len });
+        try out.flush();
+        if (!case.faces) {
+            if (found.len != 0) return 1;
+            continue;
+        }
+        if (found.len == 0) return 1;
+
+        const region = face.regionFromDetection(found[0], face.frameSquare(image.width, image.height));
+        sampler.sampleRegion(image, region, .unit, landmark_side, landmark_tensor);
+        try landmarks_engine.writeInput(0, std.mem.sliceAsBytes(landmark_tensor));
+        try landmarks_engine.invoke();
+
+        const raw_presence = (try landmarks_engine.outputFloats(1))[0];
+        const presence = if (raw_presence < 0.0 or raw_presence > 1.0)
+            1.0 / (1.0 + @exp(-raw_presence))
+        else
+            raw_presence;
+
+        var landmarks: [face.landmark_count]face.Landmark = undefined;
+        face.decodeLandmarks(try landmarks_engine.outputFloats(0), region, @floatFromInt(landmark_side), &landmarks);
+        var inside: usize = 0;
+        for (landmarks) |landmark| {
+            const slack_x = @as(f32, @floatFromInt(image.width)) * 0.1;
+            const slack_y = @as(f32, @floatFromInt(image.height)) * 0.1;
+            if (landmark.x > -slack_x and landmark.x < @as(f32, @floatFromInt(image.width)) + slack_x and
+                landmark.y > -slack_y and landmark.y < @as(f32, @floatFromInt(image.height)) + slack_y)
+            {
+                inside += 1;
+            }
+        }
+        const eye_gap = @abs(landmarks[face.rotation_end_landmark].x - landmarks[face.rotation_start_landmark].x);
+
+        var blend_input: [face.blendshape_subset.len * 2]f32 = undefined;
+        face.blendshapeInput(&landmarks, &blend_input);
+        try blendshapes_engine.writeInput(0, std.mem.sliceAsBytes(&blend_input));
+        try blendshapes_engine.invoke();
+        const scores = try blendshapes_engine.outputFloats(0);
+        var scores_in_range: usize = 0;
+        for (scores) |score| {
+            if (score >= 0.0 and score <= 1.0) scores_in_range += 1;
+        }
+
+        try out.print(
+            "  presence {d:.3}, landmarks inside {d}/{d}, eye gap {d:.0}px, blendshapes in range {d}/{d}\n",
+            .{ presence, inside, landmarks.len, eye_gap, scores_in_range, scores.len },
+        );
+        try out.flush();
+        if (presence < 0.5) return 1;
+        if (inside != landmarks.len) return 1;
+        if (eye_gap < region.side * 0.05) return 1;
+        if (scores_in_range != scores.len) return 1;
+    }
+
+    try out.print("tracking harness: corpus clean through detect, landmarks, blendshapes\n", .{});
     try out.flush();
     return 0;
 }
