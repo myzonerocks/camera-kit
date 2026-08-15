@@ -389,6 +389,7 @@ pub fn build(b: *std.Build) void {
         exports_wasi.linkLibrary(buildTfliteLib(b, wasi_target, wasi_optimize, flatc_exe.?, null));
         exports_wasi.linkLibrary(buildXnnpackLib(b, wasi_target, wasi_optimize, null, null));
         exports_wasi.linkLibrary(buildAbseilLib(b, wasi_target, wasi_optimize, null));
+        exports_wasi.linkLibrary(buildRuyLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildFarmhashLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildFlatbuffersLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildFft2dLib(b, wasi_target, wasi_optimize, null));
@@ -756,6 +757,9 @@ fn buildAbseilLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     }.lessThan);
     var flags: std.ArrayList([]const u8) = .empty;
     flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    // Exception paths become traps on the web target; nothing catches in
+    // this module.
+    if (target.result.cpu.arch.isWasm()) flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
     // The container internals include the bmi2 intrinsics header directly,
     // which this compiler only accepts by way of immintrin.
     if (target.result.cpu.arch == .x86_64) {
@@ -855,9 +859,13 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     module.link_libcpp = true;
     if (target.result.abi.isAndroid()) module.pic = true;
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    if (target.result.cpu.arch.isWasm()) module.addIncludePath(b.path("adapters/tracking/wasi_std"));
     module.addIncludePath(b.path(".vendor/ruy"));
     module.addIncludePath(b.path(".vendor/cpuinfo/include"));
-    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    var ruy_flags: std.ArrayList([]const u8) = .empty;
+    ruy_flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    if (target.result.cpu.arch.isWasm()) ruy_flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    const flags = ruy_flags.items;
     var sources: std.ArrayList([]const u8) = .empty;
     listFilesRecursive(b, ".vendor/ruy/ruy", ".cc", &.{
         "_test", "test_", "benchmark", "example", "gtest", "pmu", "_lib.cc", "test.cc",
@@ -868,7 +876,7 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         }
     }.lessThan);
     for (sources.items) |file| {
-        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+        module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
     }
     const lib = b.addLibrary(.{ .name = "ruy", .linkage = .static, .root_module = module });
     if (libc) |file| lib.setLibCFile(file);
@@ -882,10 +890,14 @@ fn buildFlatbuffersLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     module.link_libcpp = true;
     if (target.result.abi.isAndroid()) module.pic = true;
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    if (target.result.cpu.arch.isWasm()) module.addIncludePath(b.path("adapters/tracking/wasi_std"));
     module.addIncludePath(b.path(".vendor/flatbuffers/include"));
     module.addCSourceFile(.{
         .file = b.path(".vendor/flatbuffers/src/util.cpp"),
-        .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
+        .flags = if (target.result.cpu.arch.isWasm())
+            &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-fno-exceptions" }
+        else
+            &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" },
     });
     const lib = b.addLibrary(.{ .name = "flatbuffers", .linkage = .static, .root_module = module });
     if (libc) |file| lib.setLibCFile(file);
@@ -934,6 +946,10 @@ fn cmakeSourceList(b: *std.Build, root: []const u8, cmake_path: []const u8, var_
         if (closes) return;
     }
     std.debug.panic("unterminated {s} in {s}", .{ var_name, cmake_path });
+}
+
+fn is_wasm_arch(target: std.Build.ResolvedTarget) bool {
+    return target.result.cpu.arch.isWasm();
 }
 
 const XnnpackFamily = struct {
@@ -991,9 +1007,11 @@ const wasm_feature = std.Target.wasm.featureSet;
 const xnnpack_wasm_families = [_]XnnpackFamily{
     .{ .list = "scalar_microkernels.cmake", .variable = "PROD_SCALAR_MICROKERNEL_SRCS" },
     .{ .list = "wasmsimd_microkernels.cmake", .variable = "PROD_WASMSIMD_MICROKERNEL_SRCS", .features = wasm_feature(&.{.simd128}) },
-    // The half precision kernels use instructions browsers do not validate
-    // yet; the config never selects them while their toggle is off.
-    .{ .list = "wasmrelaxedsimd_microkernels.cmake", .variable = "PROD_WASMRELAXEDSIMD_MICROKERNEL_SRCS", .features = wasm_feature(&.{ .simd128, .relaxed_simd }), .exclude_contains = &.{"f16"} },
+    // The pure half precision math kernels use instructions browsers do
+    // not validate yet; the ones converting to and from full precision
+    // stay, and the config never selects the excluded ones while their
+    // toggle is off.
+    .{ .list = "wasmrelaxedsimd_microkernels.cmake", .variable = "PROD_WASMRELAXEDSIMD_MICROKERNEL_SRCS", .features = wasm_feature(&.{ .simd128, .relaxed_simd }), .exclude_contains = &.{"/gen/f16-v"} },
 };
 
 // The inference runtime's cpu backend as one static archive: the shared
@@ -1004,7 +1022,12 @@ const xnnpack_wasm_families = [_]XnnpackFamily{
 fn xnnpackConfigureModule(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     module.link_libc = true;
     module.link_libcpp = true;
-    if (target.result.cpu.arch.isWasm()) module.addIncludePath(b.path("adapters/tracking/wasi_std"));
+    if (target.result.cpu.arch.isWasm()) {
+        module.addIncludePath(b.path("adapters/tracking/wasi_std"));
+        // The web target maps memory through the engine, never a memory
+        // mapping syscall.
+        module.addCMacro("XNN_HAS_MMAP", "0");
+    }
     if (target.result.abi.isAndroid()) module.pic = true;
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     for ([_][]const u8{
@@ -1087,11 +1110,14 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         shared.append(b.allocator, b.fmt(".vendor/xnnpack/{s}", .{file})) catch @panic("oom");
     }
     const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
-    const cxx_flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    var xnn_cxx: std.ArrayList([]const u8) = .empty;
+    xnn_cxx.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    if (is_wasm_arch(target)) xnn_cxx.append(b.allocator, "-fno-exceptions") catch @panic("oom");
+    const cxx_flags = xnn_cxx.items;
     var seen = std.StringHashMap(void).init(b.allocator);
     for (shared.items) |file| {
         if ((seen.getOrPut(file) catch @panic("oom")).found_existing) continue;
-        const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".cc")) &cxx_flags else &c_flags;
+        const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".cc")) cxx_flags else &c_flags;
         module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
     }
 
@@ -1130,7 +1156,7 @@ fn buildXnnpackLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
             // its instruction set from the architecture flag, not from the
             // module's cpu features.
             const flags: []const []const u8 = if (std.mem.endsWith(u8, file, ".cc"))
-                &cxx_flags
+                cxx_flags
             else if (std.mem.endsWith(u8, file, ".S"))
                 &[_][]const u8{ "-w", "-march=armv8.2-a+fp16+dotprod" }
             else
@@ -1315,7 +1341,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     module.addIncludePath(generated.getDirectory());
 
     module.addCMacro("EIGEN_NEON_GEBP_NR", "4");
-    if (!target.result.cpu.arch.isWasm()) module.addCMacro("TFLITE_WITH_RUY", "1");
+    module.addCMacro("TFLITE_WITH_RUY", "1");
     module.addCMacro("TFLITE_KERNEL_USE_XNNPACK", "1");
     module.addCMacro("TFLITE_BUILD_WITH_XNNPACK_DELEGATE", "1");
     module.addCMacro("XNNPACK_DELEGATE_ENABLE_QS8", "1");
@@ -1373,6 +1399,7 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     const c_flags = [_][]const u8{ "-std=gnu99", "-fno-sanitize=undefined", "-w" };
     var cxx_flags: std.ArrayList([]const u8) = .empty;
     cxx_flags.appendSlice(b.allocator, &.{ "-std=c++20", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    if (target.result.cpu.arch.isWasm()) cxx_flags.append(b.allocator, "-fno-exceptions") catch @panic("oom");
     cxx_flags.appendSlice(b.allocator, wasm_compat_flags) catch @panic("oom");
     if (target.result.cpu.arch == .x86_64) {
         cxx_flags.appendSlice(b.allocator, &.{ "-include", immintrinPath(b) }) catch @panic("oom");
