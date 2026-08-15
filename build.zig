@@ -181,6 +181,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("core/tracking/sampler.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_module }},
     });
     const face_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/face.zig"),

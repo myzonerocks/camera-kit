@@ -21,7 +21,7 @@ var harness_io: std.Io = undefined;
 const CorpusFrame = struct {
     frame: sampler.Frame,
     fn deinit(corpus: CorpusFrame) void {
-        stb.stbi_image_free(@constCast(corpus.frame.pixels.ptr));
+        stb.stbi_image_free(@constCast(corpus.frame.pixels.rgba8.ptr));
     }
 };
 
@@ -35,7 +35,7 @@ fn loadCorpusFrame(gpa: std.mem.Allocator, path: []const u8) !CorpusFrame {
         return error.UndecodableCorpusFrame;
     const len = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
     return .{ .frame = .{
-        .pixels = pixels[0..len],
+        .pixels = .{ .rgba8 = pixels[0..len] },
         .width = @intCast(width),
         .height = @intCast(height),
     } };
@@ -129,7 +129,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     const frame_pixels = try gpa.alloc(u8, @as(usize, frame_width) * frame_height * 4);
     defer gpa.free(frame_pixels);
     @memset(frame_pixels, 96);
-    const frame: sampler.Frame = .{ .pixels = frame_pixels, .width = frame_width, .height = frame_height };
+    const frame: sampler.Frame = .{ .pixels = .{ .rgba8 = frame_pixels }, .width = frame_width, .height = frame_height };
 
     const tensor_len = @as(usize, input_side) * input_side * 3;
     const input_tensor = try gpa.alloc(f32, tensor_len);
