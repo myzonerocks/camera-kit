@@ -18,9 +18,13 @@
 !docs/**
 docs/private/
 
-# Build outputs and caches, never source.
+# Build outputs and caches, never source. Compiler scratch artifacts are
+# named here so this file, not a contributor's global ignore, is what hides
+# them, and the gate keeps flagging anything a foreign layer hides.
 .zig-cache/
 zig-out/
+a.out
+*.o
 
 # Developer-local config such as device-lab paths and signing identities.
 .local/
