@@ -182,11 +182,17 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const face_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/face.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
     const detector_tests = b.addTest(.{ .root_module = detector_module });
     const sampler_tests = b.addTest(.{ .root_module = sampler_module });
+    const face_tests = b.addTest(.{ .root_module = face_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
@@ -200,6 +206,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(bundle_tests).step);
     test_step.dependOn(&b.addRunArtifact(detector_tests).step);
     test_step.dependOn(&b.addRunArtifact(sampler_tests).step);
+    test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
@@ -900,11 +907,12 @@ fn buildTfliteLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     module.link_libc = true;
     module.link_libcpp = true;
     for ([_][]const u8{
-        ".vendor/litert",           ".vendor/tensorflow",         ".vendor/flatbuffers/include",
-        ".vendor/abseil",           ".vendor/eigen",              ".vendor/ruy",
-        ".vendor/gemmlowp",         ".vendor/ml-dtypes",          ".vendor/farmhash/src",
-        ".vendor/cpuinfo/include",  ".vendor/pthreadpool/include", ".vendor/xnnpack/include",
-        ".vendor/fp16/include",
+        ".vendor/litert",           ".vendor/tensorflow",          ".vendor/tensorflow/third_party/xla",
+        ".vendor/flatbuffers/include",
+        ".vendor/abseil",           ".vendor/eigen",               ".vendor/ruy",
+        ".vendor/gemmlowp",         ".vendor/ml-dtypes",           ".vendor/farmhash/src",
+        ".vendor/cpuinfo/include",  ".vendor/pthreadpool/include", ".vendor/xnnpack",
+        ".vendor/xnnpack/include",  ".vendor/fp16/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
     }
