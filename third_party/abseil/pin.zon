@@ -1,0 +1,11 @@
+.{
+    .name = "abseil",
+    .repo = "https://github.com/abseil/abseil-cpp",
+    .version = "20260526.0",
+    .commit = "20260526.0",
+    .archive_sha256 = "6e1aee535473414164bf83e4ebc40240dec71a4701f8a642d906e95bea1aea0c",
+    .license = "Apache-2.0",
+    .license_file = "LICENSE",
+    .license_sha256 = "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747",
+    .archive_url = "https://github.com/abseil/abseil-cpp/archive/refs/tags/20260526.0.tar.gz",
+}

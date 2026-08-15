@@ -21,6 +21,8 @@ const Pin = struct {
     license: []const u8,
     license_file: []const u8,
     license_sha256: []const u8,
+    /// Overrides the github archive pattern for other hosts or tag URLs.
+    archive_url: []const u8 = "",
 };
 
 // Licenses that may enter this codebase. Anything else fails closed,
@@ -107,7 +109,10 @@ const Sync = struct {
         Io.Dir.cwd().createDirPath(s.io, ".vendor-archives") catch {};
         const archive_path = try std.fmt.allocPrint(s.arena, ".vendor-archives/{s}-{s}.tar.gz", .{ pin.name, pin.commit });
         if (!s.fileDigestMatches(archive_path, pin.archive_sha256)) {
-            const url = try std.fmt.allocPrint(s.arena, "{s}/archive/{s}.tar.gz", .{ pin.repo, pin.commit });
+            const url = if (pin.archive_url.len != 0)
+                pin.archive_url
+            else
+                try std.fmt.allocPrint(s.arena, "{s}/archive/{s}.tar.gz", .{ pin.repo, pin.commit });
             std.debug.print("vendor-sync: fetching {s}\n", .{url});
             try s.run(&.{ "curl", "-fsSL", url, "-o", archive_path });
             if (!s.fileDigestMatches(archive_path, pin.archive_sha256)) {
@@ -130,7 +135,7 @@ const Sync = struct {
 
         const stamp_path = try std.fmt.allocPrint(s.arena, "{s}/.pin-commit", .{dest});
         try Io.Dir.cwd().writeFile(s.io, .{ .sub_path = stamp_path, .data = pin.commit });
-        std.debug.print("vendor-sync: {s} {s} synced at {s}\n", .{ pin.name, pin.version, pin.commit[0..12] });
+        std.debug.print("vendor-sync: {s} {s} synced at {s}\n", .{ pin.name, pin.version, pin.commit[0..@min(pin.commit.len, 12)] });
     }
 };
 
