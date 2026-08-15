@@ -18,6 +18,11 @@ const abi = @import("abi");
 const math = @import("math");
 
 const face106 = @import("face106");
+const builtin = @import("builtin");
+
+/// The beauty chain needs a windowing gl context; the harness proves it
+/// where one exists and the tracking pipeline everywhere.
+const beauty_available = builtin.os.tag == .macos;
 
 const stb = @cImport(@cInclude("stb_image.h"));
 
@@ -417,6 +422,11 @@ pub fn main(init_args: std.process.Init) !u8 {
 
         // Beauty through the same public surface, fed by the session's own
         // tracking result.
+        if (comptime !beauty_available) {
+            try out.print("tracking harness: corpus clean through detect, landmarks, blendshapes\n", .{});
+            try out.flush();
+            return 0;
+        }
         if (abi.ck_session_enable_beauty(session, ".vendor/gpupixel/src") != .ok) {
             try out.print("abi beauty enable refused\n", .{});
             try out.flush();
@@ -447,7 +457,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     // return the frame essentially untouched, and turning the skin smooth
     // up must actually change it, with the tracked contour feeding the
     // landmark driven effects.
-    {
+    if (comptime beauty_available) {
         const corpus = try loadCorpusFrame(gpa, ".models/corpus/face_frontal_b.jpg");
         defer corpus.deinit();
         const image = corpus.frame;

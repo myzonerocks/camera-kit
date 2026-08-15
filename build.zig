@@ -353,9 +353,13 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "render", .module = render_stub_module },
                 .{ .name = "face", .module = face_module },
                 .{ .name = "tracking", .module = tracking_real_module },
-                .{ .name = "beauty", .module = beauty_real_module },
             },
         });
+        if (target.result.os.tag == .macos) {
+            abi_tracking_module.addImport("beauty", beauty_real_module);
+        } else {
+            abi_tracking_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
+        }
         const tracking_module = b.createModule(.{
             .root_source_file = b.path("harness/tracking.zig"),
             .target = target,
@@ -372,9 +376,11 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "face106", .module = face106_module },
             },
         });
-        tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
-        tracking_module.linkFramework("AppKit", .{});
-        tracking_module.linkFramework("OpenGL", .{});
+        if (target.result.os.tag == .macos) {
+            tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
+            tracking_module.linkFramework("AppKit", .{});
+            tracking_module.linkFramework("OpenGL", .{});
+        }
         tracking_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null));
         tracking_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
         tracking_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
