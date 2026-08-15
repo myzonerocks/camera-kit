@@ -86,6 +86,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "abi", .module = abi_module }},
     });
+    const camerakit_header_text = b.build_root.handle.readFileAlloc(b.graph.io, "include/camerakit.h", b.allocator, .limited(1 << 20)) catch @panic("include/camerakit.h unreadable");
+    const abi_dump_options = b.addOptions();
+    abi_dump_options.addOption([]const u8, "camerakit_header", camerakit_header_text);
+    abi_dump_module.addOptions("build_options", abi_dump_options);
     const abi_dump_exe = b.addExecutable(.{
         .name = "abi_dump",
         .root_module = abi_dump_module,

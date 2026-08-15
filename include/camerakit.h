@@ -223,6 +223,48 @@ ck_degrade_level ck_session_report_frame(ck_session *session, uint32_t frame_tim
 /* Graph thread. The level currently in effect. */
 ck_degrade_level ck_session_degrade_level(const ck_session *session);
 
+/* Graph thread. Stands the face tracking worker up from a model bundle
+ * (a MediaPipe .task file). The bundle bytes are copied; the caller may
+ * release them on return. Builds without the inference stack report
+ * unsupported. */
+ck_status ck_session_enable_face_tracking(ck_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads);
+void ck_session_disable_face_tracking(ck_session *session);
+
+/* Graph thread. Feeds one NV12 frame to the tracking worker. The planes
+ * are CPU addresses valid for the duration of the call; the worker copies
+ * and returns immediately, dropping stale frames in favor of this one. */
+ck_status ck_session_track_frame(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
+
+/* Graph thread. Reads the newest tracking result into caller memory.
+ * Reports CK_AGAIN until the worker has published its first result. */
+ck_status ck_session_face_result(ck_session *session, ck_face_result *out_result);
+
+/* Effect identifiers for ck_session_set_beauty. Values clamp to zero and
+ * one; zero disables the effect. */
+#define CK_BEAUTY_SMOOTH 0
+#define CK_BEAUTY_WHITEN 1
+#define CK_BEAUTY_THIN_FACE 2
+#define CK_BEAUTY_BIG_EYE 3
+#define CK_BEAUTY_LIPSTICK 4
+#define CK_BEAUTY_BLUSH 5
+
+/* Graph thread. Stands the beauty chain up for a session. resource_path
+ * names the directory holding the effect engine's shader and image
+ * assets. Builds without the effects engine report unsupported. */
+ck_status ck_session_enable_beauty(ck_session *session, const char *resource_path);
+void ck_session_disable_beauty(ck_session *session);
+
+/* Graph thread. Sets one beauty effect's strength; see the CK_BEAUTY_*
+ * identifiers above. Reports CK_AGAIN until beauty is enabled. */
+ck_status ck_session_set_beauty(ck_session *session, int32_t effect, float value);
+
+/* Graph thread. Runs the beauty chain over one RGBA frame on the calling
+ * thread, reading the newest tracking result for the landmark driven
+ * effects when face tracking is enabled. The stated CPU path; live
+ * preview integration on the render thread is the device side of this
+ * row. */
+ck_status ck_session_beautify_frame(ck_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out);
+
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(ck_frame_desc) == 32, "ck_frame_desc layout is frozen");
 _Static_assert(sizeof(ck_landmarks) == 24, "ck_landmarks layout is frozen");

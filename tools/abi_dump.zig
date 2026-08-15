@@ -95,6 +95,30 @@ pub fn main(init: std.process.Init) !u8 {
     return 2;
 }
 
+const build_options = @import("build_options");
+const header_text = build_options.camerakit_header;
+
+// The manifest above is hand-maintained next to the frozen header on
+// purpose (a symbol only in one of the two is a build break, not a silent
+// drift); this test is the enforcement so an export never goes undeclared
+// in the header a shell actually compiles against.
+fn functionName(signature: []const u8) []const u8 {
+    const paren = std.mem.indexOfScalar(u8, signature, '(') orelse unreachable;
+    var start = paren;
+    while (start > 0 and (std.ascii.isAlphanumeric(signature[start - 1]) or signature[start - 1] == '_')) start -= 1;
+    return signature[start..paren];
+}
+
+test "every exported function is declared in the frozen public header" {
+    for (abi_functions) |f| {
+        const name = functionName(f);
+        if (std.mem.indexOf(u8, header_text, name) == null) {
+            std.debug.print("abi_dump: {s} is exported but not declared in include/camerakit.h\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "surface text is deterministic and complete" {
     var first: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer first.deinit();
