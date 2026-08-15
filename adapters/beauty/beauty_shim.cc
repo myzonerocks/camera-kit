@@ -164,11 +164,12 @@ int32_t ck_beauty_process(void* handle,
   return 0;
 }
 
-// The GPU compositing bridge is platform-specific (interop_apple.mm on
-// ios/macos); everywhere else it stays an explicit refusal until its own
-// platform bridge lands (docs/private/todo.md tracks android's), rather
-// than an undefined symbol at link time.
-#if !defined(__APPLE__)
+// The GPU compositing bridge is platform-specific: interop_apple.mm on
+// ios/macos, interop_android.cc on android. Everywhere else (the x86-64
+// linux CI target, which has neither a windowing GL context nor gpupixel
+// linked at all) it stays an explicit refusal, rather than an undefined
+// symbol at link time.
+#if !defined(__APPLE__) && !defined(__ANDROID__)
 void* ck_beauty_interop_create() {
   return nullptr;
 }

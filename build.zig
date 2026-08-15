@@ -1138,6 +1138,9 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         if (os == .ios) module.linkFramework("OpenGLES", .{});
     } else {
         module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim.cc"), .flags = flags.items });
+        if (target.result.abi.isAndroid()) {
+            module.addCSourceFile(.{ .file = b.path("adapters/beauty/interop_android.cc"), .flags = flags.items });
+        }
     }
 
     const lib = b.addLibrary(.{ .name = "gpupixel", .linkage = .static, .root_module = module });

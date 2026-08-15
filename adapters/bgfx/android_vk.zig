@@ -31,6 +31,8 @@ comptime {
     _ = &Converter.setConversion;
     _ = &Converter.convert;
     _ = &Converter.targetImage;
+    _ = &BeautyImport.importRgba;
+    _ = &BeautyImport.deinit;
 }
 
 pub const Error = error{
@@ -177,6 +179,84 @@ const AhbImport = struct {
         if (import.image != null) c.vkDestroyImage(device, import.image, null);
         if (import.memory != null) c.vkFreeMemory(device, import.memory, null);
         import.* = .{};
+    }
+};
+
+/// A plain RGBA AHardwareBuffer imported as a sampled Vulkan image - the
+/// read side of the beauty compositing bridge (adapters/beauty/
+/// interop_android.cc writes the buffer via EGLImage on gpupixel's own
+/// context; this imports the same buffer for bgfx to render it). Not the
+/// camera's ycbcr path: no color conversion needed, so no compute pass,
+/// no descriptor sets, no ring - one image, reused across frames as long
+/// as the caller keeps handing back the same buffer, matching how the
+/// interop bridge caches its own surface until the requested size changes.
+pub const BeautyImport = struct {
+    image: c.VkImage = null,
+    memory: c.VkDeviceMemory = null,
+    imported_buffer: ?*c.AHardwareBuffer = null,
+
+    pub fn deinit(self: *BeautyImport, device: c.VkDevice) void {
+        if (self.image != null) c.vkDestroyImage(device, self.image, null);
+        if (self.memory != null) c.vkFreeMemory(device, self.memory, null);
+        self.* = .{};
+    }
+
+    /// Imports hardware_buffer as a sampled image unless it is already
+    /// the one currently imported, and returns the VkImage handle as a
+    /// u64 ready for bgfx_create_texture_2d's trailing _external
+    /// parameter - the same mechanism Converter.targetImage feeds, this
+    /// vendored bgfx's actual external-texture contract on Vulkan
+    /// (bgfx_override_internal_texture_ptr is a confirmed no-op there).
+    pub fn importRgba(self: *BeautyImport, ctx: *const Context, hardware_buffer: *c.AHardwareBuffer, width: u32, height: u32) Error!u64 {
+        if (self.imported_buffer == hardware_buffer) return @intFromPtr(self.image);
+        self.deinit(ctx.device);
+
+        var format_properties: c.VkAndroidHardwareBufferFormatPropertiesANDROID = std.mem.zeroes(c.VkAndroidHardwareBufferFormatPropertiesANDROID);
+        format_properties.sType = c.VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
+        var properties: c.VkAndroidHardwareBufferPropertiesANDROID = std.mem.zeroes(c.VkAndroidHardwareBufferPropertiesANDROID);
+        properties.sType = c.VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+        properties.pNext = &format_properties;
+        try check(c.vkGetAndroidHardwareBufferPropertiesANDROID(ctx.device, hardware_buffer, &properties));
+        if (format_properties.format != c.VK_FORMAT_R8G8B8A8_UNORM) return error.UnsupportedFormat;
+
+        var external_info: c.VkExternalMemoryImageCreateInfo = std.mem.zeroes(c.VkExternalMemoryImageCreateInfo);
+        external_info.sType = c.VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        external_info.handleTypes = c.VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+        var image_info: c.VkImageCreateInfo = std.mem.zeroes(c.VkImageCreateInfo);
+        image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.pNext = &external_info;
+        image_info.imageType = c.VK_IMAGE_TYPE_2D;
+        image_info.format = format_properties.format;
+        image_info.extent = .{ .width = width, .height = height, .depth = 1 };
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = c.VK_IMAGE_USAGE_SAMPLED_BIT;
+        image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        try check(c.vkCreateImage(ctx.device, &image_info, null, &self.image));
+        errdefer {
+            c.vkDestroyImage(ctx.device, self.image, null);
+            self.image = null;
+        }
+
+        var dedicated: c.VkMemoryDedicatedAllocateInfo = std.mem.zeroes(c.VkMemoryDedicatedAllocateInfo);
+        dedicated.sType = c.VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+        dedicated.image = self.image;
+        var import_info: c.VkImportAndroidHardwareBufferInfoANDROID = std.mem.zeroes(c.VkImportAndroidHardwareBufferInfoANDROID);
+        import_info.sType = c.VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+        import_info.pNext = &dedicated;
+        import_info.buffer = hardware_buffer;
+        var alloc: c.VkMemoryAllocateInfo = std.mem.zeroes(c.VkMemoryAllocateInfo);
+        alloc.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc.pNext = &import_info;
+        alloc.allocationSize = properties.allocationSize;
+        alloc.memoryTypeIndex = try ctx.memoryTypeIndex(properties.memoryTypeBits, 0);
+        try check(c.vkAllocateMemory(ctx.device, &alloc, null, &self.memory));
+        try check(c.vkBindImageMemory(ctx.device, self.image, self.memory, 0));
+
+        self.imported_buffer = hardware_buffer;
+        return @intFromPtr(self.image);
     }
 };
 
