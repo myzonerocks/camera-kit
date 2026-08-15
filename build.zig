@@ -272,6 +272,19 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    {
+        const beauty_step = b.step("beauty-lib", "Build the beauty effects engine library");
+        const gpupixel_present = blk: {
+            b.build_root.handle.access(b.graph.io, ".vendor/gpupixel/src/CMakeLists.txt", .{}) catch break :blk false;
+            break :blk true;
+        };
+        if (gpupixel_present) {
+            beauty_step.dependOn(&b.addInstallArtifact(buildGpupixelLib(b, target, optimize, null), .{}).step);
+        } else {
+            beauty_step.dependOn(&b.addFail("beauty engine vendor is not synced; run: zig build vendor-sync").step);
+        }
+    }
+
     // The tracking harness stands the face pipeline up on the host: model
     // bundle in, engines interrogated, decode exercised end to end.
     const tracking_step = b.step("tracking-harness", "Build and run the tracking harness (face pipeline on host)");
@@ -887,6 +900,175 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 // The flatbuffers runtime pieces the schema code links against; the
 // headers carry almost everything, this archive holds the rest.
+
+// The beauty effects engine from its pinned tree: the core graph, the
+// filter set, raw data source and sinks, compiled per platform against the
+// system gl it targets. The bundled face detector never builds; landmarks
+// come from the tracking pipeline. Its color converter dependency builds
+// from the sources the sink actually reaches for.
+fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    for ([_][]const u8{
+        ".vendor/gpupixel/include",
+        ".vendor/gpupixel/src",
+        ".vendor/gpupixel/third_party/ghc",
+        ".vendor/gpupixel/third_party/libyuv/include",
+        ".vendor/gpupixel/third_party/stb/include",
+    }) |dir| {
+        module.addIncludePath(b.path(dir));
+    }
+    const os = target.result.os.tag;
+    const platform_define: []const u8 = switch (os) {
+        .macos => "GPUPIXEL_MAC",
+        .ios => "GPUPIXEL_IOS",
+        else => if (target.result.abi.isAndroid()) "GPUPIXEL_ANDROID" else "GPUPIXEL_LINUX",
+    };
+    module.addCMacro(platform_define, "1");
+
+    var flags: std.ArrayList([]const u8) = .empty;
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w" }) catch @panic("oom");
+    // The gl include header imports the apple ui frameworks, so every
+    // translation unit on those targets is objective c++.
+    if (os == .macos or os == .ios) {
+        flags.appendSlice(b.allocator, &.{ "-std=gnu++17", "-fno-objc-arc" }) catch @panic("oom");
+    }
+
+    const sources = [_][]const u8{
+        "core/gpupixel.cc",
+        "core/gpupixel_context.cc",
+        "core/gpupixel_program.cc",
+        "core/gpupixel_framebuffer.cc",
+        "core/gpupixel_framebuffer_factory.cc",
+        "source/source.cc",
+        "source/source_raw_data.cc",
+        "source/source_image.cc",
+        "sink/sink_raw_data.cc",
+        "sink/sink_raw_data_yuv.cc",
+        "sink/sink_render.cc",
+        "sink/sink.cc",
+        "utils/math_toolbox.cc",
+        "utils/dispatch_queue.cc",
+        "utils/util.cc",
+        "filter/contrast_filter.cc",
+        "filter/glass_sphere_filter.cc",
+        "filter/brightness_filter.cc",
+        "filter/ios_blur_filter.cc",
+        "filter/hsb_filter.cc",
+        "filter/sobel_edge_detection_filter.cc",
+        "filter/sphere_refraction_filter.cc",
+        "filter/directional_sobel_edge_detection_filter.cc",
+        "filter/blusher_filter.cc",
+        "filter/box_high_pass_filter.cc",
+        "filter/luminance_range_filter.cc",
+        "filter/box_blur_filter.cc",
+        "filter/sketch_filter.cc",
+        "filter/directional_non_maximum_suppression_filter.cc",
+        "filter/toon_filter.cc",
+        "filter/pixellation_filter.cc",
+        "filter/beauty_face_unit_filter.cc",
+        "filter/single_component_gaussian_blur_filter.cc",
+        "filter/non_maximum_suppression_filter.cc",
+        "filter/canny_edge_detection_filter.cc",
+        "filter/filter.cc",
+        "filter/bilateral_filter.cc",
+        "filter/color_matrix_filter.cc",
+        "filter/exposure_filter.cc",
+        "filter/rgb_filter.cc",
+        "filter/face_makeup_filter.cc",
+        "filter/hue_filter.cc",
+        "filter/nearby_sampling3x3_filter.cc",
+        "filter/posterize_filter.cc",
+        "filter/color_invert_filter.cc",
+        "filter/single_component_gaussian_blur_mono_filter.cc",
+        "filter/gaussian_blur_mono_filter.cc",
+        "filter/convolution3x3_filter.cc",
+        "filter/weak_pixel_inclusion_filter.cc",
+        "filter/halftone_filter.cc",
+        "filter/saturation_filter.cc",
+        "filter/emboss_filter.cc",
+        "filter/grayscale_filter.cc",
+        "filter/lipstick_filter.cc",
+        "filter/box_mono_blur_filter.cc",
+        "filter/box_difference_filter.cc",
+        "filter/crosshatch_filter.cc",
+        "filter/filter_group.cc",
+        "filter/gaussian_blur_filter.cc",
+        "filter/beauty_face_filter.cc",
+        "filter/face_reshape_filter.cc",
+        "filter/white_balance_filter.cc",
+        "filter/smooth_toon_filter.cc",
+    };
+    // The compiler picks the language from the extension, and these
+    // sources import ui frameworks on the apple targets, so each compiles
+    // through a generated objective c++ includer there.
+    const apple = os == .macos or os == .ios;
+    const wrappers = b.addWriteFiles();
+    for (sources) |file| {
+        if (apple) {
+            const name = std.mem.trimEnd(u8, file[std.mem.lastIndexOfScalar(u8, file, '/').? + 1 ..], ".c");
+            const wrapper = wrappers.add(
+                b.fmt("{s}.mm", .{name}),
+                b.fmt("#include \"{s}\"\n", .{b.pathFromRoot(b.fmt(".vendor/gpupixel/src/{s}", .{file}))}),
+            );
+            module.addCSourceFile(.{ .file = wrapper, .flags = flags.items });
+        } else {
+            module.addCSourceFile(.{ .file = b.path(b.fmt(".vendor/gpupixel/src/{s}", .{file})), .flags = flags.items });
+        }
+    }
+    if (target.result.abi.isAndroid()) {
+        module.addCSourceFile(.{ .file = b.path(".vendor/gpupixel/src/sink/sink_surface.cc"), .flags = flags.items });
+    }
+
+    module.linkLibrary(buildLibyuvLib(b, target, optimize, libc));
+
+    const lib = b.addLibrary(.{ .name = "gpupixel", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
+}
+
+// The color converter the beauty engine's raw sinks call into, from the
+// engine's own tree. Its row kernels carry inline assembly for the newer
+// vector instructions with runtime dispatch deciding what executes, so the
+// module compiles with those features available; the scalable extensions
+// stay out entirely.
+fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
+    const yuv_target = if (target.result.cpu.arch == .aarch64) blk: {
+        var query = target.query;
+        query.cpu_model = .baseline;
+        query.cpu_features_add = std.Target.aarch64.featureSet(&.{ .dotprod, .i8mm });
+        break :blk b.resolveTargetQuery(query);
+    } else target;
+    const module = b.createModule(.{ .target = yuv_target, .optimize = optimize });
+    module.link_libc = true;
+    module.link_libcpp = true;
+    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    module.addIncludePath(b.path(".vendor/gpupixel/third_party/libyuv/include"));
+    var yuv_sources: std.ArrayList([]const u8) = .empty;
+    listFilesRecursive(b, ".vendor/gpupixel/third_party/libyuv/source", ".cc", &.{
+        "_test", "_unittest", "mjpeg",
+    }, &yuv_sources);
+    std.mem.sort([]const u8, yuv_sources.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    const yuv_flags = [_][]const u8{
+        "-std=c++17",           "-fno-sanitize=undefined", "-w",
+        "-DLIBYUV_DISABLE_SVE", "-DLIBYUV_DISABLE_SME",
+    };
+    for (yuv_sources.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &yuv_flags });
+    }
+    const lib = b.addLibrary(.{ .name = "yuv", .linkage = .static, .root_module = module });
+    if (libc) |file| lib.setLibCFile(file);
+    return lib;
+}
+
 fn buildFlatbuffersLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libcpp = true;
