@@ -631,6 +631,37 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("face", tracking_cores_wasm.face);
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
+        const lens_manifest_wasm = b.createModule(.{
+            .root_source_file = b.path("core/lens/manifest.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        });
+        const lens_trigger_wasm = b.createModule(.{
+            .root_source_file = b.path("core/lens/trigger.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{.{ .name = "face", .module = tracking_cores_wasm.face }},
+        });
+        const lens_animation_wasm = b.createModule(.{
+            .root_source_file = b.path("core/lens/animation.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+        });
+        const lens_runtime_wasm = b.createModule(.{
+            .root_source_file = b.path("core/lens/runtime.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .imports = &.{
+                .{ .name = "graph", .module = graph_wasm },
+                .{ .name = "manifest", .module = lens_manifest_wasm },
+                .{ .name = "trigger", .module = lens_trigger_wasm },
+                .{ .name = "animation", .module = lens_animation_wasm },
+                .{ .name = "face", .module = tracking_cores_wasm.face },
+            },
+        });
+        abi_wasm.addImport("manifest", lens_manifest_wasm);
+        abi_wasm.addImport("trigger", lens_trigger_wasm);
+        abi_wasm.addImport("runtime", lens_runtime_wasm);
         const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
         camerakit_wasm.entry = .disabled;
         camerakit_wasm.rdynamic = true;
