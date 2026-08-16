@@ -209,6 +209,13 @@ pub const Session = struct {
     lut_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.Loader) = .empty,
     /// One bgfx texture per lut.pass node whose asset finished loading.
     lut_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// One background loader per currently-spliced blend.pass node still
+    /// waiting on its background image - mirrors lut_loaders exactly,
+    /// one node type over.
+    blend_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.Loader) = .empty,
+    /// One bgfx texture per blend.pass node whose background finished
+    /// loading.
+    blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -275,9 +282,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         const ready = switch (entry.kind) {
             .shader => s.shader_programs.contains(entry.graph_index),
             .lut => s.lut_textures.contains(entry.graph_index),
-            // blend.pass has no asset loader or draw call yet (real
-            // remaining work) - never ready, same graceful skip an
-            // unloaded lut.pass gets, not a stand-in for real rendering.
+            // Background images load for real now (blend_textures),
+            // but there is no draw call yet to actually blend one using
+            // the mask - staying never-ready until that lands avoids
+            // desyncing ready_count from the draw loop below, which
+            // still skips every .blend entry outright.
             .blend => false,
         };
         if (ready) ready_count += 1;
@@ -355,6 +364,9 @@ pub fn destroySession(session: *Session) void {
     destroyLutState(session);
     session.lut_loaders.deinit(session.engine.gpa);
     session.lut_textures.deinit(session.engine.gpa);
+    destroyBlendState(session);
+    session.blend_loaders.deinit(session.engine.gpa);
+    session.blend_textures.deinit(session.engine.gpa);
     destroyChainOrder(session);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
@@ -450,6 +462,7 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
     if (session) |s| {
         pollLutLoaders(s, r, s.engine.gpa);
+        pollBlendLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
@@ -825,6 +838,18 @@ fn destroyLutState(session: *Session) void {
     session.lut_textures.clearRetainingCapacity();
 }
 
+fn destroyBlendState(session: *Session) void {
+    var loader_it = session.blend_loaders.valueIterator();
+    while (loader_it.next()) |loader| loader.*.deinit();
+    session.blend_loaders.clearRetainingCapacity();
+
+    if (session.engine.renderer) |*r| {
+        var texture_it = session.blend_textures.valueIterator();
+        while (texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.blend_textures.clearRetainingCapacity();
+}
+
 /// Replaces any currently active lens with the one manifest_json
 /// describes, splicing its nodes into the session's graph and applying
 /// its default effect values to the beauty chain if one is enabled. The
@@ -847,6 +872,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
 
     destroyShaderPrograms(session);
     destroyLutState(session);
+    destroyBlendState(session);
     destroyChainOrder(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
@@ -946,6 +972,49 @@ fn pollLutLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator
     }
 }
 
+/// Starts a background load for every spliced blend.pass node's
+/// background image (assets/<stem>.png) - mirrors createLutLoaders
+/// exactly, one node type over.
+fn createBlendLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const blends = try lens.blendPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(blends);
+    for (blends) |blend| {
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, blend.background_stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.Loader.start(gpa, path) catch continue;
+        session.blend_loaders.put(gpa, blend.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Turns every background load that finished (or failed) since the last
+/// frame into a real texture (or drops it) - mirrors pollLutLoaders
+/// exactly, one node type over.
+fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.blend_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.blend_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.blend_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
 /// Activates the lens bundle at bundle_path (bundle_path/manifest.json),
 /// then creates a bgfx program for every shader.pass node it spliced
 /// and starts a background load for every lut.pass node's LUT image.
@@ -968,6 +1037,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try activateLens(session, gpa, manifest_json);
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
+    try createBlendLoaders(session, gpa, bundle_path);
     try buildChainOrder(session, gpa);
 }
 
@@ -987,6 +1057,7 @@ pub export fn ck_session_deactivate_lens(session: ?*Session) void {
     const s = session orelse return;
     destroyShaderPrograms(s);
     destroyLutState(s);
+    destroyBlendState(s);
     destroyChainOrder(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
@@ -1294,4 +1365,49 @@ test "activating a lens with a lut.pass node loads its LUT image for real, off t
     // double-freed.
     ck_session_deactivate_lens(session);
     try t.expectEqual(@as(usize, 0), session.lut_loaders.count());
+}
+
+const blend_pass_bundle_manifest =
+    \\{"glf":"1.0","id":"com.example.blend","version":"1.0.0","display_name":"Blend",
+    \\ "engine_compat":">=0.5","capabilities":["segmentation"],"parameters":[],
+    \\ "nodes":[{"id":"beach","type":"blend.pass","inputs":{"frame":"camera"},"params":{}}],
+    \\ "triggers":[]}
+;
+
+test "activating a lens with a blend.pass node loads its background image for real, off the calling thread" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = blend_pass_bundle_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/beach.png", .data = &lut_checker_png });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(@as(usize, 1), session.blend_loaders.count());
+    try t.expectEqual(@as(usize, 1), session.chain_order.len);
+    try t.expectEqual(runtime.PassKind.blend, session.chain_order[0].kind);
+
+    var loader_it = session.blend_loaders.valueIterator();
+    const loader = loader_it.next().?.*;
+    var decoded: ?image.Image = null;
+    var spins: u32 = 0;
+    while (decoded == null and spins < 1_000_000) : (spins += 1) {
+        decoded = loader.take();
+        if (decoded == null) std.atomic.spinLoopHint();
+    }
+    const got = decoded orelse return error.TestUnexpectedResult;
+    defer t.allocator.free(got.rgba);
+    try t.expectEqual(@as(u32, 8), got.width);
+    try t.expectEqual(@as(u32, 8), got.height);
+    try t.expect(!loader.hasFailed());
+
+    ck_session_deactivate_lens(session);
+    try t.expectEqual(@as(usize, 0), session.blend_loaders.count());
 }
