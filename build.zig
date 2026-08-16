@@ -1098,6 +1098,7 @@ fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
     });
     image_module.link_libc = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, image_module);
     const asset_module = b.createModule(.{
         .root_source_file = b.path("adapters/asset/asset.zig"),
         .target = target,
