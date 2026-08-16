@@ -2,11 +2,11 @@
 //! production ABI end to end - real engine, real session, real
 //! ck_session_activate_lens_from_directory, real ck_engine_render_frame -
 //! and proves the result is bit-stable: the same fixed input rendered
-//! twice produces byte-identical output. This is the first slice of
-//! SPEC section 9's conformance requirement (one reference lens, one
-//! platform, determinism only); the full reference set, cross-platform
-//! value-stability, and pinned cross-run baselines are real remaining
-//! work.
+//! twice produces byte-identical output. Each lens's hash also checks
+//! against lenses/conformance-baseline.txt (--print regenerates it), so
+//! a change that shifts a lens's real output shows up as a tracked diff
+//! in review, not just same-run determinism. This is still one platform
+//! (host/macOS); cross-platform value-stability is real remaining work.
 
 const std = @import("std");
 const abi = @import("abi");
@@ -20,6 +20,8 @@ extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 
 const width: u32 = 400;
 const height: u32 = 300;
+const reference_lenses = [_][]const u8{ "shader-tint", "beauty-baseline", "background-swap" };
+const baseline_path = "lenses/conformance-baseline.txt";
 
 const SynthFrame = struct {
     y: []u8,
@@ -106,36 +108,18 @@ fn settle(engine: *abi.Engine) void {
     }
 }
 
-pub fn main(init_args: std.process.Init) !u8 {
-    const gpa = init_args.gpa;
-
-    if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
-    defer c.glfwTerminate();
-    c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "camera-kit conformance", null, null) orelse return error.WindowCreate;
-    defer c.glfwDestroyWindow(window);
-
-    const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
-    defer abi.destroyEngine(engine);
-
-    const renderer_desc: abi.RendererDesc = .{
-        .native_window_handle = glfwGetCocoaWindow(window),
-        .width = width,
-        .height = height,
-    };
-    if (abi.ck_engine_init_renderer(engine, &renderer_desc) != .ok) return error.RendererInit;
-
-    for ([_][]const u8{ "shader-tint", "beauty-baseline", "background-swap" }) |name| {
-        if (!try checkDeterminism(gpa, init_args.io, engine, name)) return 1;
-    }
-    return 0;
+fn sha256Hex(data: []const u8) [64]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(data, &digest, .{});
+    return std.fmt.bytesToHex(digest, .lower);
 }
 
 /// Activates lens_name's packaged bundle twice, rendering the same fixed
 /// input through each, and asserts the two screenshots are byte-
-/// identical. True if the lens is bit-stable, false (with a printed
-/// reason) if not.
-fn checkDeterminism(gpa: std.mem.Allocator, io: std.Io, engine: *abi.Engine, lens_name: []const u8) !bool {
+/// identical - proving the lens is bit-stable, not just that it
+/// happened to render something. Returns the hex hash of that output on
+/// success, null (with a printed reason) on failure.
+fn checkDeterminism(gpa: std.mem.Allocator, io: std.Io, engine: *abi.Engine, lens_name: []const u8) !?[64]u8 {
     var bundle_buf: [256]u8 = undefined;
     const bundle_path = try std.fmt.bufPrint(&bundle_buf, ".lens-packages/{s}", .{lens_name});
     var out_a_buf: [256:0]u8 = undefined;
@@ -160,8 +144,63 @@ fn checkDeterminism(gpa: std.mem.Allocator, io: std.Io, engine: *abi.Engine, len
 
     if (!std.mem.eql(u8, shot_a, shot_b)) {
         std.debug.print("conformance: FAIL {s} produced different output across two runs of the same fixed input\n", .{lens_name});
-        return false;
+        return null;
     }
-    std.debug.print("conformance: PROOF {s} is bit-stable across two runs of the same fixed input through the real ABI ({d} bytes)\n", .{ lens_name, shot_a.len });
-    return true;
+    const hash = sha256Hex(shot_a);
+    std.debug.print("conformance: PROOF {s} is bit-stable across two runs of the same fixed input through the real ABI ({d} bytes, sha256 {s})\n", .{ lens_name, shot_a.len, hash });
+    return hash;
+}
+
+pub fn main(init_args: std.process.Init) !u8 {
+    const gpa = init_args.gpa;
+
+    var arg_it = std.process.Args.Iterator.init(init_args.minimal.args);
+    _ = arg_it.next();
+    const print_mode = if (arg_it.next()) |arg| std.mem.eql(u8, arg, "--print") else false;
+
+    if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
+    defer c.glfwTerminate();
+    c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "camera-kit conformance", null, null) orelse return error.WindowCreate;
+    defer c.glfwDestroyWindow(window);
+
+    const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+    defer abi.destroyEngine(engine);
+
+    const renderer_desc: abi.RendererDesc = .{
+        .native_window_handle = glfwGetCocoaWindow(window),
+        .width = width,
+        .height = height,
+    };
+    if (abi.ck_engine_init_renderer(engine, &renderer_desc) != .ok) return error.RendererInit;
+
+    var current: std.Io.Writer.Allocating = .init(gpa);
+    defer current.deinit();
+    for (reference_lenses) |name| {
+        const hash = try checkDeterminism(gpa, init_args.io, engine, name) orelse return 1;
+        try current.writer.print("{s} {s}\n", .{ name, hash });
+    }
+
+    if (print_mode) {
+        var out_buf: [4096]u8 = undefined;
+        var stdout = std.Io.File.stdout().writer(init_args.io, &out_buf);
+        try stdout.interface.writeAll(current.writer.buffered());
+        try stdout.interface.flush();
+        return 0;
+    }
+
+    const baseline = std.Io.Dir.cwd().readFileAlloc(init_args.io, baseline_path, gpa, .limited(1 << 16)) catch |err| {
+        std.debug.print("conformance: cannot read {s}: {t}\n", .{ baseline_path, err });
+        return 1;
+    };
+    defer gpa.free(baseline);
+    if (!std.mem.eql(u8, baseline, current.writer.buffered())) {
+        std.debug.print(
+            "conformance: output differs from {s}\n---- current ----\n{s}---- baseline ----\n{s}An intended change must update the baseline (zig build conformance -- --print > {s}).\n",
+            .{ baseline_path, current.writer.buffered(), baseline, baseline_path },
+        );
+        return 1;
+    }
+    std.debug.print("conformance: PROOF all reference lenses match the pinned baseline\n", .{});
+    return 0;
 }

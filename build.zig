@@ -879,6 +879,7 @@ pub fn build(b: *std.Build) void {
         const run_conformance = b.addRunArtifact(conformance_exe);
         run_conformance.setCwd(b.path("."));
         run_conformance.step.dependOn(lens_package_reference_step);
+        if (b.args) |args| run_conformance.addArgs(args);
         conformance_step.dependOn(&run_conformance.step);
     } else {
         const missing = b.addFail("camera-kit: harness needs macos and synced render vendors, run zig build vendor-sync");
