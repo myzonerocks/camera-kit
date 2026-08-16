@@ -111,3 +111,5 @@ jobs:
             zigcache-lens-shaders-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: lens validator shader tests
         run: zig build test -Dlens-shaders=true
+      - name: validate reference lenses
+        run: zig build lens-validate-reference

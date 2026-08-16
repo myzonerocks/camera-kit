@@ -240,6 +240,23 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| lens_validate_run.addArgs(args);
     lens_validate_step.dependOn(&lens_validate_run.step);
 
+    // SPEC.md section 9: the validator runs against every reference
+    // lens, in CI. One bundle failing validation fails the build.
+    // Deliberately NOT wired into ci_step: lens_validator_exe always
+    // depends on a real shaderc (the CLI's whole point is giving a real
+    // answer), and ci_step is the fast default path the "gates" job's
+    // 15 minute budget assumes stays free of that cold C++ toolchain
+    // build - the exact mistake that already broke this job once. The
+    // "lens-shaders" hosted job, which already opts into shaderc's
+    // build cost, runs this step explicitly instead.
+    const lens_reference_step = b.step("lens-validate-reference", "Validate every bundle under lenses/reference/");
+    for (listReferenceLenses(b)) |lens_dir| {
+        const run = b.addRunArtifact(lens_validator_exe);
+        run.setCwd(b.path("."));
+        run.addArg(lens_dir);
+        lens_reference_step.dependOn(&run.step);
+    }
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
     const detector_tests = b.addTest(.{ .root_module = detector_module });
@@ -1941,6 +1958,27 @@ fn listFiles(b: *std.Build, dir_path: []const u8, suffix: []const u8) ?[][]const
         }
     }.lessThan);
     return files.items;
+}
+
+// Every immediate subdirectory of lenses/reference/ is one reference
+// lens bundle. Missing the directory entirely (a fresh checkout before
+// any reference lens exists) is not an error - an empty list.
+fn listReferenceLenses(b: *std.Build) [][]const u8 {
+    const dir_path = "lenses/reference";
+    var dir = b.build_root.handle.openDir(b.graph.io, dir_path, .{ .iterate = true }) catch return &.{};
+    defer dir.close(b.graph.io);
+    var lenses: std.ArrayList([]const u8) = .empty;
+    var it = dir.iterate();
+    while (it.next(b.graph.io) catch return &.{}) |entry| {
+        if (entry.kind != .directory) continue;
+        lenses.append(b.allocator, b.fmt("{s}/{s}", .{ dir_path, entry.name })) catch @panic("oom");
+    }
+    std.mem.sort([]const u8, lenses.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    return lenses.items;
 }
 
 // The pinned toolchain is the only toolchain: .zigversion is the single place

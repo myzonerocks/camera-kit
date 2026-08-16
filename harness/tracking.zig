@@ -464,20 +464,22 @@ pub fn main(init_args: std.process.Init) !u8 {
         try out.flush();
         if (abi_mean <= 0.5) return 1;
 
-        // A lens activated and ticked through the same public surface,
-        // its trigger keyed to face.present and sourced from this same
-        // session's real tracked result - not a synthetic signal. Proves
+        // The real beauty-baseline reference lens (lenses/reference/),
+        // read from disk exactly as a shell would ship it - not a
+        // hand-rolled copy that could drift from what the validator
+        // actually checked. Its trigger is keyed to face.present,
+        // sourced from this same session's real tracked result, and
+        // ramps over 300ms; ticking it out settles the ramp, proving
         // activate/tick/dispatch land on the same beauty chain
-        // ck_session_beautify_frame reads, with real inference data.
-        const lens_manifest =
-            \\{
-            \\  "glf": "1.0", "id": "com.example.harness", "version": "1.0.0", "display_name": "Harness",
-            \\  "engine_compat": ">=0.5", "capabilities": ["face"],
-            \\  "parameters": [{"name": "smooth_amount", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
-            \\  "nodes": [{"id": "face", "type": "beauty.face", "inputs": {"frame": "camera"}, "params": {"smooth": "$smooth_amount"}}],
-            \\  "triggers": [{"when": "face.present", "action": {"kind": "param_set", "target": "smooth_amount", "to": 0.9}}]
-            \\}
-        ;
+        // ck_session_beautify_frame reads, with real inference data
+        // driving a real shipped bundle end to end.
+        const lens_manifest = try std.Io.Dir.cwd().readFileAlloc(
+            harness_io,
+            "lenses/reference/beauty-baseline/manifest.json",
+            gpa,
+            .limited(256 * 1024),
+        );
+        defer gpa.free(lens_manifest);
         if (abi.ck_session_activate_lens(session, lens_manifest.ptr, lens_manifest.len) != .ok) {
             try out.print("abi lens: activate refused\n", .{});
             try out.flush();
@@ -486,10 +488,13 @@ pub fn main(init_args: std.process.Init) !u8 {
         var signals = std.mem.zeroes(abi.LensSignals);
         signals.has_face = true;
         signals.blendshapes = result.blendshapes;
-        if (abi.ck_session_tick_lens(session, 8_333, &signals) != .ok) {
-            try out.print("abi lens: tick refused\n", .{});
-            try out.flush();
-            return 1;
+        var settle: usize = 0;
+        while (settle < 40) : (settle += 1) {
+            if (abi.ck_session_tick_lens(session, 8_333, &signals) != .ok) {
+                try out.print("abi lens: tick refused\n", .{});
+                try out.flush();
+                return 1;
+            }
         }
         const lens_beautified = try gpa.alloc(u8, beauty_pixels);
         defer gpa.free(lens_beautified);
