@@ -57,3 +57,13 @@ val syncReferenceLens by tasks.registering(Copy::class) {
     into(layout.projectDirectory.dir("src/main/assets/lenses/beauty-baseline"))
 }
 tasks.named("preBuild") { dependsOn(syncReferenceLens) }
+
+// Row 8's conformance corpus frame, synced from the fetched model set -
+// ConformanceRunner feeds this through the real ABI in place of live
+// capture, behind the CKConformance intent extra a normal launch never
+// sets.
+val syncConformanceCorpus by tasks.registering(Copy::class) {
+    from(rootProject.projectDir.resolve("../../.models/corpus/face_frontal_b.jpg"))
+    into(layout.projectDirectory.dir("src/main/assets"))
+}
+tasks.named("preBuild") { dependsOn(syncConformanceCorpus) }

@@ -54,18 +54,25 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     // after that the stream stays on the declared copy path.
     private var zeroCopyRefused = false
 
+    // Row 8's conformance run reuses this same real window/renderer setup,
+    // just feeding a fixed corpus frame instead of live camera - see
+    // ConformanceRunner. Set via `am start --ez CKConformance true`, the
+    // direct equivalent of the ios shell's -CKConformance launch argument.
+    private var conformanceMode = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        conformanceMode = intent.getBooleanExtra("CKConformance", false)
         val root = FrameLayout(this)
         surfaceView = SurfaceView(this)
         overlay = FaceOverlayView(this)
         root.addView(surfaceView)
         root.addView(overlay)
-        setupBeautyControls(root)
+        if (!conformanceMode) setupBeautyControls(root)
         setContentView(root)
         surfaceView.holder.addCallback(this)
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+        if (!conformanceMode && ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 1)
         }
     }
@@ -82,6 +89,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     override fun surfaceCreated(holder: SurfaceHolder) {
         val width = surfaceView.width
         val height = surfaceView.height
+        if (conformanceMode) {
+            ConformanceRunner.run(this, holder.surface, width, height)
+            return
+        }
         val created = Engine.create()
         created.initRenderer(holder.surface, width, height)
         engine = created

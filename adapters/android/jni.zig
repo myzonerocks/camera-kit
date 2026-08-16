@@ -78,6 +78,12 @@ export fn Java_kit_camera_CameraKit_nativeResize(env: *JniEnv, cls: jobject, eng
     abi.ck_engine_resize(engineFromHandle(engine), @intCast(width), @intCast(height));
 }
 
+export fn Java_kit_camera_CameraKit_nativeRequestScreenshot(env: *JniEnv, cls: jobject, engine: i64, path_buffer: jobject, path_len: i32) i32 {
+    _ = cls;
+    const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.ck_engine_request_screenshot(engineFromHandle(engine), path, @intCast(path_len)));
+}
+
 export fn Java_kit_camera_CameraKit_nativeRenderFrame(env: *JniEnv, cls: jobject, engine: i64, session: i64) i32 {
     _ = env;
     _ = cls;
