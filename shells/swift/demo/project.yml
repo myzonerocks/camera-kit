@@ -11,11 +11,18 @@ targets:
       - path: ../../../.models/face_landmarker.task
         buildPhase: resources
         optional: true
+      - path: ../../../.models/corpus/face_frontal_b.jpg
+        buildPhase: resources
+        optional: true
       - path: ../../../.vendor/gpupixel/src/res
         type: folder
         buildPhase: resources
         optional: true
       - path: ../../../lenses/reference/beauty-baseline
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: ../../../.lens-packages/shader-tint
         type: folder
         buildPhase: resources
         optional: true
@@ -26,7 +33,8 @@ targets:
         CODE_SIGN_STYLE: Automatic
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging.h
         HEADER_SEARCH_PATHS: ["$(PROJECT_DIR)/../../../include"]
-        LIBRARY_SEARCH_PATHS: ["$(PROJECT_DIR)/../../../zig-out/ios"]
+        "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": ["$(PROJECT_DIR)/../../../zig-out/ios"]
+        "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": ["$(PROJECT_DIR)/../../../zig-out/ios-simulator"]
         OTHER_LDFLAGS:
           - "-lcamerakit"
           - "-lgpupixel"

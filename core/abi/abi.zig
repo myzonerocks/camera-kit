@@ -43,7 +43,7 @@ const runtime = @import("runtime");
 pub const FaceResult = face.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 7;
+pub const abi_minor: u16 = 8;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -632,6 +632,27 @@ pub export fn ck_engine_init_renderer(engine: ?*Engine, desc: ?*const RendererDe
 pub export fn ck_engine_resize(engine: ?*Engine, width: u32, height: u32) void {
     const e = engine orelse return;
     if (e.renderer) |*r| r.resize(width, height);
+}
+
+const screenshot_path_max = 480;
+
+/// Requests a screenshot of the next presented frame, written as
+/// path ++ ".tga" through the renderer's own default callback (the same
+/// mechanism harness/conformance.zig already drives internally, exposed
+/// here so a real shell target - the ios simulator conformance run this
+/// exists for - can trigger it too). Debug/test tooling only; no shell
+/// ships this behind a user-facing control.
+pub export fn ck_engine_request_screenshot(engine: ?*Engine, path: ?[*]const u8, path_len: usize) Status {
+    const e = engine orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    const p = path orelse return .invalid_argument;
+    if (path_len == 0 or path_len >= screenshot_path_max) return .invalid_argument;
+    var buf: [screenshot_path_max]u8 = undefined;
+    @memcpy(buf[0..path_len], p[0..path_len]);
+    buf[path_len] = 0;
+    const zpath: [:0]u8 = buf[0..path_len :0];
+    r.requestScreenshot(zpath.ptr);
+    return .ok;
 }
 
 pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Status {

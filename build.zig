@@ -695,6 +695,7 @@ pub fn build(b: *std.Build) void {
         tracking_wasm_step.dependOn(&b.addFail("inference vendors are not synced; run: zig build vendor-sync").step);
     }
     addIosStep(b, optimize, shaderc_exe, flatc_exe);
+    addIosSimulatorStep(b, optimize, shaderc_exe, flatc_exe);
     addAndroidStep(b, optimize, shaderc_exe, flatc_exe);
 
     // The web core: the same export layer compiled to wasm32 with every ck_
@@ -2287,9 +2288,15 @@ fn addFlatcTool(b: *std.Build) ?*std.Build.Step.Compile {
     return exe;
 }
 
-/// The iPhoneOS SDK for device builds, taken from the ios-sdk option so it
-/// reaches exactly the apple-target modules; a graph-wide sysroot would
-/// leak into the host tools compiled along the way.
+/// The active iOS SDK path (iPhoneOS for device, iPhoneSimulator for the
+/// simulator variant), taken from whichever of the two ios-*-sdk options
+/// the currently-running addIosStepImpl call set, so it reaches exactly
+/// the apple-target modules that call built while it was set - a graph-
+/// wide sysroot would leak into the host tools compiled along the way.
+/// Safe as a single mutable global because the build script runs the
+/// device and simulator phases sequentially, never interleaved: each
+/// phase's own modules read this only during their own synchronous
+/// construction.
 var apple_sdk: ?[]const u8 = null;
 
 fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
@@ -2407,21 +2414,68 @@ fn listReferenceLenses(b: *std.Build) [][]const u8 {
 // shadow lane (weekly build against Zig master) is the one sanctioned bypass,
 // via CK_ALLOW_ZIG_MISMATCH=1.
 fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
-    const ios_step = b.step("ios", "Build camerakit and bgfx static libraries for iOS devices");
+    addIosStepImpl(b, optimize, shaderc_exe, flatc_exe, .{
+        .abi = .none,
+        .sdk_option_name = "ios-sdk",
+        .sdk_name = "iPhoneOS",
+        .xcrun_sdk = "iphoneos",
+        .install_dir = "ios",
+        .step_name = "ios",
+        .step_description = "Build camerakit and bgfx static libraries for iOS devices",
+    });
+}
+
+/// The simulator variant of addIosStep, for exactly the same libraries
+/// built against Zig's aarch64-ios-simulator target instead of device -
+/// what a conformance run needs, since it proves determinism through a
+/// real Swift shell on a real (if not physical) window without the
+/// Apple-ID/device-install gate a device run needs. Kept as one shared
+/// implementation rather than a duplicate function: every module/vendor
+/// build call below would otherwise drift in lockstep by hand, the same
+/// reason a lens's own render passes share one draw-order function
+/// instead of one per node kind.
+fn addIosSimulatorStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
+    addIosStepImpl(b, optimize, shaderc_exe, flatc_exe, .{
+        .abi = .simulator,
+        .sdk_option_name = "ios-simulator-sdk",
+        .sdk_name = "iPhoneSimulator",
+        .xcrun_sdk = "iphonesimulator",
+        .install_dir = "ios-simulator",
+        .step_name = "ios-simulator",
+        .step_description = "Build camerakit and bgfx static libraries for the iOS Simulator",
+    });
+}
+
+const IosStepConfig = struct {
+    abi: std.Target.Abi,
+    sdk_option_name: []const u8,
+    sdk_name: []const u8,
+    xcrun_sdk: []const u8,
+    install_dir: []const u8,
+    step_name: []const u8,
+    step_description: []const u8,
+};
+
+fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile, config: IosStepConfig) void {
+    const ios_step = b.step(config.step_name, config.step_description);
     const shaderc_tool = shaderc_exe orelse {
         ios_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
         return;
     };
-    apple_sdk = b.option([]const u8, "ios-sdk", "Path to the iPhoneOS SDK for device builds") orelse b.sysroot;
+    apple_sdk = b.option([]const u8, config.sdk_option_name, b.fmt("Path to the {s} SDK", .{config.sdk_name})) orelse
+        (if (config.abi == .none) b.sysroot else null);
     if (apple_sdk == null) {
-        const missing = b.addFail("camera-kit: run zig build ios -Dios-sdk=\"$(xcrun --sdk iphoneos --show-sdk-path)\"");
+        const missing = b.addFail(b.fmt(
+            "camera-kit: run zig build {s} -D{s}=\"$(xcrun --sdk {s} --show-sdk-path)\"",
+            .{ config.step_name, config.sdk_option_name, config.xcrun_sdk },
+        ));
         ios_step.dependOn(&missing.step);
         return;
     }
     const ios_target = b.resolveTargetQuery(.{
         .cpu_arch = .aarch64,
         .os_tag = .ios,
-        .abi = .none,
+        .abi = config.abi,
     });
 
     const math_ios = b.createModule(.{
@@ -2607,8 +2661,8 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
     // Apple's linker requires 8-byte archive member alignment; the system
     // ranlib rewrites zig's archives into the accepted layout.
     for (device_libs.items) |lib| {
-        const install = b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = "ios" } } });
-        const fix = b.addSystemCommand(&.{ "ranlib", b.getInstallPath(.{ .custom = "ios" }, lib.out_filename) });
+        const install = b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = config.install_dir } } });
+        const fix = b.addSystemCommand(&.{ "ranlib", b.getInstallPath(.{ .custom = config.install_dir }, lib.out_filename) });
         fix.step.dependOn(&install.step);
         ios_step.dependOn(&fix.step);
     }

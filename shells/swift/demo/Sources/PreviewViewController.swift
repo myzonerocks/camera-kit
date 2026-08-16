@@ -70,11 +70,11 @@ final class PreviewViewController: UIViewController {
         setupBeautyControls()
     }
 
-    // Each slider reaches ck_session_set_beauty directly; the effect only
-    // shows up once something reads the RGBA back out through
-    // ck_session_beautify_frame, which the zero-copy Metal preview here
-    // does not do yet (that CPU round trip is the live-preview GPU
-    // integration work, still ahead of this row).
+    // Each slider reaches ck_session_set_beauty directly; the effect
+    // shows up in the live preview itself, composited on the render
+    // thread through the GPU bridge (Metal write, gpupixel GL read, back
+    // out through Metal) - no CPU round trip through
+    // ck_session_beautify_frame involved.
     private func setupBeautyControls() {
         beautyStack.axis = .vertical
         beautyStack.spacing = 4
@@ -109,6 +109,8 @@ final class PreviewViewController: UIViewController {
         _ = ck_session_set_beauty(session, Int32(slider.tag), slider.value)
     }
 
+    private var conformanceStarted = false
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let scale = view.window?.screen.scale ?? 3.0
@@ -116,6 +118,18 @@ final class PreviewViewController: UIViewController {
         let pixelHeight = UInt32(view.bounds.height * scale)
         metalView.metalLayer.contentsScale = scale
         metalView.metalLayer.drawableSize = CGSize(width: CGFloat(pixelWidth), height: CGFloat(pixelHeight))
+
+        // Row 8's conformance run reuses this same real window/renderer
+        // setup, just feeding a fixed corpus frame instead of live
+        // camera - see ConformanceRunner. Own engine/session instances,
+        // so the normal live-preview path below never starts.
+        if CommandLine.arguments.contains("-CKConformance") {
+            if !conformanceStarted, pixelWidth > 0 {
+                conformanceStarted = true
+                ConformanceRunner.run(metalLayer: metalView.metalLayer, width: pixelWidth, height: pixelHeight)
+            }
+            return
+        }
 
         if engine == nil, pixelWidth > 0 {
             startEngine(pixelWidth: pixelWidth, pixelHeight: pixelHeight)
