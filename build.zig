@@ -216,6 +216,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "face", .module = face_module },
         },
     });
+    abi_module.addImport("manifest", lens_manifest_module);
+    abi_module.addImport("trigger", lens_trigger_module);
+    abi_module.addImport("runtime", lens_runtime_module);
 
     const lens_validator_module = b.createModule(.{
         .root_source_file = b.path("lenses/validator/main.zig"),
@@ -468,6 +471,9 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "render", .module = render_stub_module },
                 .{ .name = "face", .module = face_module },
                 .{ .name = "tracking", .module = tracking_real_module },
+                .{ .name = "manifest", .module = lens_manifest_module },
+                .{ .name = "trigger", .module = lens_trigger_module },
+                .{ .name = "runtime", .module = lens_runtime_module },
             },
         });
         if (target.result.os.tag == .macos) {

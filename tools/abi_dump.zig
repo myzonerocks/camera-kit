@@ -9,7 +9,7 @@
 const std = @import("std");
 const abi = @import("abi");
 
-const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig, abi.RendererDesc, abi.FramePlanes, abi.FaceResult };
+const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig, abi.RendererDesc, abi.FramePlanes, abi.FaceResult, abi.LensSignals };
 
 // Exported functions with their frozen C signatures. Kept next to the type
 // manifest so a new export without a manifest entry is caught in review.
@@ -38,6 +38,9 @@ const abi_functions = [_][]const u8{
     "void ck_session_disable_beauty(ck_session *session)",
     "ck_status ck_session_set_beauty(ck_session *session, int32_t effect, float value)",
     "ck_status ck_session_beautify_frame(ck_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
+    "ck_status ck_session_activate_lens(ck_session *session, const uint8_t *manifest_json, size_t manifest_len)",
+    "void ck_session_deactivate_lens(ck_session *session)",
+    "ck_status ck_session_tick_lens(ck_session *session, uint32_t dt_us, const ck_lens_signals *signals)",
 };
 
 fn writeSurface(w: anytype) !void {
