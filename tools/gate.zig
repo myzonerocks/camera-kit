@@ -311,6 +311,13 @@ fn forbiddenSegment(path: []const u8) ?[]const u8 {
 }
 
 fn forbiddenExtension(path: []const u8) ?[]const u8 {
+    // A reference lens's own assets/*.png is real bundle content the
+    // format itself defines (lut.pass and blend.pass name an asset by
+    // id the same way shader.pass names a .glsl source file) - not a
+    // fetched or built artifact like every other extension here.
+    if (std.mem.startsWith(u8, path, "lenses/") and std.mem.endsWith(u8, path, ".png") and std.mem.indexOf(u8, path, "/assets/") != null) {
+        return null;
+    }
     for (forbidden_extensions) |ext| {
         if (std.mem.endsWith(u8, path, ext)) return ext;
     }
@@ -358,6 +365,10 @@ test "forbidden extensions catch artifact classes" {
     try std.testing.expectEqualStrings(".out", forbiddenExtension("a.out").?);
     try std.testing.expect(forbiddenExtension("core/math/mat4.zig") == null);
     try std.testing.expect(forbiddenExtension("include/camerakit.h") == null);
+    // A png anywhere else is still a fetched/scratch artifact - only a
+    // reference lens's own assets/ directory is real bundle content.
+    try std.testing.expectEqualStrings(".png", forbiddenExtension("shells/kotlin/demo/src/main/assets/res/mouth.png").?);
+    try std.testing.expect(forbiddenExtension("lenses/reference/background-swap/assets/beach.png") == null);
 }
 
 test "banned tokens match case-insensitively and only when present" {
