@@ -140,6 +140,14 @@ export class PreviewSession {
   private meanHeight = 0;
   private frameWidth = 0;
   private frameHeight = 0;
+  private thinFaceAmount = 0;
+  private bigEyeAmount = 0;
+  private thinFaceUniform: WebGLUniformLocation | null;
+  private bigEyeUniform: WebGLUniformLocation | null;
+  private hasFaceUniform: WebGLUniformLocation | null;
+  private aspectRatioUniform: WebGLUniformLocation | null;
+  private facePointsUniform: WebGLUniformLocation | null;
+  private facePoints: Float32Array | null = null;
   private raf = 0;
   private lastTick = 0;
   private fpsWindowStart = 0;
@@ -166,6 +174,11 @@ export class PreviewSession {
     this.program = this.buildProgram();
     this.whitenUniform = gl.getUniformLocation(this.program, "u_whiten");
     this.smoothUniform = gl.getUniformLocation(this.program, "u_smooth");
+    this.thinFaceUniform = gl.getUniformLocation(this.program, "u_thinFace");
+    this.bigEyeUniform = gl.getUniformLocation(this.program, "u_bigEye");
+    this.hasFaceUniform = gl.getUniformLocation(this.program, "u_hasFace");
+    this.aspectRatioUniform = gl.getUniformLocation(this.program, "u_aspectRatio");
+    this.facePointsUniform = gl.getUniformLocation(this.program, "u_facePoints");
     const texture = gl.createTexture();
     if (!texture) throw new Error("texture create failed");
     this.texture = texture;
@@ -206,6 +219,22 @@ export class PreviewSession {
 
   setSmooth(amount: number): void {
     this.smoothAmount = amount;
+  }
+
+  setThinFace(amount: number): void {
+    this.thinFaceAmount = amount;
+  }
+
+  setBigEye(amount: number): void {
+    this.bigEyeAmount = amount;
+  }
+
+  /// The 106-point contour (see face106.ts), already normalized 0..1 in
+  /// the same image-space sense the shader's own texture coordinates
+  /// use. Null clears tracking - the shader's own `if (u_hasFace == 1)`
+  /// skip degrades to a no-op rather than warping toward a stale face.
+  setFaceLandmarks(points: Float32Array | null): void {
+    this.facePoints = points;
   }
 
   /// Fetches and decodes the four LUT textures the whiten pass samples,
@@ -270,6 +299,11 @@ export class PreviewSession {
       uniform sampler2D u_lookupCustom;
       uniform float u_smooth;
       uniform float u_whiten;
+      uniform float u_thinFace;
+      uniform float u_bigEye;
+      uniform int u_hasFace;
+      uniform float u_aspectRatio;
+      uniform float u_facePoints[106 * 2];
       in vec2 v_uv;
       out vec4 fragColor;
 
@@ -277,8 +311,60 @@ export class PreviewSession {
       const float levelBlack = 0.0258820;
       const float alpha = 0.7;
 
+      // A verbatim port of gpupixel's own face-reshape math
+      // (face_reshape_filter.cc): each pair below names two of the 106
+      // contour points as a curve's origin and target - thin-face pulls
+      // jawline points inward toward its cheek/chin targets, big-eye
+      // pushes texture samples outward from each eye's own center,
+      // both scaled by distance so the warp fades out away from the
+      // point pair it's anchored to.
+      vec2 enlargeEye(vec2 textureCoord, vec2 originPosition, float radius, float delta) {
+        float weight = distance(vec2(textureCoord.x, textureCoord.y / u_aspectRatio), vec2(originPosition.x, originPosition.y / u_aspectRatio)) / radius;
+        weight = 1.0 - (1.0 - weight * weight) * delta;
+        weight = clamp(weight, 0.0, 1.0);
+        return originPosition + (textureCoord - originPosition) * weight;
+      }
+
+      vec2 curveWarp(vec2 textureCoord, vec2 originPosition, vec2 targetPosition, float delta) {
+        vec2 direction = (targetPosition - originPosition) * delta;
+        float radius = distance(vec2(targetPosition.x, targetPosition.y / u_aspectRatio), vec2(originPosition.x, originPosition.y / u_aspectRatio));
+        float ratio = distance(vec2(textureCoord.x, textureCoord.y / u_aspectRatio), vec2(originPosition.x, originPosition.y / u_aspectRatio)) / radius;
+        ratio = clamp(1.0 - ratio, 0.0, 1.0);
+        return textureCoord - direction * ratio;
+      }
+
+      vec2 facePoint(int index) {
+        return vec2(u_facePoints[index * 2], u_facePoints[index * 2 + 1]);
+      }
+
+      vec2 thinFace(vec2 coord) {
+        int origins[9] = int[9](3, 29, 7, 25, 10, 22, 14, 18, 16);
+        int targets[9] = int[9](44, 44, 45, 45, 46, 46, 49, 49, 49);
+        for (int i = 0; i < 9; i++) {
+          coord = curveWarp(coord, facePoint(origins[i]), facePoint(targets[i]), u_thinFace);
+        }
+        return coord;
+      }
+
+      vec2 bigEye(vec2 coord) {
+        int origins[2] = int[2](74, 77);
+        int targets[2] = int[2](72, 75);
+        for (int i = 0; i < 2; i++) {
+          vec2 originPoint = facePoint(origins[i]);
+          vec2 targetPoint = facePoint(targets[i]);
+          float radius = distance(vec2(targetPoint.x, targetPoint.y / u_aspectRatio), vec2(originPoint.x, originPoint.y / u_aspectRatio)) * 5.0;
+          coord = enlargeEye(coord, originPoint, radius, u_bigEye);
+        }
+        return coord;
+      }
+
       void main() {
-        vec4 iColor = texture(u_frame, v_uv);
+        vec2 sampleUv = v_uv;
+        if (u_hasFace == 1) {
+          sampleUv = thinFace(sampleUv);
+          sampleUv = bigEye(sampleUv);
+        }
+        vec4 iColor = texture(u_frame, sampleUv);
         vec3 color = iColor.rgb;
 
         // A verbatim port of gpupixel's own skin-smoothing math
@@ -554,6 +640,13 @@ export class PreviewSession {
       gl.bindTexture(gl.TEXTURE_2D, this.meanTexture);
       gl.uniform1f(this.smoothUniform, smoothActive ? this.smoothAmount : 0);
       gl.uniform1f(this.whitenUniform, this.whitenAmount);
+      gl.uniform1f(this.thinFaceUniform, this.thinFaceAmount);
+      gl.uniform1f(this.bigEyeUniform, this.bigEyeAmount);
+      gl.uniform1f(this.aspectRatioUniform, this.frameWidth / this.frameHeight);
+      gl.uniform1i(this.hasFaceUniform, this.facePoints ? 1 : 0);
+      if (this.facePoints) {
+        gl.uniform1fv(this.facePointsUniform, this.facePoints);
+      }
       gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
       this.renderedFrames += 1;
       this.fpsWindowFrames += 1;

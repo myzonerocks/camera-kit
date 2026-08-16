@@ -1,5 +1,6 @@
 import { Core, PreviewSession } from "../src/index.ts";
 import { FACE_LANDMARK_COUNT } from "../src/tracking.ts";
+import { fill as fillFace106 } from "../src/face106.ts";
 
 const status = document.getElementById("status")!;
 const canvas = document.getElementById("preview") as HTMLCanvasElement;
@@ -96,7 +97,7 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     requestAnimationFrame(feed);
     if (link.busy) return;
     const video = preview.video;
-    if (video.readyState < 2 || video.videoWidth === 0) return;
+    if (video.readyState < 2 || video.videoWidth === 0 || video.paused) return;
     const analysisHeight = Math.round((analysisWidth * video.videoHeight) / video.videoWidth);
     scratch.width = analysisWidth;
     scratch.height = analysisHeight;
@@ -104,6 +105,11 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     const pixels = ctx.getImageData(0, 0, analysisWidth, analysisHeight);
     void link.send(pixels.data, analysisWidth, analysisHeight, Math.round(performance.now() * 1000)).then((reply) => {
       drawOverlay(reply, analysisWidth, analysisHeight);
+      preview.setFaceLandmarks(
+        reply.presence >= 0.5 && reply.landmarkCount > 0
+          ? fillFace106(reply.landmarks, analysisWidth, analysisHeight)
+          : null,
+      );
       if (!trackingAnnounced) {
         trackingAnnounced = true;
         console.log(`CKWEB tracking running: serial results flowing, presence ${reply.presence.toFixed(3)}`);
@@ -128,6 +134,22 @@ async function startTracking(preview: PreviewSession): Promise<void> {
       landmarkCount: reply.landmarkCount,
       expected: FACE_LANDMARK_COUNT,
     };
+  };
+  // Same still-image path, but for reshape's own proof: tracks the image
+  // and feeds the result straight into the preview session's face
+  // contour, the way the live feed loop above does every frame.
+  (window as unknown as Record<string, unknown>).setLandmarksFromStill = async (url: string) => {
+    const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+    const still = document.createElement("canvas");
+    still.width = bitmap.width;
+    still.height = bitmap.height;
+    const stillCtx = still.getContext("2d", { willReadFrequently: true })!;
+    stillCtx.drawImage(bitmap, 0, 0);
+    const pixels = stillCtx.getImageData(0, 0, still.width, still.height);
+    const reply = await link.send(pixels.data, still.width, still.height, 0);
+    preview.setFaceLandmarks(
+      reply.presence >= 0.5 && reply.landmarkCount > 0 ? fillFace106(reply.landmarks, still.width, still.height) : null,
+    );
   };
   (window as unknown as Record<string, unknown>).trackingUp = true;
 }
@@ -192,6 +214,20 @@ async function run(): Promise<void> {
   });
   (window as unknown as Record<string, unknown>).setSmooth = (value: number) => {
     preview.setSmooth(value);
+  };
+  const thinFaceSlider = document.getElementById("thin-face") as HTMLInputElement | null;
+  thinFaceSlider?.addEventListener("input", () => {
+    preview.setThinFace(Number(thinFaceSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setThinFace = (value: number) => {
+    preview.setThinFace(value);
+  };
+  const bigEyeSlider = document.getElementById("big-eye") as HTMLInputElement | null;
+  bigEyeSlider?.addEventListener("input", () => {
+    preview.setBigEye(Number(bigEyeSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setBigEye = (value: number) => {
+    preview.setBigEye(value);
   };
   (window as unknown as Record<string, unknown>).loadStillFrame = (url: string) => preview.loadStillFrame(url);
   (window as unknown as Record<string, unknown>).readCenterPixel = () => Array.from(preview.readCenterPixel());
