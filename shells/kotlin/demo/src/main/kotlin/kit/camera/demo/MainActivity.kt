@@ -21,6 +21,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kit.camera.Engine
 import kit.camera.FaceResult
+import kit.camera.LensSignals
 import kit.camera.Session
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
@@ -43,6 +44,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var fpsWindowFrames = 0
     private var lastFrameNanos = 0L
     private var proofLogged = false
+    private val lensSignals = LensSignals()
 
     // Two frames of retained buffers keep the copies alive while in flight.
     private var yScratch: ByteBuffer? = null
@@ -104,6 +106,17 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 Log.i(tag, "beauty unavailable in this build")
             }
         }
+        try {
+            assets.open("lenses/beauty-baseline/manifest.json").use { stream ->
+                if (createdSession.activateLens(stream.readBytes())) {
+                    Log.i(tag, "reference lens active")
+                } else {
+                    Log.i(tag, "reference lens activation refused")
+                }
+            }
+        } catch (e: java.io.IOException) {
+            Log.i(tag, "reference lens not present")
+        }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -113,6 +126,18 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
         engine?.resize(width, height)
+    }
+
+    /** Rides the same result overlay.poll() just refreshed - ticking every
+     * render frame regardless of whether that particular result was new
+     * keeps the lens's own animation ramps advancing smoothly at display
+     * refresh rate rather than at tracking cadence. */
+    private fun tickLens(session: Session, dtUs: Int) {
+        val hasFace = overlay.hasFaceResult &&
+            overlay.latestFaceResult.presence >= 0.5f &&
+            overlay.latestFaceResult.landmarkCount > 0
+        lensSignals.set(hasFace, false, false, 0.0, 0.0, overlay.latestFaceResult.blendshapes)
+        session.tickLens(dtUs, lensSignals)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -183,6 +208,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         lastFrameNanos = frameTimeNanos
         session?.reportFrame(frameTimeUs, 0)
         session?.let { overlay.poll(it) }
+        session?.let { tickLens(it, frameTimeUs) }
         if (engine.renderFrame(session)) {
             renderedFrames += 1
             fpsWindowFrames += 1

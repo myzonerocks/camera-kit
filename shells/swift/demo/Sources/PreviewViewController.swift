@@ -165,6 +165,7 @@ final class PreviewViewController: UIViewController {
 
         _ = ck_session_report_frame(session, frameTimeUs, ck_thermal(rawValue: UInt32(ProcessInfo.processInfo.thermalState.ckThermal)))
         drawFaceOverlay()
+        tickLens(dtUs: frameTimeUs)
         guard ck_engine_render_frame(engine, session) == CK_OK else { return }
         renderedFrames += 1
         fpsWindowFrames += 1
@@ -212,6 +213,17 @@ final class PreviewViewController: UIViewController {
             }
         }
         faceLayer.path = path
+    }
+
+    /// Rides the same faceResult drawFaceOverlay just refreshed - ticking
+    /// every render frame regardless of whether that particular result
+    /// was new keeps the lens's own animation ramps advancing smoothly
+    /// at display refresh rate rather than at tracking cadence.
+    private func tickLens(dtUs: UInt32) {
+        var signals = ck_lens_signals()
+        signals.has_face = faceResult.presence >= 0.5 && faceResult.landmark_count > 0
+        signals.blendshapes = faceResult.blendshapes
+        _ = ck_session_tick_lens(session, dtUs, &signals)
     }
 
     @objc private func appDidEnterBackground() {

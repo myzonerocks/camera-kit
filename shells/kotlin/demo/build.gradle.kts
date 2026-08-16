@@ -49,3 +49,11 @@ val syncBeautyRes by tasks.registering(Copy::class) {
     into(layout.projectDirectory.dir("src/main/assets/res"))
 }
 tasks.named("preBuild") { dependsOn(syncBeautyRes) }
+
+// The beauty-baseline reference lens, synced straight from the tracked
+// bundle so the demo always ships exactly what the validator checked.
+val syncReferenceLens by tasks.registering(Copy::class) {
+    from(rootProject.projectDir.resolve("../../lenses/reference/beauty-baseline"))
+    into(layout.projectDirectory.dir("src/main/assets/lenses/beauty-baseline"))
+}
+tasks.named("preBuild") { dependsOn(syncReferenceLens) }

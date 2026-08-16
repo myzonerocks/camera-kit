@@ -238,6 +238,25 @@ export fn Java_kit_camera_CameraKit_nativeBeautifyFrame(
     return @intFromEnum(abi.ck_session_beautify_frame(sessionFromHandle(session), source, @intCast(width), @intCast(height), destination));
 }
 
+export fn Java_kit_camera_CameraKit_nativeActivateLens(env: *JniEnv, cls: jobject, session: i64, manifest_buffer: jobject, manifest_len: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, manifest_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.ck_session_activate_lens(sessionFromHandle(session), bytes, @intCast(manifest_len)));
+}
+
+export fn Java_kit_camera_CameraKit_nativeDeactivateLens(env: *JniEnv, cls: jobject, session: i64) void {
+    _ = env;
+    _ = cls;
+    abi.ck_session_deactivate_lens(sessionFromHandle(session));
+}
+
+export fn Java_kit_camera_CameraKit_nativeTickLens(env: *JniEnv, cls: jobject, session: i64, dt_us: i32, signals_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, signals_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const signals: *const abi.LensSignals = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.ck_session_tick_lens(sessionFromHandle(session), @intCast(dt_us), signals));
+}
+
 export fn Java_kit_camera_CameraKit_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;
