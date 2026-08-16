@@ -43,6 +43,8 @@ pub const PreviewFrame = union(enum) {
 };
 
 pub const Renderer = struct {
+    default_mask_texture: TextureHandle = .{},
+
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         _ = gpa;
         _ = options;
@@ -80,6 +82,13 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub fn createMaskTexture(width: u16, height: u16, mask: []const u8) TextureHandle {
+        _ = width;
+        _ = height;
+        _ = mask;
+        return .{};
+    }
+
     pub fn submitPreview(r: *Renderer, view_id: u8, preview: PreviewFrame, rotation_degrees: u32, mirror: bool) void {
         _ = r;
         _ = view_id;
@@ -100,6 +109,14 @@ pub const Renderer = struct {
         _ = view_id;
         _ = input_texture;
         _ = lut_texture;
+    }
+
+    pub fn submitBlendPass(r: *Renderer, view_id: u8, input_texture: TextureHandle, background_texture: TextureHandle, mask_texture: TextureHandle) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = background_texture;
+        _ = mask_texture;
     }
 
     pub fn uploadNv12(r: *Renderer, width: u16, height: u16, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) !Nv12Textures {
@@ -146,6 +163,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadLutProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadBlendProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

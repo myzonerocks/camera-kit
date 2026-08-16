@@ -172,7 +172,7 @@ pub export fn ck_tracking_process(instance: ?*Instance, rgba: ?[*]const u8, widt
     };
 
     const crop = tracking.lock.cropForFrame() orelse detect: {
-        sampler.sampleRegion(image, face.frameSquare(width, height), .symmetric, tracking.detector_side, tracking.detector_tensor);
+        sampler.sampleRegion(image, sampler.frameSquare(width, height), .symmetric, tracking.detector_side, tracking.detector_tensor);
         tracking.detector_engine.writeInput(0, std.mem.sliceAsBytes(tracking.detector_tensor)) catch return status_invalid;
         tracking.detector_engine.invoke() catch return status_invalid;
         const raw_boxes = tracking.detector_engine.outputFloats(0) catch return status_invalid;
@@ -183,7 +183,7 @@ pub export fn ck_tracking_process(instance: ?*Instance, rgba: ?[*]const u8, widt
             publishEmpty(tracking, timestamp_us);
             return status_ok;
         }
-        const region = face.regionFromDetection(found[0], face.frameSquare(width, height));
+        const region = face.regionFromDetection(found[0], sampler.frameSquare(width, height));
         tracking.lock.onDetection(region);
         break :detect region;
     };

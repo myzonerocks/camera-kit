@@ -69,9 +69,13 @@ shells/ts/**/*.wasm.map
 # Model assets are synced from .models at app build time, never tracked.
 shells/kotlin/demo/src/main/assets/
 
-# Raster images are fetched corpus or scratch artifacts, never source.
+# Raster images are fetched corpus or scratch artifacts, never source -
+# except a reference lens's own assets/*.png, which is real bundle
+# content the format itself defines (lut.pass and blend.pass name an
+# asset by id the same way shader.pass names a .glsl source file).
 *.jpg
 *.jpeg
 *.png
+!lenses/**/*.png
 *.webp
 *.bmp

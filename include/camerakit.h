@@ -247,9 +247,18 @@ ck_degrade_level ck_session_degrade_level(const ck_session *session);
 ck_status ck_session_enable_face_tracking(ck_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads);
 void ck_session_disable_face_tracking(ck_session *session);
 
+/* Graph thread. Stands the segmentation worker up from a raw model
+ * (a selfie or hair segmenter .tflite file, not bundled the way
+ * face_landmarker.task is). The model bytes are copied; the caller may
+ * release them on return. Builds without the inference stack report
+ * unsupported. */
+ck_status ck_session_enable_segmentation(ck_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads);
+void ck_session_disable_segmentation(ck_session *session);
+
 /* Graph thread. Feeds one NV12 frame to the tracking worker. The planes
  * are CPU addresses valid for the duration of the call; the worker copies
- * and returns immediately, dropping stale frames in favor of this one. */
+ * and returns immediately, dropping stale frames in favor of this one.
+ * Feeds the segmentation worker the same frame if it is enabled too. */
 ck_status ck_session_track_frame(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
 
 /* Graph thread. Reads the newest tracking result into caller memory.

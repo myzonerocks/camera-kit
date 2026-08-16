@@ -183,8 +183,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "face", .module = face_module }},
     });
+    const segment_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/segment.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     abi_module.addImport("face", face_module);
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
+    abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
 
     const lens_manifest_module = b.createModule(.{
@@ -278,6 +284,7 @@ pub fn build(b: *std.Build) void {
     const face_tests = b.addTest(.{ .root_module = face_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const face106_tests = b.addTest(.{ .root_module = face106_module });
+    const segment_tests = b.addTest(.{ .root_module = segment_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
@@ -298,6 +305,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
+    test_step.dependOn(&b.addRunArtifact(segment_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
@@ -495,6 +503,31 @@ pub fn build(b: *std.Build) void {
         });
         runtime_module.link_libc = true;
         runtime_module.addIncludePath(b.path(".vendor/litert"));
+        // MediaPipe's segmentation models need a custom TFLite op the
+        // stock interpreter can't resolve on its own (adapters/tracking/
+        // transpose_conv_bias.zig) - built here rather than folded into
+        // runtime.zig itself since it needs its own additional import
+        // (segment.zig's pure math) runtime.zig has no reason to carry.
+        const transpose_conv_bias_module = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_module },
+                .{ .name = "segment", .module = segment_module },
+            },
+        });
+        transpose_conv_bias_module.link_libc = true;
+        transpose_conv_bias_module.addIncludePath(b.path(".vendor/litert"));
+        // No standalone test artifact here: a zig test binary talks to the
+        // build runner over its own stdin/stdout (--listen=-), and TFLite's
+        // C-level logging writes straight to that same stdout, corrupting
+        // the protocol the instant a real model loads. Every other real
+        // Engine.init in this repo already lives in library code or the
+        // tracking-harness executable for the same reason - this custom
+        // op's own end-to-end proof against the real model belongs there
+        // too, wired in below as tracking_module's "transpose_conv_bias"
+        // import.
         // The export layer instance under real tracking: the harness drives
         // the same ck_ surface a shell uses, worker thread and all.
         const tracking_real_module = b.createModule(.{
@@ -510,6 +543,17 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "tracker", .module = tracker_module },
                 .{ .name = "graph", .module = graph_module },
                 .{ .name = "math", .module = math_module },
+            },
+        });
+        const segmentation_module = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_module },
+                .{ .name = "sampler", .module = sampler_module },
+                .{ .name = "math", .module = math_module },
+                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_module },
             },
         });
         const beauty_real_module = b.createModule(.{
@@ -531,6 +575,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "render", .module = render_stub_module },
                 .{ .name = "face", .module = face_module },
                 .{ .name = "tracking", .module = tracking_real_module },
+                .{ .name = "segmentation", .module = segmentation_module },
                 .{ .name = "manifest", .module = lens_manifest_module },
                 .{ .name = "trigger", .module = lens_trigger_module },
                 .{ .name = "runtime", .module = lens_runtime_module },
@@ -559,6 +604,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "abi", .module = abi_tracking_module },
                 .{ .name = "face106", .module = face106_module },
+                .{ .name = "segmentation", .module = segmentation_module },
             },
         });
         if (target.result.os.tag == .macos) {
@@ -677,6 +723,7 @@ pub fn build(b: *std.Build) void {
         const tracking_cores_wasm = trackingCoreModules(b, wasm_target, .ReleaseSmall, math_wasm);
         abi_wasm.addImport("face", tracking_cores_wasm.face);
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, math_wasm));
+        abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/manifest.zig"),
@@ -918,6 +965,34 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             },
         });
         abi_android.addImport("tracking", tracking_android);
+        const segment_android = b.createModule(.{
+            .root_source_file = b.path("core/tracking/segment.zig"),
+            .target = android_target,
+            .optimize = optimize,
+        });
+        const transpose_conv_bias_android = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_android },
+                .{ .name = "segment", .module = segment_android },
+            },
+        });
+        transpose_conv_bias_android.link_libc = true;
+        transpose_conv_bias_android.addIncludePath(b.path(".vendor/litert"));
+        const segmentation_android = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_android },
+                .{ .name = "sampler", .module = tracking_cores_android.sampler },
+                .{ .name = "math", .module = math_android },
+                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_android },
+            },
+        });
+        abi_android.addImport("segmentation", segmentation_android);
         const face106_android = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = android_target,
@@ -936,6 +1011,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         abi_android.addImport("beauty", beauty_android_module);
     } else {
         abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
+        abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
     const android_asset = realAssetModules(b, android_target, optimize);
@@ -1065,6 +1141,7 @@ fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
     });
     image_module.link_libc = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, image_module);
     const asset_module = b.createModule(.{
         .root_source_file = b.path("adapters/asset/asset.zig"),
         .target = target,
@@ -1109,6 +1186,15 @@ fn trackingStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
             .{ .name = "face", .module = face_module },
             .{ .name = "math", .module = math_module },
         },
+    });
+}
+
+fn segmentationStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/segmentation_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_module }},
     });
 }
 
@@ -2290,6 +2376,34 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             },
         });
         abi_ios.addImport("tracking", tracking_ios);
+        const segment_ios = b.createModule(.{
+            .root_source_file = b.path("core/tracking/segment.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+        });
+        const transpose_conv_bias_ios = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_ios },
+                .{ .name = "segment", .module = segment_ios },
+            },
+        });
+        transpose_conv_bias_ios.link_libc = true;
+        transpose_conv_bias_ios.addIncludePath(b.path(".vendor/litert"));
+        const segmentation_ios = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_ios },
+                .{ .name = "sampler", .module = tracking_cores_ios.sampler },
+                .{ .name = "math", .module = math_ios },
+                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_ios },
+            },
+        });
+        abi_ios.addImport("segmentation", segmentation_ios);
         const face106_ios = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = ios_target,
@@ -2324,6 +2438,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
         inference_libs.appendSlice(b.allocator, family_libs.items) catch @panic("oom");
     } else {
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
+        abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
     const ios_asset = realAssetModules(b, ios_target, optimize);
@@ -2510,6 +2625,9 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // vertex contract above, not per-lens, so it compiles here once
         // rather than through the validator's per-lens shader stage.
         .{ .name = "fs_lut_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // blend.pass's own fixed fragment shader, same reasoning as
+        // fs_lut_pass above.
+        .{ .name = "fs_blend_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
         .{ .profile = "metal", .platform = "ios", .tag = "metal" },

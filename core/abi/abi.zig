@@ -14,6 +14,7 @@ const graph = @import("graph");
 const math = @import("math");
 const render = @import("render");
 const tracking = @import("tracking");
+const segmentation = @import("segmentation");
 const face = @import("face");
 const beauty = @import("beauty");
 const manifest = @import("manifest");
@@ -175,6 +176,14 @@ pub const Session = struct {
     current: ?CurrentFrame = null,
     copied_frames: u64 = 0,
     face_tracking: ?*tracking.Tracking = null,
+    segmentation_worker: ?*segmentation.Segmentation = null,
+    /// The most recent mask, uploaded as a real GPU texture the same way
+    /// a lut.pass asset is - a raw byte array has no reason to cross the
+    /// frozen ABI surface when nothing outside the render thread ever
+    /// needs it, and a 256x256 texture upload is far cheaper than
+    /// copying the mask through it. Recreated (not reused) each time a
+    /// fresh mask is ready, since bgfx's static textures are immutable.
+    segmentation_texture: ?render.TextureHandle = null,
     beauty_chain: ?*beauty.Beauty = null,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
@@ -200,6 +209,13 @@ pub const Session = struct {
     lut_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.Loader) = .empty,
     /// One bgfx texture per lut.pass node whose asset finished loading.
     lut_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// One background loader per currently-spliced blend.pass node still
+    /// waiting on its background image - mirrors lut_loaders exactly,
+    /// one node type over.
+    blend_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.Loader) = .empty,
+    /// One bgfx texture per blend.pass node whose background finished
+    /// loading.
+    blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -248,24 +264,32 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
     e.chain_height = height;
 }
 
-/// Draws the active lens's full composite chain - shader.pass and
-/// lut.pass nodes mixed freely: the camera preview captures into one
-/// ping-pong target (view 0), every ready stage reads the previous
-/// stage and writes the other target, and whichever ready stage draws
-/// last presents straight to the swap chain instead of an offscreen
-/// one. View ids increase monotonically because bgfx orders view
-/// execution by id, not by submission order - that ordering is what
-/// makes this an actual chain rather than stages racing each other.
-/// A stage whose resource (a program, a texture) isn't ready yet -
-/// most often a lut.pass node whose background load hasn't landed -
-/// is skipped outright: the chain just has one fewer stage this frame,
-/// not a gap that draws nothing.
+/// Draws the active lens's full composite chain - shader.pass,
+/// lut.pass, and blend.pass nodes mixed freely: the camera preview
+/// captures into one ping-pong target (view 0), every ready stage reads
+/// the previous stage and writes the other target, and whichever ready
+/// stage draws last presents straight to the swap chain instead of an
+/// offscreen one. View ids increase monotonically because bgfx orders
+/// view execution by id, not by submission order - that ordering is
+/// what makes this an actual chain rather than stages racing each
+/// other. A stage whose resource (a program, a texture) isn't ready
+/// yet - most often a lut.pass or blend.pass node whose asset hasn't
+/// landed - is skipped outright: the chain just has one fewer stage
+/// this frame, not a gap that draws nothing. A blend.pass node whose
+/// background HAS landed but segmentation is unavailable still draws,
+/// against the renderer's always-foreground default mask.
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
     var ready_count: usize = 0;
     for (s.chain_order) |entry| {
         const ready = switch (entry.kind) {
             .shader => s.shader_programs.contains(entry.graph_index),
             .lut => s.lut_textures.contains(entry.graph_index),
+            // Only the background image gates readiness - the mask
+            // degrades to the renderer's always-foreground default
+            // when segmentation is unavailable (SPEC's rule: a node
+            // consuming an unavailable capability's data holds its
+            // default state, not blocks the chain).
+            .blend => s.blend_textures.contains(entry.graph_index),
         };
         if (ready) ready_count += 1;
     }
@@ -311,6 +335,19 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     next_slot += 1;
                 }
             },
+            .blend => {
+                const background_texture = s.blend_textures.get(entry.graph_index) orelse continue;
+                const mask_texture = s.segmentation_texture orelse r.default_mask_texture;
+                drawn += 1;
+                const view_id: u8 = @intCast(drawn);
+                const output = if (drawn == ready_count) null else targets[next_slot % 2];
+                render.Renderer.setViewTarget(view_id, output, width, height);
+                r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    next_slot += 1;
+                }
+            },
         }
     }
 }
@@ -341,6 +378,9 @@ pub fn destroySession(session: *Session) void {
     destroyLutState(session);
     session.lut_loaders.deinit(session.engine.gpa);
     session.lut_textures.deinit(session.engine.gpa);
+    destroyBlendState(session);
+    session.blend_loaders.deinit(session.engine.gpa);
+    session.blend_textures.deinit(session.engine.gpa);
     destroyChainOrder(session);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
@@ -349,6 +389,9 @@ pub fn destroySession(session: *Session) void {
     session.beauty_chain = null;
     if (session.face_tracking) |worker| tracking.destroy(worker);
     session.face_tracking = null;
+    if (session.segmentation_worker) |worker| segmentation.destroy(worker);
+    session.segmentation_worker = null;
+    destroySegmentationTexture(session);
     releaseCurrentFrame(session);
     session.engine.gpa.destroy(session);
 }
@@ -433,6 +476,8 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
     if (session) |s| {
         pollLutLoaders(s, r, s.engine.gpa);
+        pollBlendLoaders(s, r, s.engine.gpa);
+        pollSegmentationMask(s);
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
@@ -624,6 +669,31 @@ pub export fn ck_session_disable_face_tracking(session: ?*Session) void {
     s.face_tracking = null;
 }
 
+/// Stands the segmentation worker up from a raw model (selfie or hair
+/// segmenter, not bundled the way face_landmarker.task is). The model
+/// bytes are copied; the caller may release them on return. On platforms
+/// built without the inference stack this reports unsupported.
+pub export fn ck_session_enable_segmentation(session: ?*Session, model_bytes: ?[*]const u8, model_len: usize, threads: i32) Status {
+    const s = session orelse return .invalid_argument;
+    const bytes = model_bytes orelse return .invalid_argument;
+    if (model_len == 0) return .invalid_argument;
+    if (s.segmentation_worker != null) return .ok;
+    const worker_threads = if (threads <= 0) 2 else threads;
+    s.segmentation_worker = segmentation.create(s.engine.gpa, bytes[0..model_len], worker_threads) catch |err| switch (err) {
+        error.Unsupported => return .unsupported,
+        error.InvalidModel => return .invalid_argument,
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn ck_session_disable_segmentation(session: ?*Session) void {
+    const s = session orelse return;
+    if (s.segmentation_worker) |worker| segmentation.destroy(worker);
+    s.segmentation_worker = null;
+    destroySegmentationTexture(s);
+}
+
 /// Feeds one NV12 frame to the tracking worker. The planes are CPU
 /// addresses valid for the duration of the call; the worker copies and
 /// returns immediately, dropping stale frames in favor of this one.
@@ -632,7 +702,7 @@ pub export fn ck_session_track_frame(session: ?*Session, desc: ?*const FrameDesc
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    const worker = s.face_tracking orelse return .again;
+    if (s.face_tracking == null and s.segmentation_worker == null) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (d.width == 0 or d.height == 0) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -642,17 +712,13 @@ pub export fn ck_session_track_frame(session: ?*Session, desc: ?*const FrameDesc
         else => .bt709,
     };
     const range: math.color.Range = if (d.color_range == 1) .full else .video;
-    tracking.submitNv12(
-        worker,
-        d.width,
-        d.height,
-        d.timestamp_us,
-        math.color.yuvToRgb(standard, range),
-        y_plane,
-        y_stride,
-        uv_plane,
-        uv_stride,
-    );
+    const conversion = math.color.yuvToRgb(standard, range);
+    if (s.face_tracking) |worker| {
+        tracking.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    if (s.segmentation_worker) |worker| {
+        segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
     return .ok;
 }
 
@@ -748,6 +814,32 @@ fn destroyChainOrder(session: *Session) void {
 /// texture for the session's current lens - a load still running when
 /// its lens deactivates is not a leak, just a loader whose result
 /// nobody will ever collect.
+fn destroySegmentationTexture(session: *Session) void {
+    const texture = session.segmentation_texture orelse return;
+    if (session.engine.renderer) |*r| r.destroyTexture(texture);
+    session.segmentation_texture = null;
+}
+
+/// Turns the newest published mask into a real GPU texture - runs every
+/// frame from ck_engine_render_frame since texture creation belongs on
+/// the render thread, mirroring pollLutLoaders. Replaces the previous
+/// texture outright since bgfx's static textures are immutable; nothing
+/// consumes segmentation_texture yet (background-swap compositing is
+/// future work), so this only ever does the upload.
+fn pollSegmentationMask(session: *Session) void {
+    const worker = session.segmentation_worker orelse return;
+    var mask: [segmentation.mask_len]f32 = undefined;
+    if (!segmentation.readMask(worker, &mask)) return;
+
+    var bytes: [segmentation.mask_len]u8 = undefined;
+    for (mask, 0..) |value, i| {
+        bytes[i] = @intFromFloat(std.math.clamp(value, 0.0, 1.0) * 255.0);
+    }
+    const texture = render.Renderer.createMaskTexture(segmentation.mask_side, segmentation.mask_side, &bytes);
+    destroySegmentationTexture(session);
+    session.segmentation_texture = texture;
+}
+
 fn destroyLutState(session: *Session) void {
     var loader_it = session.lut_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
@@ -758,6 +850,18 @@ fn destroyLutState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
     }
     session.lut_textures.clearRetainingCapacity();
+}
+
+fn destroyBlendState(session: *Session) void {
+    var loader_it = session.blend_loaders.valueIterator();
+    while (loader_it.next()) |loader| loader.*.deinit();
+    session.blend_loaders.clearRetainingCapacity();
+
+    if (session.engine.renderer) |*r| {
+        var texture_it = session.blend_textures.valueIterator();
+        while (texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.blend_textures.clearRetainingCapacity();
 }
 
 /// Replaces any currently active lens with the one manifest_json
@@ -782,6 +886,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
 
     destroyShaderPrograms(session);
     destroyLutState(session);
+    destroyBlendState(session);
     destroyChainOrder(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
@@ -881,6 +986,49 @@ fn pollLutLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator
     }
 }
 
+/// Starts a background load for every spliced blend.pass node's
+/// background image (assets/<stem>.png) - mirrors createLutLoaders
+/// exactly, one node type over.
+fn createBlendLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const blends = try lens.blendPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(blends);
+    for (blends) |blend| {
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, blend.background_stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.Loader.start(gpa, path) catch continue;
+        session.blend_loaders.put(gpa, blend.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Turns every background load that finished (or failed) since the last
+/// frame into a real texture (or drops it) - mirrors pollLutLoaders
+/// exactly, one node type over.
+fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.blend_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.blend_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.blend_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
 /// Activates the lens bundle at bundle_path (bundle_path/manifest.json),
 /// then creates a bgfx program for every shader.pass node it spliced
 /// and starts a background load for every lut.pass node's LUT image.
@@ -903,6 +1051,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try activateLens(session, gpa, manifest_json);
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
+    try createBlendLoaders(session, gpa, bundle_path);
     try buildChainOrder(session, gpa);
 }
 
@@ -922,6 +1071,7 @@ pub export fn ck_session_deactivate_lens(session: ?*Session) void {
     const s = session orelse return;
     destroyShaderPrograms(s);
     destroyLutState(s);
+    destroyBlendState(s);
     destroyChainOrder(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
@@ -1229,4 +1379,49 @@ test "activating a lens with a lut.pass node loads its LUT image for real, off t
     // double-freed.
     ck_session_deactivate_lens(session);
     try t.expectEqual(@as(usize, 0), session.lut_loaders.count());
+}
+
+const blend_pass_bundle_manifest =
+    \\{"glf":"1.0","id":"com.example.blend","version":"1.0.0","display_name":"Blend",
+    \\ "engine_compat":">=0.5","capabilities":["segmentation"],"parameters":[],
+    \\ "nodes":[{"id":"beach","type":"blend.pass","inputs":{"frame":"camera"},"params":{}}],
+    \\ "triggers":[]}
+;
+
+test "activating a lens with a blend.pass node loads its background image for real, off the calling thread" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = blend_pass_bundle_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/beach.png", .data = &lut_checker_png });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(@as(usize, 1), session.blend_loaders.count());
+    try t.expectEqual(@as(usize, 1), session.chain_order.len);
+    try t.expectEqual(runtime.PassKind.blend, session.chain_order[0].kind);
+
+    var loader_it = session.blend_loaders.valueIterator();
+    const loader = loader_it.next().?.*;
+    var decoded: ?image.Image = null;
+    var spins: u32 = 0;
+    while (decoded == null and spins < 1_000_000) : (spins += 1) {
+        decoded = loader.take();
+        if (decoded == null) std.atomic.spinLoopHint();
+    }
+    const got = decoded orelse return error.TestUnexpectedResult;
+    defer t.allocator.free(got.rgba);
+    try t.expectEqual(@as(u32, 8), got.width);
+    try t.expectEqual(@as(u32, 8), got.height);
+    try t.expect(!loader.hasFailed());
+
+    ck_session_deactivate_lens(session);
+    try t.expectEqual(@as(usize, 0), session.blend_loaders.count());
 }

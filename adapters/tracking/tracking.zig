@@ -258,7 +258,7 @@ fn processFrame(tracking: *Tracking, frame: *const PendingFrame) void {
     };
 
     const crop = tracking.lock.cropForFrame() orelse detect: {
-        sampler.sampleRegion(image, face.frameSquare(image.width, image.height), .symmetric, tracking.detector_side, tracking.detector_tensor);
+        sampler.sampleRegion(image, sampler.frameSquare(image.width, image.height), .symmetric, tracking.detector_side, tracking.detector_tensor);
         tracking.detector_engine.writeInput(0, std.mem.sliceAsBytes(tracking.detector_tensor)) catch return;
         tracking.detector_engine.invoke() catch return;
         const raw_boxes = tracking.detector_engine.outputFloats(0) catch return;
@@ -269,7 +269,7 @@ fn processFrame(tracking: *Tracking, frame: *const PendingFrame) void {
             publishEmpty(tracking, frame.timestamp_us);
             return;
         }
-        const region = face.regionFromDetection(found[0], face.frameSquare(image.width, image.height));
+        const region = face.regionFromDetection(found[0], sampler.frameSquare(image.width, image.height));
         tracking.lock.onDetection(region);
         break :detect region;
     };

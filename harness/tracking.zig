@@ -18,6 +18,7 @@ const abi = @import("abi");
 const math = @import("math");
 
 const face106 = @import("face106");
+const segmentation = @import("segmentation");
 const builtin = @import("builtin");
 
 /// The beauty chain needs a windowing gl context; the harness proves it
@@ -228,7 +229,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     const tensor_len = @as(usize, input_side) * input_side * 3;
     const input_tensor = try gpa.alloc(f32, tensor_len);
     defer gpa.free(input_tensor);
-    sampler.sampleRegion(frame, face.frameSquare(frame_width, frame_height), .symmetric, input_side, input_tensor);
+    sampler.sampleRegion(frame, sampler.frameSquare(frame_width, frame_height), .symmetric, input_side, input_tensor);
     try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
     try detector_engine.invoke();
 
@@ -264,7 +265,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         defer corpus.deinit();
         const image = corpus.frame;
 
-        sampler.sampleRegion(image, face.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
+        sampler.sampleRegion(image, sampler.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
         try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
         try detector_engine.invoke();
         const found = detector.decode(
@@ -307,7 +308,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         }
         if (found.len == 0) return 1;
 
-        const region = face.regionFromDetection(found[0], face.frameSquare(image.width, image.height));
+        const region = face.regionFromDetection(found[0], sampler.frameSquare(image.width, image.height));
         sampler.sampleRegion(image, region, .unit, landmark_side, landmark_tensor);
         try landmarks_engine.writeInput(0, std.mem.sliceAsBytes(landmark_tensor));
         try landmarks_engine.invoke();
@@ -433,6 +434,125 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (result.landmark_count_out != face.landmark_count) return 1;
         if (result.timestamp_us != 1000) return 1;
 
+        // Segmentation through the same public surface: one session, one
+        // enable call, the same NV12 frame ck_session_track_frame already
+        // fed to face tracking above now reaches the segmentation worker
+        // too - proving the ABI wrapper itself (Status translation,
+        // Session lifecycle), not just the worker adapter underneath it
+        // (the block below drives that worker directly, mailbox and all).
+        {
+            const segment_bytes = try std.Io.Dir.cwd().readFileAlloc(
+                harness_io,
+                ".models/selfie_segmenter.tflite",
+                gpa,
+                .limited(16 << 20),
+            );
+            defer gpa.free(segment_bytes);
+
+            const enable_seg = abi.ck_session_enable_segmentation(session, segment_bytes.ptr, segment_bytes.len, 2);
+            if (enable_seg != .ok) {
+                try out.print("abi enable segmentation: {s}\n", .{@tagName(enable_seg)});
+                try out.flush();
+                return 1;
+            }
+
+            const feed_seg = abi.ck_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2);
+            if (feed_seg != .ok) return 1;
+
+            const worker = session.segmentation_worker orelse return 1;
+            var mask: [segmentation.mask_len]f32 = undefined;
+            var abi_polls: usize = 0;
+            while (!segmentation.readMask(worker, &mask)) {
+                std.Thread.yield() catch {};
+                abi_polls += 1;
+                if (abi_polls > 100_000_000) {
+                    try out.print("abi segmentation: timed out\n", .{});
+                    try out.flush();
+                    return 1;
+                }
+            }
+            var abi_mask_min: f32 = 1.0;
+            var abi_mask_max: f32 = 0.0;
+            for (mask) |value| {
+                if (value < 0.0 or value > 1.0) return 1;
+                abi_mask_min = @min(abi_mask_min, value);
+                abi_mask_max = @max(abi_mask_max, value);
+            }
+            try out.print("abi segmentation: mask range [{d:.3}, {d:.3}]\n", .{ abi_mask_min, abi_mask_max });
+            try out.flush();
+            if (abi_mask_max - abi_mask_min < 0.05) return 1;
+        }
+
+        // Segmentation, through the real worker adapter rather than a
+        // bare engine call: the same latest-wins NV12 mailbox and worker
+        // thread a shell would drive, proving the mutex-guarded mask
+        // buffer end to end (not graph.ResultSlot's seqlock - that copies
+        // its payload one atomic word at a time, fine for face.Result's
+        // few kilobytes but tens of thousands of individual atomic ops
+        // per mask at frame rate).
+        {
+            const segment_bytes = try std.Io.Dir.cwd().readFileAlloc(
+                harness_io,
+                ".models/selfie_segmenter.tflite",
+                gpa,
+                .limited(16 << 20),
+            );
+            defer gpa.free(segment_bytes);
+
+            const seg = try segmentation.create(gpa, segment_bytes, 2);
+            defer segmentation.destroy(seg);
+
+            // The same corpus portrait the face pipeline already proved
+            // itself against, already converted to NV12 above - real
+            // preprocessing through the worker's own crop (the whole
+            // frame, letterboxed to square, matching face detection's
+            // first pass) rather than a synthetic frame, so a layout bug
+            // in the crop or the custom op's upsample would show up as a
+            // degenerate (near-uniform) mask rather than passing on
+            // arbitrary input.
+            segmentation.submitNv12(
+                seg,
+                planes.width,
+                planes.height,
+                1000,
+                math.color.yuvToRgb(.bt601, .full),
+                planes.y.ptr,
+                planes.width,
+                planes.uv.ptr,
+                ((planes.width + 1) / 2) * 2,
+            );
+
+            var mask: [segmentation.mask_len]f32 = undefined;
+            var mask_polls: usize = 0;
+            while (!segmentation.readMask(seg, &mask)) {
+                std.Thread.yield() catch {};
+                mask_polls += 1;
+                if (mask_polls > 100_000_000) {
+                    try out.print("segmentation: timed out\n", .{});
+                    try out.flush();
+                    return 1;
+                }
+            }
+
+            var mask_min: f32 = 1.0;
+            var mask_max: f32 = 0.0;
+            for (mask) |value| {
+                // The model's last op is a sigmoid (LOGISTIC) - every value
+                // in range proves the custom op hasn't silently truncated
+                // the upsample or lost the bias, since garbage here is what
+                // an offset/layout bug in the transpose-conv would produce.
+                if (value < 0.0 or value > 1.0) return 1;
+                mask_min = @min(mask_min, value);
+                mask_max = @max(mask_max, value);
+            }
+            try out.print("segmentation: mask {d} values, range [{d:.3}, {d:.3}]\n", .{ mask.len, mask_min, mask_max });
+            try out.flush();
+            // A portrait must separate subject from background; a mask
+            // that reads back near-flat means the crop or the upsample
+            // lost the input's real structure somewhere.
+            if (mask_max - mask_min < 0.05) return 1;
+        }
+
         // Beauty through the same public surface, fed by the session's own
         // tracking result.
         if (comptime !beauty_available) {
@@ -524,7 +644,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         defer corpus.deinit();
         const image = corpus.frame;
 
-        sampler.sampleRegion(image, face.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
+        sampler.sampleRegion(image, sampler.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
         try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
         try detector_engine.invoke();
         const found = detector.decode(
@@ -536,7 +656,7 @@ pub fn main(init_args: std.process.Init) !u8 {
             candidates,
         );
         if (found.len == 0) return 1;
-        const region = face.regionFromDetection(found[0], face.frameSquare(image.width, image.height));
+        const region = face.regionFromDetection(found[0], sampler.frameSquare(image.width, image.height));
         sampler.sampleRegion(image, region, .unit, landmark_side, landmark_tensor);
         try landmarks_engine.writeInput(0, std.mem.sliceAsBytes(landmark_tensor));
         try landmarks_engine.invoke();
