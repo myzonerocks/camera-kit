@@ -14,6 +14,7 @@ const graph = @import("graph");
 const math = @import("math");
 const render = @import("render");
 const tracking = @import("tracking");
+const segmentation = @import("segmentation");
 const face = @import("face");
 const beauty = @import("beauty");
 const manifest = @import("manifest");
@@ -175,6 +176,14 @@ pub const Session = struct {
     current: ?CurrentFrame = null,
     copied_frames: u64 = 0,
     face_tracking: ?*tracking.Tracking = null,
+    segmentation_worker: ?*segmentation.Segmentation = null,
+    /// The most recent mask, uploaded as a real GPU texture the same way
+    /// a lut.pass asset is - a raw byte array has no reason to cross the
+    /// frozen ABI surface when nothing outside the render thread ever
+    /// needs it, and a 256x256 texture upload is far cheaper than
+    /// copying the mask through it. Recreated (not reused) each time a
+    /// fresh mask is ready, since bgfx's static textures are immutable.
+    segmentation_texture: ?render.TextureHandle = null,
     beauty_chain: ?*beauty.Beauty = null,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
@@ -349,6 +358,9 @@ pub fn destroySession(session: *Session) void {
     session.beauty_chain = null;
     if (session.face_tracking) |worker| tracking.destroy(worker);
     session.face_tracking = null;
+    if (session.segmentation_worker) |worker| segmentation.destroy(worker);
+    session.segmentation_worker = null;
+    destroySegmentationTexture(session);
     releaseCurrentFrame(session);
     session.engine.gpa.destroy(session);
 }
@@ -433,6 +445,7 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
     if (session) |s| {
         pollLutLoaders(s, r, s.engine.gpa);
+        pollSegmentationMask(s);
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
@@ -624,6 +637,31 @@ pub export fn ck_session_disable_face_tracking(session: ?*Session) void {
     s.face_tracking = null;
 }
 
+/// Stands the segmentation worker up from a raw model (selfie or hair
+/// segmenter, not bundled the way face_landmarker.task is). The model
+/// bytes are copied; the caller may release them on return. On platforms
+/// built without the inference stack this reports unsupported.
+pub export fn ck_session_enable_segmentation(session: ?*Session, model_bytes: ?[*]const u8, model_len: usize, threads: i32) Status {
+    const s = session orelse return .invalid_argument;
+    const bytes = model_bytes orelse return .invalid_argument;
+    if (model_len == 0) return .invalid_argument;
+    if (s.segmentation_worker != null) return .ok;
+    const worker_threads = if (threads <= 0) 2 else threads;
+    s.segmentation_worker = segmentation.create(s.engine.gpa, bytes[0..model_len], worker_threads) catch |err| switch (err) {
+        error.Unsupported => return .unsupported,
+        error.InvalidModel => return .invalid_argument,
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn ck_session_disable_segmentation(session: ?*Session) void {
+    const s = session orelse return;
+    if (s.segmentation_worker) |worker| segmentation.destroy(worker);
+    s.segmentation_worker = null;
+    destroySegmentationTexture(s);
+}
+
 /// Feeds one NV12 frame to the tracking worker. The planes are CPU
 /// addresses valid for the duration of the call; the worker copies and
 /// returns immediately, dropping stale frames in favor of this one.
@@ -632,7 +670,7 @@ pub export fn ck_session_track_frame(session: ?*Session, desc: ?*const FrameDesc
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    const worker = s.face_tracking orelse return .again;
+    if (s.face_tracking == null and s.segmentation_worker == null) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (d.width == 0 or d.height == 0) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -642,17 +680,13 @@ pub export fn ck_session_track_frame(session: ?*Session, desc: ?*const FrameDesc
         else => .bt709,
     };
     const range: math.color.Range = if (d.color_range == 1) .full else .video;
-    tracking.submitNv12(
-        worker,
-        d.width,
-        d.height,
-        d.timestamp_us,
-        math.color.yuvToRgb(standard, range),
-        y_plane,
-        y_stride,
-        uv_plane,
-        uv_stride,
-    );
+    const conversion = math.color.yuvToRgb(standard, range);
+    if (s.face_tracking) |worker| {
+        tracking.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    if (s.segmentation_worker) |worker| {
+        segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
     return .ok;
 }
 
@@ -748,6 +782,32 @@ fn destroyChainOrder(session: *Session) void {
 /// texture for the session's current lens - a load still running when
 /// its lens deactivates is not a leak, just a loader whose result
 /// nobody will ever collect.
+fn destroySegmentationTexture(session: *Session) void {
+    const texture = session.segmentation_texture orelse return;
+    if (session.engine.renderer) |*r| r.destroyTexture(texture);
+    session.segmentation_texture = null;
+}
+
+/// Turns the newest published mask into a real GPU texture - runs every
+/// frame from ck_engine_render_frame since texture creation belongs on
+/// the render thread, mirroring pollLutLoaders. Replaces the previous
+/// texture outright since bgfx's static textures are immutable; nothing
+/// consumes segmentation_texture yet (background-swap compositing is
+/// future work), so this only ever does the upload.
+fn pollSegmentationMask(session: *Session) void {
+    const worker = session.segmentation_worker orelse return;
+    var mask: [segmentation.mask_len]f32 = undefined;
+    if (!segmentation.readMask(worker, &mask)) return;
+
+    var bytes: [segmentation.mask_len]u8 = undefined;
+    for (mask, 0..) |value, i| {
+        bytes[i] = @intFromFloat(std.math.clamp(value, 0.0, 1.0) * 255.0);
+    }
+    const texture = render.Renderer.createMaskTexture(segmentation.mask_side, segmentation.mask_side, &bytes);
+    destroySegmentationTexture(session);
+    session.segmentation_texture = texture;
+}
+
 fn destroyLutState(session: *Session) void {
     var loader_it = session.lut_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();

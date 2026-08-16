@@ -80,6 +80,13 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub fn createMaskTexture(width: u16, height: u16, mask: []const u8) TextureHandle {
+        _ = width;
+        _ = height;
+        _ = mask;
+        return .{};
+    }
+
     pub fn submitPreview(r: *Renderer, view_id: u8, preview: PreviewFrame, rotation_degrees: u32, mirror: bool) void {
         _ = r;
         _ = view_id;

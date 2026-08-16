@@ -190,6 +190,7 @@ pub fn build(b: *std.Build) void {
     });
     abi_module.addImport("face", face_module);
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
+    abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
 
     const lens_manifest_module = b.createModule(.{
@@ -574,6 +575,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "render", .module = render_stub_module },
                 .{ .name = "face", .module = face_module },
                 .{ .name = "tracking", .module = tracking_real_module },
+                .{ .name = "segmentation", .module = segmentation_module },
                 .{ .name = "manifest", .module = lens_manifest_module },
                 .{ .name = "trigger", .module = lens_trigger_module },
                 .{ .name = "runtime", .module = lens_runtime_module },
@@ -721,6 +723,7 @@ pub fn build(b: *std.Build) void {
         const tracking_cores_wasm = trackingCoreModules(b, wasm_target, .ReleaseSmall, math_wasm);
         abi_wasm.addImport("face", tracking_cores_wasm.face);
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, math_wasm));
+        abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
             .root_source_file = b.path("core/lens/manifest.zig"),
@@ -962,6 +965,12 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             },
         });
         abi_android.addImport("tracking", tracking_android);
+        // Segmentation stays on the stub here even though the inference
+        // stack is present: the custom op needs its own linked module
+        // instance the same way runtime_ios/runtime_android do, real
+        // work for when something on this platform actually calls the
+        // worker (see docs/private/todo.md).
+        abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
         const face106_android = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = android_target,
@@ -980,6 +989,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         abi_android.addImport("beauty", beauty_android_module);
     } else {
         abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
+        abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
     const android_asset = realAssetModules(b, android_target, optimize);
@@ -1154,6 +1164,15 @@ fn trackingStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
             .{ .name = "face", .module = face_module },
             .{ .name = "math", .module = math_module },
         },
+    });
+}
+
+fn segmentationStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/tracking/segmentation_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_module }},
     });
 }
 
@@ -2335,6 +2354,12 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             },
         });
         abi_ios.addImport("tracking", tracking_ios);
+        // Segmentation stays on the stub here even though the inference
+        // stack is present: the custom op needs its own linked module
+        // instance the same way runtime_ios does, real work for when
+        // something on this platform actually calls the worker (see
+        // docs/private/todo.md).
+        abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
         const face106_ios = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = ios_target,
@@ -2369,6 +2394,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
         inference_libs.appendSlice(b.allocator, family_libs.items) catch @panic("oom");
     } else {
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
+        abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
     const ios_asset = realAssetModules(b, ios_target, optimize);

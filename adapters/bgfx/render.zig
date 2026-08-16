@@ -292,6 +292,14 @@ pub const Renderer = struct {
         return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, c.bgfx_copy(rgba.ptr, @intCast(rgba.len)), 0);
     }
 
+    /// Uploads a single-channel mask (a segmentation result, say) as a
+    /// real GPU texture - the same immutable, copy-once shape as
+    /// createStaticTexture, just one byte per pixel instead of four,
+    /// since a mask has no color to carry.
+    pub fn createMaskTexture(width: u16, height: u16, mask: []const u8) TextureHandle {
+        return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_R8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, c.bgfx_copy(mask.ptr, @intCast(mask.len)), 0);
+    }
+
     /// Full-screen quad geometry and the view's transform, shared by
     /// submitPreview and submitShaderPass - the two differ only in which
     /// program and textures they bind afterward.
