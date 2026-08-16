@@ -318,6 +318,11 @@ fn forbiddenExtension(path: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, path, "lenses/") and std.mem.endsWith(u8, path, ".png") and std.mem.indexOf(u8, path, "/assets/") != null) {
         return null;
     }
+    // The web demo's own beauty LUT textures - same reasoning, real
+    // bundle content copied in once rather than fetched or built.
+    if (std.mem.startsWith(u8, path, "shells/ts/demo/res/") and std.mem.endsWith(u8, path, ".png")) {
+        return null;
+    }
     for (forbidden_extensions) |ext| {
         if (std.mem.endsWith(u8, path, ext)) return ext;
     }
@@ -369,6 +374,7 @@ test "forbidden extensions catch artifact classes" {
     // reference lens's own assets/ directory is real bundle content.
     try std.testing.expectEqualStrings(".png", forbiddenExtension("shells/kotlin/demo/src/main/assets/res/mouth.png").?);
     try std.testing.expect(forbiddenExtension("lenses/reference/background-swap/assets/beach.png") == null);
+    try std.testing.expect(forbiddenExtension("shells/ts/demo/res/lookup_gray.png") == null);
 }
 
 test "banned tokens match case-insensitively and only when present" {

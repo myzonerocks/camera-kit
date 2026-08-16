@@ -9,12 +9,16 @@
   canvas { width: 100vw; height: 100vh; display: block; }
   #overlay { position: fixed; inset: 0; pointer-events: none; }
   #status { position: fixed; top: 12px; left: 12px; color: #fff; font: 13px monospace; white-space: pre; }
+  #controls { position: fixed; bottom: 12px; left: 12px; color: #fff; font: 13px monospace; }
 </style>
 </head>
 <body>
 <canvas id="preview" width="1280" height="720"></canvas>
 <canvas id="overlay" width="1280" height="720"></canvas>
 <div id="status">loading</div>
+<div id="controls">
+  whiten <input id="whiten" type="range" min="0" max="1" step="0.01" value="0">
+</div>
 <script type="module" src="dist.js"></script>
 </body>
 </html>

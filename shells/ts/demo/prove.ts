@@ -70,6 +70,43 @@ for (let waited = 0; waited < 30_000; waited += 1000) {
   }
 }
 
+// Freeze the source frame (the fake capture device otherwise keeps
+// moving, which would confound a before/after compare with its own
+// animation) and confirm turning whiten on actually changes the
+// rendered output, not just that the page renders something.
+let whiten = "";
+for (let waited = 0; waited < 30_000; waited += 500) {
+  await Bun.sleep(500);
+  const ready = (await send("Runtime.evaluate", {
+    expression: "Boolean(window.whitenLutsReady)",
+    returnByValue: true,
+  })) as { result?: { value?: boolean } };
+  if (ready.result?.value) break;
+}
+{
+  const evaluate = async (expression: string) =>
+    (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })) as {
+      result?: { value?: unknown };
+    };
+  // A single fixed pixel is too fragile a probe - the fake capture
+  // device's test pattern can leave any one point dark for a long
+  // stretch. Sum every RGBA byte across the whole canvas instead, so
+  // any change the whiten pass makes anywhere on screen shows up.
+  await evaluate("window.setWhiten(0)");
+  await evaluate("window.freezeCamera()");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const before = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  await evaluate("window.setWhiten(1)");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const after = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  const delta = before !== undefined && after !== undefined ? Math.abs(after - before) : -1;
+  if (before !== undefined && after !== undefined && delta > 0) {
+    whiten = `CKWEB whiten: frame sum ${before} -> ${after}, delta ${delta}`;
+  } else {
+    whiten = `FAIL whiten: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
+  }
+}
+
 // The tracking pass: wait for the worker, then one corpus portrait must
 // track and the control frame must not.
 let tracking = "";
@@ -126,11 +163,15 @@ const statusResult = (await send("Runtime.evaluate", {
 })) as { result?: { value?: string } };
 
 chrome.kill();
-if (proof && tracking && !tracking.startsWith("FAIL")) {
+if (proof && whiten && !whiten.startsWith("FAIL") && tracking && !tracking.startsWith("FAIL")) {
   console.log(proof);
+  console.log(whiten);
   console.log(tracking);
   console.log(`status: ${statusResult.result?.value}`);
   process.exit(0);
+}
+if (whiten) {
+  console.log(whiten);
 }
 if (tracking) {
   console.log(tracking);
