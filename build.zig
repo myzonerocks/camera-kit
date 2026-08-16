@@ -339,6 +339,45 @@ pub fn build(b: *std.Build) void {
         break :blk null;
     };
 
+    // lodepng lives inside bimg's vendored tree (bgfx's own image
+    // dependency); a lens asset decoder wants only this one file out of
+    // it, not the rest of the render stack, so it gets its own probe
+    // rather than riding on have_render_stack below.
+    const have_lodepng = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/bimg/3rdparty/lodepng/lodepng.cpp", .{}) catch break :blk false;
+        break :blk true;
+    };
+    const image_module: ?*std.Build.Module = if (have_lodepng) blk: {
+        const m = b.createModule(.{
+            .root_source_file = b.path("adapters/image/image.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        m.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
+        m.addCSourceFile(.{
+            .file = b.path("harness/lodepng_impl.c"),
+            .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+        });
+        m.link_libc = true;
+        const image_tests = b.addTest(.{ .root_module = m });
+        test_step.dependOn(&b.addRunArtifact(image_tests).step);
+        break :blk m;
+    } else blk: {
+        const missing = b.addFail("camera-kit: .vendor/bimg missing, run zig build vendor-sync");
+        test_step.dependOn(&missing.step);
+        break :blk null;
+    };
+    if (image_module) |im| {
+        const asset_module = b.createModule(.{
+            .root_source_file = b.path("adapters/asset/asset.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "image", .module = im }},
+        });
+        const asset_tests = b.addTest(.{ .root_module = asset_module });
+        test_step.dependOn(&b.addRunArtifact(asset_tests).step);
+    }
+
     // The desktop harness draws through the real render stack. It exists
     // only where its vendors are synced and the host is supported.
     const have_render_stack = blk: {
