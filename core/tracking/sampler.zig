@@ -51,6 +51,19 @@ pub const Range = struct {
     pub const symmetric: Range = .{ .gain = 2.0, .bias = -1.0 };
 };
 
+/// The whole frame, centered and letterboxed to its longer side - every
+/// model that runs over the full image rather than a cropped subject
+/// (face detection's own first pass, segmentation) starts from this same
+/// region.
+pub fn frameSquare(width: u32, height: u32) Region {
+    return .{
+        .center_x = @as(f32, @floatFromInt(width)) * 0.5,
+        .center_y = @as(f32, @floatFromInt(height)) * 0.5,
+        .side = @floatFromInt(@max(width, height)),
+        .rotation = 0,
+    };
+}
+
 /// Fills `out` with side*side RGB float pixels sampled from the region.
 /// Samples falling outside the frame read as black, matching how the
 /// models were trained on border padding.

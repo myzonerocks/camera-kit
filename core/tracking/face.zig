@@ -87,17 +87,6 @@ pub const blendshape_subset = [146]u16{
 pub const rotation_start_landmark = 33;
 pub const rotation_end_landmark = 263;
 
-/// The square the detector samples: the whole frame, centered, padded to
-/// square on the long side.
-pub fn frameSquare(width: u32, height: u32) sampler.Region {
-    return .{
-        .center_x = @as(f32, @floatFromInt(width)) * 0.5,
-        .center_y = @as(f32, @floatFromInt(height)) * 0.5,
-        .side = @floatFromInt(@max(width, height)),
-        .rotation = 0,
-    };
-}
-
 fn mapToFrame(square: sampler.Region, u: f32, v: f32) [2]f32 {
     return .{
         square.center_x + (u - 0.5) * square.side,
@@ -205,7 +194,7 @@ test "level eyes produce an unrotated crop" {
     detection.height = 0.3;
     detection.keypoints[0] = .{ 0.4, 0.5 };
     detection.keypoints[1] = .{ 0.6, 0.5 };
-    const square = frameSquare(640, 480);
+    const square = sampler.frameSquare(640, 480);
     const region = regionFromDetection(detection, square);
     try t.expectApproxEqAbs(@as(f32, 0.0), region.rotation, 1e-6);
     try t.expectApproxEqAbs(@as(f32, 320.0), region.center_x, 1e-3);
@@ -217,7 +206,7 @@ test "a tilted eye line rotates the crop level" {
     var detection = std.mem.zeroes(detector.Detection);
     detection.keypoints[0] = .{ 0.5, 0.5 };
     detection.keypoints[1] = .{ 0.5, 0.6 }; // left eye straight below right
-    const region = regionFromDetection(detection, frameSquare(100, 100));
+    const region = regionFromDetection(detection, sampler.frameSquare(100, 100));
     try t.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), @abs(region.rotation), 1e-5);
 }
 

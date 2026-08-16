@@ -229,7 +229,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     const tensor_len = @as(usize, input_side) * input_side * 3;
     const input_tensor = try gpa.alloc(f32, tensor_len);
     defer gpa.free(input_tensor);
-    sampler.sampleRegion(frame, face.frameSquare(frame_width, frame_height), .symmetric, input_side, input_tensor);
+    sampler.sampleRegion(frame, sampler.frameSquare(frame_width, frame_height), .symmetric, input_side, input_tensor);
     try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
     try detector_engine.invoke();
 
@@ -265,7 +265,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         defer corpus.deinit();
         const image = corpus.frame;
 
-        sampler.sampleRegion(image, face.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
+        sampler.sampleRegion(image, sampler.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
         try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
         try detector_engine.invoke();
         const found = detector.decode(
@@ -308,7 +308,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         }
         if (found.len == 0) return 1;
 
-        const region = face.regionFromDetection(found[0], face.frameSquare(image.width, image.height));
+        const region = face.regionFromDetection(found[0], sampler.frameSquare(image.width, image.height));
         sampler.sampleRegion(image, region, .unit, landmark_side, landmark_tensor);
         try landmarks_engine.writeInput(0, std.mem.sliceAsBytes(landmark_tensor));
         try landmarks_engine.invoke();
@@ -565,7 +565,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         defer corpus.deinit();
         const image = corpus.frame;
 
-        sampler.sampleRegion(image, face.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
+        sampler.sampleRegion(image, sampler.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
         try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
         try detector_engine.invoke();
         const found = detector.decode(
@@ -577,7 +577,7 @@ pub fn main(init_args: std.process.Init) !u8 {
             candidates,
         );
         if (found.len == 0) return 1;
-        const region = face.regionFromDetection(found[0], face.frameSquare(image.width, image.height));
+        const region = face.regionFromDetection(found[0], sampler.frameSquare(image.width, image.height));
         sampler.sampleRegion(image, region, .unit, landmark_side, landmark_tensor);
         try landmarks_engine.writeInput(0, std.mem.sliceAsBytes(landmark_tensor));
         try landmarks_engine.invoke();
