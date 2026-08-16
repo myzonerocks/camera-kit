@@ -1,4 +1,4 @@
-//! manifest.json parsing and structural validation, against lenses/SPEC.md.
+//! manifest.json parsing and structural validation for a lens bundle.
 //! A trigger's `when` expression is carried here as its raw source string
 //! only; compiling it into the typed expression tree is trigger.zig's job,
 //! since the grammar is its own closed production set. Every rejection
@@ -83,10 +83,10 @@ pub const Trigger = struct {
     action: Action,
 };
 
-/// A range over the ABI's major.minor, the grammar shown in SPEC.md 2:
-/// an optional lower bound (>= or >) and optional upper bound (< or <=),
-/// space separated, each `major.minor`. Anything wider is out of scope for
-/// GLF 1.0, which only ever needs to express "at least this, before that".
+/// A range over the ABI's major.minor: an optional lower bound (>= or >)
+/// and optional upper bound (< or <=), space separated, each
+/// `major.minor`. Anything wider is out of scope for GLF 1.0, which
+/// only ever needs to express "at least this, before that".
 pub const EngineRange = struct {
     has_min: bool = false,
     min_major: u16 = 0,
@@ -687,9 +687,9 @@ fn parseTriggers(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack
     return try out.toOwnedSlice(arena);
 }
 
-/// Parses and structurally validates one manifest.json against SPEC.md:
-/// bundle-independent limits, the top level schema, engine_compat,
-/// capability names, and cross references between nodes/params/triggers.
+/// Parses and structurally validates one manifest.json: bundle-independent
+/// limits, the top level schema, engine_compat, capability names, and
+/// cross references between nodes/params/triggers.
 /// Shader compilation and asset decode are the bundle loader's job, not
 /// this function's - they need the rest of the bundle on disk. Returns
 /// null with diags populated on any validation failure; never partially
@@ -805,8 +805,8 @@ pub fn parse(gpa: std.mem.Allocator, diags: *Diagnostics, source: []const u8) er
 
 /// Node inputs/params referencing an id or parameter that does not exist,
 /// and trigger actions referencing a node id or parameter that does not
-/// exist: SPEC.md section 8 calls this out as its own validation stage,
-/// after the per-array shapes above are already known good.
+/// exist - its own validation stage, run only after the per-array shapes
+/// above are already known good.
 fn crossReference(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocator, manifest: *const Manifest) error{OutOfMemory}!void {
     var node_ids = std.StringHashMap(void).init(arena);
     for (manifest.nodes) |node| try node_ids.put(node.id, {});
@@ -818,8 +818,9 @@ fn crossReference(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocato
         const node_mark = path.pushIndex(i);
         const inputs_mark = path.push("inputs");
         for (node.inputs) |input| {
-            // "camera" is the implicit capture input SPEC.md section 5
-            // names; every other source must be a node id declared above.
+            // "camera" is the implicit capture input every lens graph
+            // starts from; every other source must be a node id declared
+            // above.
             if (!std.mem.eql(u8, input.source, "camera") and !node_ids.contains(input.source)) {
                 const field_mark = path.push(input.name);
                 try diags.add(path.slice(), "input '{s}' names unknown node id '{s}'", .{ input.name, input.source });

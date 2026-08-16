@@ -1,6 +1,6 @@
 //! Splices one lens's parsed manifest into the session's frame graph and
-//! drives it forward one tick at a time: compiled triggers (SPEC.md 6)
-//! fire their actions on the false-to-true edge, param_ramp/param_set
+//! drives it forward one tick at a time: compiled triggers fire their
+//! actions on the false-to-true edge, param_ramp/param_set
 //! update the lens's own live parameter values, and animation.Ramp
 //! carries an in-flight ramp to its target at the fixed graph timestep.
 //! This module knows the shape of a running lens - node splice/unsplice,
@@ -9,8 +9,8 @@
 //! caller (core/abi) walks tick()'s returned effect values and is the
 //! one that knows how to hand them to the engine.
 //!
-//! Node types are the closed, kit-versioned vocabulary SPEC.md 5 names
-//! (not the format's concern): only the beauty family is wired here.
+//! Node types are the closed, kit-versioned vocabulary a lens manifest
+//! can name: only the beauty family is wired here.
 //! Shader passes, glTF draws, LUT passes, and compositing are real
 //! remaining work, deliberately not stubbed in ahead of their own
 //! execution landing.
@@ -34,7 +34,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -42,16 +42,18 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.lipstick")) return .beauty_lipstick;
     if (std.mem.eql(u8, type_str, "beauty.blusher")) return .beauty_blusher;
     if (std.mem.eql(u8, type_str, "shader.pass")) return .shader_pass;
+    if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
     return null;
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };
 
 /// The param names each node type accepts and which effect slot each one
-/// drives - the only place that mapping is declared. shader.pass has no
-/// effect-slot params of its own (SPEC.md 7): which shader it runs is
-/// its id, resolved against shaders/<id>.glsl, the same way a node's id
-/// already resolves against other nodes for wiring.
+/// drives - the only place that mapping is declared. shader.pass and
+/// lut.pass have no effect-slot params of their own: each one's id
+/// names the asset it runs (a shader source file or a LUT image), the
+/// same way a node's id already resolves against other nodes for
+/// wiring.
 fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
     return switch (node_type) {
         .beauty_face => &.{
@@ -64,7 +66,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass => &.{},
+        .shader_pass, .lut_pass => &.{},
     };
 }
 
@@ -79,20 +81,38 @@ const LensNode = struct {
     graph_index: graph.NodeIndex,
     node_type: NodeType,
     bindings: [effect_slot_count]?ParamSource = @splat(null),
-    /// Set only for .shader_pass nodes: the node's own id, which is also
-    /// the shader's basename (shaders/<shader_stem>.glsl) - a slice into
-    /// the Lens's own retained manifest arena, not separately owned.
-    shader_stem: ?[]const u8 = null,
+    /// Set only for .shader_pass and .lut_pass nodes: the node's own id,
+    /// which also names the asset it runs (shaders/<id>.glsl for
+    /// shader.pass, assets/<id>.png for lut.pass) - a slice into the
+    /// Lens's own retained manifest arena, not separately owned.
+    asset_stem: ?[]const u8 = null,
 };
 
 /// One shader.pass node ready for the caller to load and draw - which
-/// graph node it is, and the shader (shaders/<shader_stem>.glsl, plus
-/// its packaged shaders/<shader_stem>.<profile>.bin variants) it names.
-/// This module has no bgfx dependency of its own; the caller resolves
-/// shader_stem into actual bytes and does the real rendering work.
+/// graph node it is, and the shader (shaders/<stem>.glsl, plus its
+/// packaged shaders/<stem>.<profile>.bin variants) it names. This
+/// module has no bgfx dependency of its own; the caller resolves the
+/// stem into actual bytes and does the real rendering work.
 pub const ShaderPassNode = struct {
     graph_index: graph.NodeIndex,
     shader_stem: []const u8,
+};
+
+/// One lut.pass node ready for the caller to load and draw - which
+/// graph node it is, and the LUT image (assets/<stem>.png) it names.
+pub const LutPassNode = struct {
+    graph_index: graph.NodeIndex,
+    lut_stem: []const u8,
+};
+
+pub const PassKind = enum { shader, lut };
+
+/// One shader.pass or lut.pass node, tagged with which - the caller's
+/// real draw order for a chain that may mix both kinds, since the
+/// graph itself makes no distinction between them beyond node_type.
+pub const CompositePass = struct {
+    graph_index: graph.NodeIndex,
+    kind: PassKind,
 };
 
 pub const ActivateError = error{
@@ -136,17 +156,63 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
-    /// Every shader.pass node this lens spliced, in splice order - what
-    /// the caller loads and creates a program for once, right after
-    /// activation, before the first frame draws.
-    pub fn shaderPassNodes(self: *const Lens, gpa: std.mem.Allocator) std.mem.Allocator.Error![]ShaderPassNode {
+    /// Every shader.pass node this lens spliced, in the graph's real
+    /// execution order - the order a chain of passes must draw in so
+    /// each one sees the previous stage's output, not just the order
+    /// they happened to be declared in the manifest. g must be the same
+    /// graph this lens was activated into.
+    pub fn shaderPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]ShaderPassNode {
+        const order = try g.executionOrder();
         var out: std.ArrayList(ShaderPassNode) = .empty;
         errdefer out.deinit(gpa);
-        for (self.nodes) |node| {
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .shader_pass) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.shader_stem.? });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.asset_stem.? });
         }
         return out.toOwnedSlice(gpa);
+    }
+
+    /// Every lut.pass node this lens spliced, in the graph's real
+    /// execution order - mirrors shaderPassNodes exactly, one node type
+    /// over.
+    pub fn lutPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]LutPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(LutPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .lut_pass) continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .lut_stem = node.asset_stem.? });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every shader.pass and lut.pass node this lens spliced, in one
+    /// real execution-order sequence - the actual draw order for a
+    /// chain that mixes both kinds, which shaderPassNodes/lutPassNodes
+    /// alone cannot express since each only ever sees its own kind.
+    pub fn compositePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]CompositePass {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(CompositePass) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            const kind: PassKind = switch (node.node_type) {
+                .shader_pass => .shader,
+                .lut_pass => .lut,
+                else => continue,
+            };
+            try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    fn findNode(self: *const Lens, graph_index: graph.NodeIndex) ?LensNode {
+        for (self.nodes) |node| {
+            if (node.graph_index == graph_index) return node;
+        }
+        return null;
     }
 
     fn collectNodeEffects(self: *const Lens, gpa: std.mem.Allocator, out: *std.ArrayList(AppliedEffect), node: LensNode) !void {
@@ -162,8 +228,8 @@ pub const Lens = struct {
 };
 
 /// Splices lens_manifest's node subgraph into g, wired to camera_node
-/// wherever a node's input names the implicit "camera" source (SPEC.md
-/// 5). Every trigger's `when` source compiles here too - the validator
+/// wherever a node's input names the implicit "camera" source. Every
+/// trigger's `when` source compiles here too - the validator
 /// already proved a shipped bundle's triggers compile clean, so a
 /// compile failure at activation is a caller bug (a hand-built manifest
 /// that skipped validation), not a normal-operation error path.
@@ -223,7 +289,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         nodes[spliced_count] = .{
             .graph_index = graph_index,
             .node_type = node_type,
-            .shader_stem = if (node_type == .shader_pass) node.id else null,
+            .asset_stem = if (node_type == .shader_pass or node_type == .lut_pass) node.id else null,
         };
 
         for (node.inputs) |input| {
@@ -282,7 +348,7 @@ fn clampToParam(p: manifest.Parameter, value: f32) f32 {
 }
 
 /// Advances every in-flight ramp by real_dt_us, fires every trigger that
-/// just transitioned false-to-true (SPEC.md 6), and returns the effect
+/// just transitioned false-to-true, and returns the effect
 /// values that changed as a result - only param_set/param_ramp are
 /// handled here; show/hide/play_animation/swap_subgraph/reset_timer are
 /// not yet wired to anything (deliberately, see the module doc).
@@ -427,11 +493,138 @@ test "a shader.pass node splices with no effect bindings and resolves its shader
     defer t.allocator.free(effects);
     try t.expectEqual(@as(usize, 0), effects.len);
 
-    const passes = try lens.shaderPassNodes(t.allocator);
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
     defer t.allocator.free(passes);
     try t.expectEqual(@as(usize, 1), passes.len);
     try t.expectEqualStrings("tint", passes[0].shader_stem);
     try t.expectEqual(lens.nodes[0].graph_index, passes[0].graph_index);
+}
+
+const shader_chain_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.shaderchain", "version": "1.0.0", "display_name": "Shader Chain",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "warm", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}},
+    \\    {"id": "vignette", "type": "shader.pass", "inputs": {"frame": "warm"}, "params": {}},
+    \\    {"id": "grain", "type": "shader.pass", "inputs": {"frame": "vignette"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "shaderPassNodes orders a multi-pass chain by real graph dependency, not declaration position" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, shader_chain_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 3), passes.len);
+    try t.expectEqualStrings("warm", passes[0].shader_stem);
+    try t.expectEqualStrings("vignette", passes[1].shader_stem);
+    try t.expectEqualStrings("grain", passes[2].shader_stem);
+}
+
+const lut_pass_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.lutpass", "version": "1.0.0", "display_name": "LUT Pass",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "warm-lut", "type": "lut.pass", "inputs": {"frame": "camera"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a lut.pass node splices with no effect bindings and resolves its LUT by id" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, lut_pass_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(@as(usize, 1), lens.nodes.len);
+    try t.expectEqual(NodeType.lut_pass, lens.nodes[0].node_type);
+
+    const effects = try lens.currentEffects(t.allocator);
+    defer t.allocator.free(effects);
+    try t.expectEqual(@as(usize, 0), effects.len);
+
+    const luts = try lens.lutPassNodes(t.allocator, &g);
+    defer t.allocator.free(luts);
+    try t.expectEqual(@as(usize, 1), luts.len);
+    try t.expectEqualStrings("warm-lut", luts[0].lut_stem);
+    try t.expectEqual(lens.nodes[0].graph_index, luts[0].graph_index);
+
+    // Neither accessor picks up the other node type's node.
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 0), passes.len);
+}
+
+const mixed_chain_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.mixedchain", "version": "1.0.0", "display_name": "Mixed Chain",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "tint", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}},
+    \\    {"id": "warm-lut", "type": "lut.pass", "inputs": {"frame": "tint"}, "params": {}},
+    \\    {"id": "vignette", "type": "shader.pass", "inputs": {"frame": "warm-lut"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "shader.pass and lut.pass nodes interleave in one chain, each accessor seeing only its own kind in order" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, mixed_chain_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 2), passes.len);
+    try t.expectEqualStrings("tint", passes[0].shader_stem);
+    try t.expectEqualStrings("vignette", passes[1].shader_stem);
+
+    const luts = try lens.lutPassNodes(t.allocator, &g);
+    defer t.allocator.free(luts);
+    try t.expectEqual(@as(usize, 1), luts.len);
+    try t.expectEqualStrings("warm-lut", luts[0].lut_stem);
+}
+
+test "compositePassNodes interleaves both kinds in one real draw-order sequence" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, mixed_chain_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const chain = try lens.compositePassNodes(t.allocator, &g);
+    defer t.allocator.free(chain);
+    try t.expectEqual(@as(usize, 3), chain.len);
+    try t.expectEqual(NodeType.shader_pass, lens.nodes[0].node_type);
+    try t.expectEqual(PassKind.shader, chain[0].kind);
+    try t.expectEqual(PassKind.lut, chain[1].kind);
+    try t.expectEqual(PassKind.shader, chain[2].kind);
+    try t.expectEqual(lens.nodes[0].graph_index, chain[0].graph_index);
+    try t.expectEqual(lens.nodes[1].graph_index, chain[1].graph_index);
+    try t.expectEqual(lens.nodes[2].graph_index, chain[2].graph_index);
 }
 
 test "a trigger firing on the rising edge starts a ramp that settles, does not refire while held, and rearms on the falling edge" {

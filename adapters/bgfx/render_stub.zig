@@ -73,11 +73,33 @@ pub const Renderer = struct {
         _ = handle;
     }
 
-    pub fn submitPreview(r: *Renderer, preview: PreviewFrame, rotation_degrees: u32, mirror: bool) void {
+    pub fn createStaticTexture(width: u16, height: u16, rgba: []const u8) TextureHandle {
+        _ = width;
+        _ = height;
+        _ = rgba;
+        return .{};
+    }
+
+    pub fn submitPreview(r: *Renderer, view_id: u8, preview: PreviewFrame, rotation_degrees: u32, mirror: bool) void {
         _ = r;
+        _ = view_id;
         _ = preview;
         _ = rotation_degrees;
         _ = mirror;
+    }
+
+    pub fn submitShaderPass(r: *Renderer, view_id: u8, program: ProgramHandle, input_texture: TextureHandle) void {
+        _ = r;
+        _ = view_id;
+        _ = program;
+        _ = input_texture;
+    }
+
+    pub fn submitLutPass(r: *Renderer, view_id: u8, input_texture: TextureHandle, lut_texture: TextureHandle) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = lut_texture;
     }
 
     pub fn uploadNv12(r: *Renderer, width: u16, height: u16, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) !Nv12Textures {
@@ -123,8 +145,31 @@ pub const Renderer = struct {
         return error.RendererUnavailable;
     }
 
+    pub fn loadLutProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
     pub fn destroyProgram(program: ProgramHandle) void {
         _ = program;
+    }
+
+    pub const OffscreenTarget = struct { texture: TextureHandle = .{} };
+
+    pub fn createOffscreenTarget(width: u16, height: u16) !OffscreenTarget {
+        _ = width;
+        _ = height;
+        return error.RendererUnavailable;
+    }
+
+    pub fn destroyOffscreenTarget(target: OffscreenTarget) void {
+        _ = target;
+    }
+
+    pub fn setViewTarget(view_id: u8, target: ?OffscreenTarget, width: u16, height: u16) void {
+        _ = view_id;
+        _ = target;
+        _ = width;
+        _ = height;
     }
 };
 

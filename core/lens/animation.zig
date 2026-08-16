@@ -1,4 +1,4 @@
-//! Parameter animation: the two curve primitives in lenses/SPEC.md 6.3.
+//! Parameter animation: the two curve primitives a lens ramp can use.
 //! Both integrate at a fixed simulation step, not wall-clock dt directly,
 //! so the same real-world duration produces the same sequence of values
 //! regardless of the device's actual frame rate - required for the

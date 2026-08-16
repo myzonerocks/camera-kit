@@ -20,6 +20,12 @@ pub const c = @cImport({
 
 pub const invalid_handle: u16 = std.math.maxInt(u16);
 
+/// A named alias for bgfx's own texture handle, matching the stub
+/// module's TextureHandle - lets callers that need to name the type
+/// (a hashmap value type, say) write render.TextureHandle uniformly
+/// against whichever module is actually linked in.
+pub const TextureHandle = c.bgfx_texture_handle_t;
+
 /// The affine color conversion as one homogeneous matrix for the shader.
 pub fn yuvTransform(conversion: math.color.Conversion) math.Mat4 {
     return conversion.homogeneous();
@@ -73,9 +79,11 @@ pub const Renderer = struct {
     layout: c.bgfx_vertex_layout_t,
     rgba_program: c.bgfx_program_handle_t,
     nv12_program: c.bgfx_program_handle_t,
+    lut_program: c.bgfx_program_handle_t,
     tex_color: c.bgfx_uniform_handle_t,
     tex_y: c.bgfx_uniform_handle_t,
     tex_uv: c.bgfx_uniform_handle_t,
+    tex_lut: c.bgfx_uniform_handle_t,
     yuv_uniform: c.bgfx_uniform_handle_t,
     upload_cache: ?UploadCache = null,
 
@@ -131,6 +139,7 @@ pub const Renderer = struct {
             },
             else => return error.RendererUnsupported,
         };
+        const lut_program = try loadLutProgram();
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
@@ -156,9 +165,11 @@ pub const Renderer = struct {
             .layout = layout,
             .rgba_program = rgba_program,
             .nv12_program = nv12_program,
+            .lut_program = lut_program,
             .tex_color = c.bgfx_create_uniform("s_texColor", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_y = c.bgfx_create_uniform("s_texY", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_uv = c.bgfx_create_uniform("s_texUV", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_lut = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
         };
     }
@@ -171,8 +182,8 @@ pub const Renderer = struct {
         return program;
     }
 
-    /// The compiled bytecode file suffix (SPEC.md 7) matching bgfx's
-    /// currently active backend - the one source of truth for which
+    /// The compiled bytecode file suffix matching bgfx's currently
+    /// active backend - the one source of truth for which
     /// packaged shader variant a lens shader pass needs, shared between
     /// loadLensProgram below and whatever reads the bytes off disk.
     pub fn currentShaderProfileTag() ![]const u8 {
@@ -199,6 +210,21 @@ pub const Renderer = struct {
         return loadProgram(vs_blob, fs_bytes);
     }
 
+    /// The one fixed lut.pass program every lens shares - kit-authored,
+    /// so unlike loadLensProgram this takes no bytes; there is nothing
+    /// per-lens to compile for this node type. A real Renderer instance
+    /// builds this once at init and keeps it in lut_program; this
+    /// static form exists so a caller without an instance (a proof, a
+    /// test) can still get the exact same program.
+    pub fn loadLutProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_lut_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_lut_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_lut_pass_essl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     pub fn destroyProgram(program: c.bgfx_program_handle_t) void {
         c.bgfx_destroy_program(program);
     }
@@ -219,9 +245,11 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_color);
         c.bgfx_destroy_uniform(r.tex_y);
         c.bgfx_destroy_uniform(r.tex_uv);
+        c.bgfx_destroy_uniform(r.tex_lut);
         c.bgfx_destroy_uniform(r.yuv_uniform);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
+        c.bgfx_destroy_program(r.lut_program);
         c.bgfx_shutdown();
         if (is_android) {
             if (r.zero_copy) |*zc| {
@@ -255,14 +283,23 @@ pub const Renderer = struct {
         if (handle.idx != invalid_handle) c.bgfx_destroy_texture(handle);
     }
 
-    /// Draws the camera frame as the full-view preview. `rotation_degrees`
-    /// spins the quad for sensor orientation; `mirror` flips horizontally
-    /// for front cameras.
-    pub fn submitPreview(r: *Renderer, preview: PreviewFrame, rotation_degrees: u32, mirror: bool) void {
+    /// Uploads a decoded, immutable image (a lens's LUT, say) as a real
+    /// GPU texture, copying rgba once at creation - unlike
+    /// wrapExternalTexture, there is no live external buffer behind
+    /// this one to keep alive frame over frame. No instance state to
+    /// touch, so this needs no receiver, the same as loadLensProgram.
+    pub fn createStaticTexture(width: u16, height: u16, rgba: []const u8) TextureHandle {
+        return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, c.bgfx_copy(rgba.ptr, @intCast(rgba.len)), 0);
+    }
+
+    /// Full-screen quad geometry and the view's transform, shared by
+    /// submitPreview and submitShaderPass - the two differ only in which
+    /// program and textures they bind afterward.
+    fn setupFullScreenQuad(r: *Renderer, view_id: c.bgfx_view_id_t, rotation_degrees: u32, mirror: bool) bool {
         var tvb: c.bgfx_transient_vertex_buffer_t = undefined;
         var tib: c.bgfx_transient_index_buffer_t = undefined;
-        if (c.bgfx_get_avail_transient_vertex_buffer(4, &r.layout) < 4) return;
-        if (c.bgfx_get_avail_transient_index_buffer(6, false) < 6) return;
+        if (c.bgfx_get_avail_transient_vertex_buffer(4, &r.layout) < 4) return false;
+        if (c.bgfx_get_avail_transient_index_buffer(6, false) < 6) return false;
         c.bgfx_alloc_transient_vertex_buffer(&tvb, 4, &r.layout);
         c.bgfx_alloc_transient_index_buffer(&tib, 6, false);
 
@@ -283,16 +320,23 @@ pub const Renderer = struct {
 
         const view = math.Mat4.identity;
         const proj = math.Mat4.ortho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, .zero_to_one);
-        c.bgfx_set_view_transform(0, &view.cols, &proj.cols);
+        c.bgfx_set_view_transform(view_id, &view.cols, &proj.cols);
 
         c.bgfx_set_transient_vertex_buffer(0, &tvb, 0, 4);
         c.bgfx_set_transient_index_buffer(&tib, 0, 6);
+        return true;
+    }
 
+    /// Draws the camera frame as the full-view preview into view_id.
+    /// `rotation_degrees` spins the quad for sensor orientation; `mirror`
+    /// flips horizontally for front cameras.
+    pub fn submitPreview(r: *Renderer, view_id: c.bgfx_view_id_t, preview: PreviewFrame, rotation_degrees: u32, mirror: bool) void {
+        if (!r.setupFullScreenQuad(view_id, rotation_degrees, mirror)) return;
         switch (preview) {
             .bgra => |f| {
                 c.bgfx_set_texture(0, r.tex_color, f.texture, std.math.maxInt(u32));
                 c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
-                c.bgfx_submit(0, r.rgba_program, 0, c.BGFX_DISCARD_ALL);
+                c.bgfx_submit(view_id, r.rgba_program, 0, c.BGFX_DISCARD_ALL);
             },
             .nv12 => |f| {
                 const transform = yuvTransform(f.conversion);
@@ -300,9 +344,60 @@ pub const Renderer = struct {
                 c.bgfx_set_texture(0, r.tex_y, f.y, std.math.maxInt(u32));
                 c.bgfx_set_texture(1, r.tex_uv, f.uv, std.math.maxInt(u32));
                 c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
-                c.bgfx_submit(0, r.nv12_program, 0, c.BGFX_DISCARD_ALL);
+                c.bgfx_submit(view_id, r.nv12_program, 0, c.BGFX_DISCARD_ALL);
             },
         }
+    }
+
+    /// An offscreen color target a shader pass can render into and a
+    /// later pass (or the same pass's successor in a chain) can sample
+    /// as input - what makes more than one lens shader pass composable
+    /// without each one fighting the others for the swap chain.
+    pub const OffscreenTarget = struct {
+        framebuffer: c.bgfx_frame_buffer_handle_t,
+        texture: c.bgfx_texture_handle_t,
+    };
+
+    pub fn createOffscreenTarget(width: u16, height: u16) !OffscreenTarget {
+        const framebuffer = c.bgfx_create_frame_buffer(width, height, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP);
+        if (framebuffer.idx == invalid_handle) return error.FrameBufferCreate;
+        const texture = c.bgfx_get_texture(framebuffer, 0);
+        return .{ .framebuffer = framebuffer, .texture = texture };
+    }
+
+    pub fn destroyOffscreenTarget(target: OffscreenTarget) void {
+        if (target.framebuffer.idx != invalid_handle) c.bgfx_destroy_frame_buffer(target.framebuffer);
+    }
+
+    /// Assigns view_id's render target: an offscreen target, or the
+    /// swap chain itself when target is null (the last stage in a
+    /// chain always presents to the swap chain). view_rect always
+    /// matches the target's own size, offscreen or not.
+    pub fn setViewTarget(view_id: c.bgfx_view_id_t, target: ?OffscreenTarget, width: u16, height: u16) void {
+        c.bgfx_set_view_frame_buffer(view_id, if (target) |offscreen| offscreen.framebuffer else .{ .idx = invalid_handle });
+        c.bgfx_set_view_rect(view_id, 0, 0, width, height);
+    }
+
+    /// Draws one lens shader.pass node as a full-screen pass into
+    /// view_id, reading input_texture through the same s_texColor
+    /// sampler every lens fragment shader is authored against.
+    pub fn submitShaderPass(r: *Renderer, view_id: c.bgfx_view_id_t, program: c.bgfx_program_handle_t, input_texture: c.bgfx_texture_handle_t) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lens lut.pass node as a full-screen pass into view_id:
+    /// the frame on unit 0, the lens's own LUT texture on unit 1, the
+    /// one fixed lut_program every lut.pass node shares (there is
+    /// nothing per-lens to compile here, unlike shader.pass).
+    pub fn submitLutPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, lut_texture: c.bgfx_texture_handle_t) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_lut, lut_texture, std.math.maxInt(u32));
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.lut_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// The stated CPU path: copies NV12 planes into two cached updatable

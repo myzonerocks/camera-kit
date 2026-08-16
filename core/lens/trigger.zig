@@ -1,5 +1,5 @@
-//! Trigger `when` expressions: the closed grammar in lenses/SPEC.md 6.1,
-//! compiled once at lens load into a typed tree and evaluated every frame
+//! Trigger `when` expressions: a closed grammar, compiled once at lens
+//! load into a typed tree and evaluated every frame
 //! against the session's live signals. compile() is the only allocating
 //! pass; evaluate() walks the already-typed tree and allocates nothing,
 //! so a lens with up to the format's 256-trigger ceiling costs a bounded,
