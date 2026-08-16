@@ -105,6 +105,36 @@ for (let waited = 0; waited < 30_000; waited += 500) {
   } else {
     whiten = `FAIL whiten: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
   }
+  await evaluate("window.setWhiten(0)");
+}
+
+// Same shape as the whiten proof above, for the smoothing pass - except
+// smoothing's blend factor is content-adaptive (it favors flat,
+// skin-toned regions over sharp edges, by design) and never engages on
+// Chrome's fake capture device's own synthetic pattern. Proving it needs
+// a real face, the same corpus portrait the tracking pass below uses.
+let smooth = "";
+{
+  const evaluate = async (expression: string) =>
+    (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })) as {
+      result?: { value?: unknown };
+    };
+  await evaluate("window.setSmooth(0)");
+  await evaluate("window.freezeCamera()");
+  await evaluate("window.loadStillFrame('./face_frontal_b.jpg')");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const before = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  await evaluate("window.setSmooth(1)");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const after = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  const delta = before !== undefined && after !== undefined ? Math.abs(after - before) : -1;
+  if (before !== undefined && after !== undefined && delta > 0) {
+    smooth = `CKWEB smooth: frame sum ${before} -> ${after}, delta ${delta}`;
+  } else {
+    smooth = `FAIL smooth: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
+  }
+  await evaluate("window.setSmooth(0)");
+  await evaluate("window.resumeCamera()");
 }
 
 // The tracking pass: wait for the worker, then one corpus portrait must
@@ -163,15 +193,27 @@ const statusResult = (await send("Runtime.evaluate", {
 })) as { result?: { value?: string } };
 
 chrome.kill();
-if (proof && whiten && !whiten.startsWith("FAIL") && tracking && !tracking.startsWith("FAIL")) {
+if (
+  proof &&
+  whiten &&
+  !whiten.startsWith("FAIL") &&
+  smooth &&
+  !smooth.startsWith("FAIL") &&
+  tracking &&
+  !tracking.startsWith("FAIL")
+) {
   console.log(proof);
   console.log(whiten);
+  console.log(smooth);
   console.log(tracking);
   console.log(`status: ${statusResult.result?.value}`);
   process.exit(0);
 }
 if (whiten) {
   console.log(whiten);
+}
+if (smooth) {
+  console.log(smooth);
 }
 if (tracking) {
   console.log(tracking);

@@ -128,6 +128,18 @@ export class PreviewSession {
   private whitenLuts: WebGLTexture[] = [];
   private whitenAmount = 0;
   private whitenUniform: WebGLUniformLocation | null;
+  private smoothAmount = 0;
+  private smoothUniform: WebGLUniformLocation | null;
+  private blurProgram: WebGLProgram;
+  private blurStepUniform: WebGLUniformLocation | null;
+  private blurTexture: WebGLTexture;
+  private blurFbo: WebGLFramebuffer;
+  private meanTexture: WebGLTexture;
+  private meanFbo: WebGLFramebuffer;
+  private meanWidth = 0;
+  private meanHeight = 0;
+  private frameWidth = 0;
+  private frameHeight = 0;
   private raf = 0;
   private lastTick = 0;
   private fpsWindowStart = 0;
@@ -153,6 +165,7 @@ export class PreviewSession {
     this.gl = gl;
     this.program = this.buildProgram();
     this.whitenUniform = gl.getUniformLocation(this.program, "u_whiten");
+    this.smoothUniform = gl.getUniformLocation(this.program, "u_smooth");
     const texture = gl.createTexture();
     if (!texture) throw new Error("texture create failed");
     this.texture = texture;
@@ -161,6 +174,21 @@ export class PreviewSession {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+    // u_mean stays bound to a fixed unit (5; 1-4 are the whiten LUTs)
+    // for the same reason those are: it never changes, only the pixels
+    // it points at do, via computeMean re-rendering into it each frame.
+    gl.useProgram(this.program);
+    gl.uniform1i(gl.getUniformLocation(this.program, "u_mean"), 5);
+
+    this.blurProgram = this.buildBlurProgram();
+    this.blurStepUniform = gl.getUniformLocation(this.blurProgram, "u_step");
+    const blurTarget = this.createRenderTarget();
+    this.blurTexture = blurTarget.texture;
+    this.blurFbo = blurTarget.fbo;
+    const meanTarget = this.createRenderTarget();
+    this.meanTexture = meanTarget.texture;
+    this.meanFbo = meanTarget.fbo;
   }
 
   private setState(state: CaptureState): void {
@@ -174,6 +202,10 @@ export class PreviewSession {
   /// flight.
   setWhiten(amount: number): void {
     this.whitenAmount = this.whitenLuts.length === WHITEN_LUT_NAMES.length ? amount : 0;
+  }
+
+  setSmooth(amount: number): void {
+    this.smoothAmount = amount;
   }
 
   /// Fetches and decodes the four LUT textures the whiten pass samples,
@@ -231,10 +263,12 @@ export class PreviewSession {
     const fsSource = `#version 300 es
       precision highp float;
       uniform sampler2D u_frame;
+      uniform sampler2D u_mean;
       uniform sampler2D u_lookupGray;
       uniform sampler2D u_lookupOrigin;
       uniform sampler2D u_lookupSkin;
       uniform sampler2D u_lookupCustom;
+      uniform float u_smooth;
       uniform float u_whiten;
       in vec2 v_uv;
       out vec4 fragColor;
@@ -246,6 +280,25 @@ export class PreviewSession {
       void main() {
         vec4 iColor = texture(u_frame, v_uv);
         vec3 color = iColor.rgb;
+
+        // A verbatim port of gpupixel's own skin-smoothing math
+        // (beauty_face_unit_filter.cc's blurAlpha branch): u_mean is a
+        // wide separable blur of the frame, and how strongly a pixel
+        // blends toward it depends on both how flat that area already
+        // is (low local variance, estimated here from the difference
+        // between the frame and its own blur) and how close it sits to
+        // mid-tone (the min/clamp term), so edges and shadows resist
+        // smoothing while flat skin doesn't.
+        if (u_smooth > 0.0) {
+          vec3 meanColor = texture(u_mean, v_uv).rgb;
+          vec3 diff = (iColor.rgb - meanColor) * 7.07;
+          diff = min(diff * diff, vec3(1.0));
+          float theta = 0.1;
+          float p = clamp((min(iColor.r, meanColor.r - 0.1) - 0.2) * 4.0, 0.0, 1.0);
+          float meanVar = (diff.r + diff.g + diff.b) / 3.0;
+          float kMin = clamp((1.0 - meanVar / (meanVar + theta)) * p * u_smooth, 0.0, 1.0);
+          color = mix(iColor.rgb, meanColor, kMin);
+        }
 
         if (u_whiten > 0.0) {
           vec3 colorEPM = color;
@@ -309,6 +362,41 @@ export class PreviewSession {
 
         fragColor = vec4(color, iColor.a);
       }`;
+    return this.linkProgram(vsSource, fsSource);
+  }
+
+  // A 9-tap box blur (radius 4, weight 1/9 each - matching gpupixel's own
+  // BoxMonoBlurFilter at its default radius), run once horizontally and
+  // once vertically to make a full separable blur. u_step carries the
+  // per-tap offset in UV space, computed by the caller from the source
+  // dimensions so the same program serves both directions.
+  private buildBlurProgram(): WebGLProgram {
+    const vsSource = `#version 300 es
+      const vec2 corners[4] = vec2[](vec2(-1.,-1.), vec2(1.,-1.), vec2(1.,1.), vec2(-1.,1.));
+      const vec2 uvs[4] = vec2[](vec2(0.,1.), vec2(1.,1.), vec2(1.,0.), vec2(0.,0.));
+      out vec2 v_uv;
+      void main() {
+        gl_Position = vec4(corners[gl_VertexID], 0., 1.);
+        v_uv = uvs[gl_VertexID];
+      }`;
+    const fsSource = `#version 300 es
+      precision highp float;
+      uniform sampler2D u_src;
+      uniform vec2 u_step;
+      in vec2 v_uv;
+      out vec4 fragColor;
+      void main() {
+        vec3 sum = vec3(0.0);
+        for (int i = -4; i <= 4; i++) {
+          sum += texture(u_src, v_uv + u_step * float(i)).rgb;
+        }
+        fragColor = vec4(sum / 9.0, 1.0);
+      }`;
+    return this.linkProgram(vsSource, fsSource);
+  }
+
+  private linkProgram(vsSource: string, fsSource: string): WebGLProgram {
+    const gl = this.gl;
     const compile = (type: number, source: string): WebGLShader => {
       const shader = gl.createShader(type);
       if (!shader) throw new Error("shader create failed");
@@ -328,6 +416,78 @@ export class PreviewSession {
       throw new Error(String(gl.getProgramInfoLog(program)));
     }
     return program;
+  }
+
+  private createRenderTarget(): { texture: WebGLTexture; fbo: WebGLFramebuffer } {
+    const gl = this.gl;
+    const texture = gl.createTexture();
+    if (!texture) throw new Error("texture create failed");
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fbo = gl.createFramebuffer();
+    if (!fbo) throw new Error("framebuffer create failed");
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { texture, fbo };
+  }
+
+  /// (Re)allocates the two intermediate blur targets at the source frame's
+  /// own resolution - the blur runs on the camera frame before it's scaled
+  /// to the canvas, matching gpupixel's own filter, which blurs its input
+  /// framebuffer rather than whatever size it happens to be displayed at.
+  private ensureBlurTargets(width: number, height: number): void {
+    if (this.meanWidth === width && this.meanHeight === height) return;
+    this.meanWidth = width;
+    this.meanHeight = height;
+    const gl = this.gl;
+    for (const texture of [this.blurTexture, this.meanTexture]) {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+  }
+
+  /// Two-pass separable blur of the current camera frame into meanTexture:
+  /// horizontal into the intermediate blurTexture, then vertical from
+  /// there. Only run when smoothing is actually active - skipped
+  /// entirely otherwise, matching every other effect's no-op-when-off
+  /// degradation.
+  private computeMean(width: number, height: number): void {
+    const gl = this.gl;
+    gl.useProgram(this.blurProgram);
+    gl.viewport(0, 0, width, height);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.blurFbo);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.uniform2f(this.blurStepUniform, 4 / width, 0);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.meanFbo);
+    gl.bindTexture(gl.TEXTURE_2D, this.blurTexture);
+    gl.uniform2f(this.blurStepUniform, 0, 4 / height);
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  /// Uploads a still image directly into the frame texture the composite
+  /// shader reads, bypassing the video element entirely. Skin-smoothing's
+  /// blend factor is content-adaptive (it deliberately favors flat,
+  /// skin-toned regions over sharp edges - see the shader comment above),
+  /// so proving it needs a real photo rather than a synthetic test
+  /// pattern; freezeCamera() first stops tick() from re-uploading over it
+  /// on the next frame.
+  async loadStillFrame(url: string): Promise<void> {
+    const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+    this.frameWidth = bitmap.width;
+    this.frameHeight = bitmap.height;
   }
 
   async start(): Promise<void> {
@@ -376,11 +536,23 @@ export class PreviewSession {
         this.cameraFrames += 1;
         gl.bindTexture(gl.TEXTURE_2D, this.texture);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.video);
+        this.frameWidth = this.video.videoWidth;
+        this.frameHeight = this.video.videoHeight;
       }
+      this.ensureBlurTargets(this.frameWidth, this.frameHeight);
+      const smoothActive = this.smoothAmount > 0;
+      if (smoothActive) {
+        this.computeMean(this.frameWidth, this.frameHeight);
+      }
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       gl.useProgram(this.program);
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.activeTexture(gl.TEXTURE5);
+      gl.bindTexture(gl.TEXTURE_2D, this.meanTexture);
+      gl.uniform1f(this.smoothUniform, smoothActive ? this.smoothAmount : 0);
       gl.uniform1f(this.whitenUniform, this.whitenAmount);
       gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
       this.renderedFrames += 1;
