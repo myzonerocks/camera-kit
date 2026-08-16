@@ -138,10 +138,10 @@ fn validateTriggers(gpa: std.mem.Allocator, diags: *manifest.Diagnostics, lens: 
     return ok;
 }
 
-const shader_profiles = [_]struct { profile: []const u8, platform: []const u8 }{
-    .{ .profile = "metal", .platform = "ios" },
-    .{ .profile = "spirv", .platform = "android" },
-    .{ .profile = "300_es", .platform = "android" },
+const shader_profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
+    .{ .profile = "metal", .platform = "ios", .tag = "metal" },
+    .{ .profile = "spirv", .platform = "android", .tag = "spirv" },
+    .{ .profile = "300_es", .platform = "android", .tag = "essl" },
 };
 
 /// Every file under shaders/ is a fragment shader for a full-screen pass,
@@ -150,8 +150,12 @@ const shader_profiles = [_]struct { profile: []const u8, platform: []const u8 }{
 /// the pinned shaderc toolchain to every platform profile a conforming
 /// runtime ships, since a shader that compiles for one platform and not
 /// another is exactly the failure this stage exists to catch before a
-/// lens ships.
-fn validateShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, bundle_path: []const u8) !bool {
+/// lens ships. package_dir, when given, is a bundle directory tree
+/// (already a copy of the source bundle, made by packageLens below)
+/// that gets each compiled variant written into it as
+/// shaders/<name>.<tag>.bin (SPEC.md section 1/7) instead of discarding
+/// the bytes - the same compile, run once, either way.
+fn validateShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, bundle_path: []const u8, package_dir: ?[]const u8) !bool {
     var bundle_dir = std.Io.Dir.cwd().openDir(io, bundle_path, .{ .iterate = true }) catch return true;
     defer bundle_dir.close(io);
     var shaders_dir = bundle_dir.openDir(io, "shaders", .{ .iterate = true }) catch return true;
@@ -162,6 +166,7 @@ fn validateShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnost
     var ok = true;
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".glsl")) continue;
         const diag_path = try std.fmt.allocPrint(diags.arena, "/shaders/{s}", .{entry.path});
 
         if (build_options.shaderc_path.len == 0) {
@@ -171,13 +176,18 @@ fn validateShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnost
         }
 
         const disk_path = try std.fs.path.join(diags.arena, &.{ bundle_path, "shaders", entry.path });
+        const stem = entry.path[0 .. entry.path.len - ".glsl".len];
         for (shader_profiles) |profile| {
+            const out_path = if (package_dir) |dir|
+                try std.fmt.allocPrint(diags.arena, "{s}/shaders/{s}.{s}.bin", .{ dir, stem, profile.tag })
+            else
+                "/dev/null";
             var argv: std.ArrayList([]const u8) = .empty;
             defer argv.deinit(gpa);
             try argv.appendSlice(gpa, &.{
                 build_options.shaderc_path,
                 "-f",           disk_path,
-                "-o",           "/dev/null",
+                "-o",           out_path,
                 "--type",       "fragment",
                 "--platform",   profile.platform,
                 "-p",           profile.profile,
@@ -221,6 +231,39 @@ fn report(io: std.Io, bundle_path: []const u8, diagnostics: []const manifest.Dia
     try out.flush();
 }
 
+/// Copies bundle_path's tree (manifest.json, shaders/ source, assets/)
+/// into package_dir, creating it fresh. The compiled shader variants
+/// validateShaders writes alongside the copied source, once validation
+/// (which runs against the ORIGINAL bundle_path, never the copy) passes.
+fn copyBundleTree(io: std.Io, gpa: std.mem.Allocator, bundle_path: []const u8, package_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, package_dir);
+    var src = try cwd.openDir(io, bundle_path, .{ .iterate = true });
+    defer src.close(io);
+
+    var manifest_buf: [max_manifest_bytes]u8 = undefined;
+    const manifest_bytes = try src.readFile(io, "manifest.json", &manifest_buf);
+    const dest_manifest = try std.fs.path.join(gpa, &.{ package_dir, "manifest.json" });
+    defer gpa.free(dest_manifest);
+    try cwd.writeFile(io, .{ .sub_path = dest_manifest, .data = manifest_bytes });
+
+    for (permitted_top_level) |category| {
+        var category_dir = src.openDir(io, category, .{ .iterate = true }) catch continue;
+        defer category_dir.close(io);
+        var walker = try category_dir.walk(gpa);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            const dest_path = try std.fmt.allocPrint(gpa, "{s}/{s}/{s}", .{ package_dir, category, entry.path });
+            defer gpa.free(dest_path);
+            if (std.fs.path.dirname(dest_path)) |parent| try cwd.createDirPath(io, parent);
+            const bytes = try entry.dir.readFileAlloc(io, entry.basename, gpa, .limited(max_bundle_bytes));
+            defer gpa.free(bytes);
+            try cwd.writeFile(io, .{ .sub_path = dest_path, .data = bytes });
+        }
+    }
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const gpa = init.gpa;
@@ -230,38 +273,56 @@ pub fn main(init: std.process.Init) !u8 {
 
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next();
-    const bundle_path = args.next() orelse {
-        std.debug.print("lens_validator: usage: lens_validator <bundle-path>\n", .{});
+    var bundle_path: ?[]const u8 = null;
+    var package_dir: ?[]const u8 = null;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--package")) {
+            package_dir = args.next() orelse {
+                std.debug.print("lens_validator: --package requires a directory argument\n", .{});
+                return 2;
+            };
+        } else if (bundle_path == null) {
+            bundle_path = arg;
+        } else {
+            std.debug.print("lens_validator: unexpected argument '{s}'\n", .{arg});
+            return 2;
+        }
+    }
+    const path = bundle_path orelse {
+        std.debug.print("lens_validator: usage: lens_validator <bundle-path> [--package <output-dir>]\n", .{});
         return 2;
     };
 
     var diags = manifest.Diagnostics{ .arena = arena };
 
-    if (!try validateBundle(io, gpa, &diags, bundle_path)) {
-        try report(io, bundle_path, diags.list.items, false);
+    if (!try validateBundle(io, gpa, &diags, path)) {
+        try report(io, path, diags.list.items, false);
         return 1;
     }
 
-    const manifest_path = try std.fs.path.join(arena, &.{ bundle_path, "manifest.json" });
+    const manifest_path = try std.fs.path.join(arena, &.{ path, "manifest.json" });
     const source = try std.Io.Dir.cwd().readFileAlloc(io, manifest_path, arena, .limited(max_manifest_bytes + 1));
 
     var lens = try manifest.parse(gpa, &diags, source) orelse {
-        try report(io, bundle_path, diags.list.items, false);
+        try report(io, path, diags.list.items, false);
         return 1;
     };
     defer lens.deinit();
 
     if (!try validateTriggers(gpa, &diags, &lens)) {
-        try report(io, bundle_path, diags.list.items, false);
+        try report(io, path, diags.list.items, false);
         return 1;
     }
 
-    if (!try validateShaders(io, gpa, &diags, bundle_path)) {
-        try report(io, bundle_path, diags.list.items, false);
+    if (package_dir) |dir| try copyBundleTree(io, gpa, path, dir);
+
+    if (!try validateShaders(io, gpa, &diags, path, package_dir)) {
+        try report(io, path, diags.list.items, false);
         return 1;
     }
 
-    try report(io, bundle_path, &.{}, true);
+    try report(io, path, &.{}, true);
+    if (package_dir) |dir| std.debug.print("lens_validator: packaged to {s}\n", .{dir});
     return 0;
 }
 
@@ -428,8 +489,44 @@ test "a fragment shader compiling against the fixed varying contract passes the 
     var diags = manifest.Diagnostics{ .arena = arena.allocator() };
 
     try t.expect(try validateBundle(t.io, t.allocator, &diags, bundle_path));
-    try t.expect(try validateShaders(t.io, t.allocator, &diags, bundle_path));
+    try t.expect(try validateShaders(t.io, t.allocator, &diags, bundle_path, null));
     try t.expectEqual(@as(usize, 0), diags.list.items.len);
+}
+
+test "packaging copies the bundle and writes compiled bytecode alongside each shader's source" {
+    if (build_options.shaderc_path.len == 0) return error.SkipZigTest;
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = minimal_valid_manifest });
+    try tmp.dir.createDirPath(t.io, "shaders");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "shaders/fs_tint.glsl", .data = valid_fragment_shader });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = tmpBundlePath(tmp, &path_buf);
+    var out_buf: [64]u8 = undefined;
+    const package_dir = std.fmt.bufPrint(&out_buf, "{s}-packaged", .{bundle_path}) catch unreachable;
+    defer std.Io.Dir.cwd().deleteTree(t.io, package_dir) catch {};
+
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+
+    try t.expect(try validateBundle(t.io, t.allocator, &diags, bundle_path));
+    try copyBundleTree(t.io, t.allocator, bundle_path, package_dir);
+    try t.expect(try validateShaders(t.io, t.allocator, &diags, bundle_path, package_dir));
+
+    const manifest_copy = try std.fs.path.join(arena.allocator(), &.{ package_dir, "manifest.json" });
+    _ = try std.Io.Dir.cwd().readFileAlloc(t.io, manifest_copy, arena.allocator(), .limited(max_manifest_bytes));
+
+    const source_copy = try std.fs.path.join(arena.allocator(), &.{ package_dir, "shaders/fs_tint.glsl" });
+    _ = try std.Io.Dir.cwd().readFileAlloc(t.io, source_copy, arena.allocator(), .limited(max_shader_bytes));
+
+    for ([_][]const u8{ "metal", "spirv", "essl" }) |tag| {
+        const bin_path = try std.fmt.allocPrint(arena.allocator(), "{s}/shaders/fs_tint.{s}.bin", .{ package_dir, tag });
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, bin_path, arena.allocator(), .limited(max_shader_bytes));
+        try t.expect(bytes.len > 0);
+    }
 }
 
 test "a fragment shader referencing an unknown symbol fails the shader-compile stage" {
@@ -449,7 +546,7 @@ test "a fragment shader referencing an unknown symbol fails the shader-compile s
     var diags = manifest.Diagnostics{ .arena = arena.allocator() };
 
     try t.expect(try validateBundle(t.io, t.allocator, &diags, bundle_path));
-    try t.expect(!try validateShaders(t.io, t.allocator, &diags, bundle_path));
+    try t.expect(!try validateShaders(t.io, t.allocator, &diags, bundle_path, null));
     var found = false;
     for (diags.list.items) |d| {
         if (std.mem.indexOf(u8, d.path, "fs_broken.glsl") != null) found = true;
@@ -598,6 +695,6 @@ test "the shader-compile stage never crashes or leaks on malformed shader source
         var diag_arena = std.heap.ArenaAllocator.init(t.allocator);
         defer diag_arena.deinit();
         var diags = manifest.Diagnostics{ .arena = diag_arena.allocator() };
-        _ = try validateShaders(t.io, t.allocator, &diags, bundle_path);
+        _ = try validateShaders(t.io, t.allocator, &diags, bundle_path, null);
     }
 }

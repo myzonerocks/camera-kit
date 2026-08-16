@@ -34,20 +34,24 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
     if (std.mem.eql(u8, type_str, "beauty.reshape")) return .beauty_reshape;
     if (std.mem.eql(u8, type_str, "beauty.lipstick")) return .beauty_lipstick;
     if (std.mem.eql(u8, type_str, "beauty.blusher")) return .beauty_blusher;
+    if (std.mem.eql(u8, type_str, "shader.pass")) return .shader_pass;
     return null;
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };
 
 /// The param names each node type accepts and which effect slot each one
-/// drives - the only place that mapping is declared.
+/// drives - the only place that mapping is declared. shader.pass has no
+/// effect-slot params of its own (SPEC.md 7): which shader it runs is
+/// its id, resolved against shaders/<id>.glsl, the same way a node's id
+/// already resolves against other nodes for wiring.
 fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
     return switch (node_type) {
         .beauty_face => &.{
@@ -60,6 +64,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
+        .shader_pass => &.{},
     };
 }
 
@@ -74,6 +79,20 @@ const LensNode = struct {
     graph_index: graph.NodeIndex,
     node_type: NodeType,
     bindings: [effect_slot_count]?ParamSource = @splat(null),
+    /// Set only for .shader_pass nodes: the node's own id, which is also
+    /// the shader's basename (shaders/<shader_stem>.glsl) - a slice into
+    /// the Lens's own retained manifest arena, not separately owned.
+    shader_stem: ?[]const u8 = null,
+};
+
+/// One shader.pass node ready for the caller to load and draw - which
+/// graph node it is, and the shader (shaders/<shader_stem>.glsl, plus
+/// its packaged shaders/<shader_stem>.<profile>.bin variants) it names.
+/// This module has no bgfx dependency of its own; the caller resolves
+/// shader_stem into actual bytes and does the real rendering work.
+pub const ShaderPassNode = struct {
+    graph_index: graph.NodeIndex,
+    shader_stem: []const u8,
 };
 
 pub const ActivateError = error{
@@ -114,6 +133,19 @@ pub const Lens = struct {
         var out: std.ArrayList(AppliedEffect) = .empty;
         errdefer out.deinit(gpa);
         for (self.nodes) |node| try self.collectNodeEffects(gpa, &out, node);
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every shader.pass node this lens spliced, in splice order - what
+    /// the caller loads and creates a program for once, right after
+    /// activation, before the first frame draws.
+    pub fn shaderPassNodes(self: *const Lens, gpa: std.mem.Allocator) std.mem.Allocator.Error![]ShaderPassNode {
+        var out: std.ArrayList(ShaderPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (self.nodes) |node| {
+            if (node.node_type != .shader_pass) continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.shader_stem.? });
+        }
         return out.toOwnedSlice(gpa);
     }
 
@@ -188,7 +220,11 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .inputs = &.{.{ .kind = .texture }},
             .outputs = &.{.{ .kind = .texture }},
         });
-        nodes[spliced_count] = .{ .graph_index = graph_index, .node_type = node_type };
+        nodes[spliced_count] = .{
+            .graph_index = graph_index,
+            .node_type = node_type,
+            .shader_stem = if (node_type == .shader_pass) node.id else null,
+        };
 
         for (node.inputs) |input| {
             const source_index = if (std.mem.eql(u8, input.source, "camera"))
@@ -361,6 +397,41 @@ test "a param bound to a node reports its default as the initial effect value" {
     try t.expectEqual(@as(usize, 1), effects.len);
     try t.expectEqual(EffectSlot.thin_face, effects[0].effect);
     try t.expectEqual(@as(f32, 0.0), effects[0].value);
+}
+
+const shader_pass_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.shaderpass", "version": "1.0.0", "display_name": "Shader Pass",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "tint", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a shader.pass node splices with no effect bindings and resolves its shader by id" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, shader_pass_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(@as(usize, 1), lens.nodes.len);
+    try t.expectEqual(NodeType.shader_pass, lens.nodes[0].node_type);
+
+    const effects = try lens.currentEffects(t.allocator);
+    defer t.allocator.free(effects);
+    try t.expectEqual(@as(usize, 0), effects.len);
+
+    const passes = try lens.shaderPassNodes(t.allocator);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 1), passes.len);
+    try t.expectEqualStrings("tint", passes[0].shader_stem);
+    try t.expectEqual(lens.nodes[0].graph_index, passes[0].graph_index);
 }
 
 test "a trigger firing on the rising edge starts a ramp that settles, does not refire while held, and rearms on the falling edge" {
