@@ -183,6 +183,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "face", .module = face_module }},
     });
+    const segment_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/segment.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     abi_module.addImport("face", face_module);
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -278,6 +283,7 @@ pub fn build(b: *std.Build) void {
     const face_tests = b.addTest(.{ .root_module = face_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const face106_tests = b.addTest(.{ .root_module = face106_module });
+    const segment_tests = b.addTest(.{ .root_module = segment_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
@@ -298,6 +304,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
+    test_step.dependOn(&b.addRunArtifact(segment_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
@@ -495,6 +502,31 @@ pub fn build(b: *std.Build) void {
         });
         runtime_module.link_libc = true;
         runtime_module.addIncludePath(b.path(".vendor/litert"));
+        // MediaPipe's segmentation models need a custom TFLite op the
+        // stock interpreter can't resolve on its own (adapters/tracking/
+        // transpose_conv_bias.zig) - built here rather than folded into
+        // runtime.zig itself since it needs its own additional import
+        // (segment.zig's pure math) runtime.zig has no reason to carry.
+        const transpose_conv_bias_module = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_module },
+                .{ .name = "segment", .module = segment_module },
+            },
+        });
+        transpose_conv_bias_module.link_libc = true;
+        transpose_conv_bias_module.addIncludePath(b.path(".vendor/litert"));
+        // No standalone test artifact here: a zig test binary talks to the
+        // build runner over its own stdin/stdout (--listen=-), and TFLite's
+        // C-level logging writes straight to that same stdout, corrupting
+        // the protocol the instant a real model loads. Every other real
+        // Engine.init in this repo already lives in library code or the
+        // tracking-harness executable for the same reason - this custom
+        // op's own end-to-end proof against the real model belongs there
+        // too, wired in below as tracking_module's "transpose_conv_bias"
+        // import.
         // The export layer instance under real tracking: the harness drives
         // the same ck_ surface a shell uses, worker thread and all.
         const tracking_real_module = b.createModule(.{
@@ -559,6 +591,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "abi", .module = abi_tracking_module },
                 .{ .name = "face106", .module = face106_module },
+                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_module },
             },
         });
         if (target.result.os.tag == .macos) {

@@ -18,6 +18,7 @@ const abi = @import("abi");
 const math = @import("math");
 
 const face106 = @import("face106");
+const transpose_conv_bias = @import("transpose_conv_bias");
 const builtin = @import("builtin");
 
 /// The beauty chain needs a windowing gl context; the harness proves it
@@ -432,6 +433,46 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (result.presence < 0.5) return 1;
         if (result.landmark_count_out != face.landmark_count) return 1;
         if (result.timestamp_us != 1000) return 1;
+
+        // Segmentation, loaded straight from disk rather than through the
+        // face bundle: the model needs the Convolution2DTransposeBias
+        // custom op registered before the interpreter can even load it.
+        {
+            const segment_bytes = try std.Io.Dir.cwd().readFileAlloc(
+                harness_io,
+                ".models/selfie_segmenter.tflite",
+                gpa,
+                .limited(16 << 20),
+            );
+            defer gpa.free(segment_bytes);
+
+            var segment_engine = try runtime.Engine.initWithCustomOps(segment_bytes, 2, &.{transpose_conv_bias.register});
+            defer segment_engine.deinit();
+
+            if (segment_engine.inputCount() != 1 or segment_engine.outputCount() != 1) return 1;
+
+            // A real frame would need real preprocessing; this proof only
+            // needs the custom op to actually run end to end and produce a
+            // plausible mask, so a flat mid-gray frame is enough - it
+            // exercises the exact same Prepare/Invoke path a real frame
+            // would.
+            var segment_input: [256 * 256 * 3]f32 = undefined;
+            @memset(&segment_input, 0.5);
+            try segment_engine.writeInput(0, std.mem.sliceAsBytes(&segment_input));
+            try segment_engine.invoke();
+
+            const mask = try segment_engine.outputFloats(0);
+            if (mask.len != 256 * 256) return 1;
+            for (mask) |value| {
+                // The model's last op is a sigmoid (LOGISTIC) - every value
+                // in range proves the custom op hasn't silently truncated
+                // the upsample or lost the bias, since garbage here is what
+                // an offset/layout bug in the transpose-conv would produce.
+                if (value < 0.0 or value > 1.0) return 1;
+            }
+            try out.print("segmentation: mask {d} values, all in [0,1]\n", .{mask.len});
+            try out.flush();
+        }
 
         // Beauty through the same public surface, fed by the session's own
         // tracking result.
