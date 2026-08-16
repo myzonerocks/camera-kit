@@ -16,6 +16,7 @@ object CameraKit {
     external fun nativeEngineDestroy(engine: Long)
     external fun nativeInitRenderer(engine: Long, surface: Surface, width: Int, height: Int): Int
     external fun nativeResize(engine: Long, width: Int, height: Int)
+    external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
     external fun nativeRenderFrame(engine: Long, session: Long): Int
     external fun nativeSessionCreate(engine: Long): Long
     external fun nativeSessionDestroy(session: Long)
@@ -96,6 +97,18 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
     }
 
     fun resize(width: Int, height: Int) = CameraKit.nativeResize(handle, width, height)
+
+    /** Requests a screenshot of the next presented frame, written as
+     * [path] plus a ".tga" suffix the renderer's own callback appends -
+     * debug/test tooling (the conformance run this exists for), never a
+     * user-facing control. */
+    fun requestScreenshot(path: String): Boolean {
+        val bytes = path.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocateDirect(bytes.size)
+        buffer.put(bytes)
+        buffer.rewind()
+        return CameraKit.nativeRequestScreenshot(handle, buffer, bytes.size) == 0
+    }
 
     fun renderFrame(session: Session?): Boolean =
         CameraKit.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
