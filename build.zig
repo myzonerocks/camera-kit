@@ -2092,7 +2092,12 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     const fcpp_dir = ".vendor/bgfx/3rdparty/fcpp";
     const spirv_cross = ".vendor/bgfx/3rdparty/spirv-cross";
 
-    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS" };
+    // shaderc.h defaults SHADERC_CONFIG_HAS_DXC on for both Windows and
+    // Linux, assuming a DXC install neither this vendor tree nor this
+    // build provides (shaderc_dxil.cpp then reaches for <unknwnbase.h>,
+    // a Windows SDK header, and fails outright on Linux). We only ever
+    // emit metal/spirv/essl, never DXIL/D3D12, so it's a straight cut.
+    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS", "-DSHADERC_CONFIG_HAS_DXC=0" };
     const c_flags = [_][]const u8{ "-fno-sanitize=undefined", "-w" };
 
     const spirv_opt_module = b.createModule(.{ .target = target, .optimize = opt });
