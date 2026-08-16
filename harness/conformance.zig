@@ -1,5 +1,6 @@
 //! Conformance harness: drives a real packaged reference lens through the
-//! production ABI end to end - real engine, real session, real
+//! production ABI end to end - real engine, real session, real face
+//! tracking and segmentation against a real corpus portrait, real
 //! ck_session_activate_lens_from_directory, real ck_engine_render_frame -
 //! and proves the result is bit-stable: the same fixed input rendered
 //! twice produces byte-identical output. Each lens's hash also checks
@@ -10,11 +11,14 @@
 
 const std = @import("std");
 const abi = @import("abi");
+const sampler = @import("sampler");
+const math = @import("math");
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", "1");
     @cInclude("GLFW/glfw3.h");
 });
+const stb = @cImport(@cInclude("stb_image.h"));
 
 extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 
@@ -22,44 +26,136 @@ const width: u32 = 400;
 const height: u32 = 300;
 const reference_lenses = [_][]const u8{ "shader-tint", "beauty-baseline", "background-swap" };
 const baseline_path = "lenses/conformance-baseline.txt";
+const corpus_path = ".models/corpus/face_frontal_b.jpg";
+const face_bundle_path = ".models/face_landmarker.task";
+const segmentation_model_path = ".models/selfie_segmenter.tflite";
+const beauty_resource_path = ".vendor/gpupixel/src";
 
-const SynthFrame = struct {
-    y: []u8,
-    uv: []u8,
+var harness_io: std.Io = undefined;
 
-    fn deinit(frame: SynthFrame, gpa: std.mem.Allocator) void {
-        gpa.free(frame.y);
-        gpa.free(frame.uv);
+const CorpusFrame = struct {
+    frame: sampler.Frame,
+    fn deinit(corpus: CorpusFrame) void {
+        stb.stbi_image_free(@constCast(corpus.frame.pixels.rgba8.ptr));
     }
 };
 
-/// A fixed diagonal gradient, not a flat frame - a flat input can't tell
-/// "rendered something" apart from "rendered nothing", the same
-/// reasoning the segmentation proof elsewhere in this repo already
-/// applies to its own synthetic input.
-fn synthFrame(gpa: std.mem.Allocator, w: u32, h: u32) !SynthFrame {
-    const y = try gpa.alloc(u8, w * h);
-    errdefer gpa.free(y);
-    for (0..h) |row| {
-        for (0..w) |col| {
-            y[row * w + col] = @intCast((row + col) % 256);
-        }
-    }
-    const half_w = (w + 1) / 2;
-    const half_h = (h + 1) / 2;
-    const uv = try gpa.alloc(u8, half_w * half_h * 2);
-    @memset(uv, 128);
-    return .{ .y = y, .uv = uv };
+fn loadCorpusFrame(gpa: std.mem.Allocator, path: []const u8) !CorpusFrame {
+    const encoded = try std.Io.Dir.cwd().readFileAlloc(harness_io, path, gpa, .limited(32 << 20));
+    defer gpa.free(encoded);
+    var img_width: c_int = 0;
+    var img_height: c_int = 0;
+    var channels: c_int = 0;
+    const pixels = stb.stbi_load_from_memory(encoded.ptr, @intCast(encoded.len), &img_width, &img_height, &channels, 4) orelse
+        return error.UndecodableCorpusFrame;
+    const len = @as(usize, @intCast(img_width)) * @as(usize, @intCast(img_height)) * 4;
+    return .{ .frame = .{
+        .pixels = .{ .rgba8 = pixels[0..len] },
+        .width = @intCast(img_width),
+        .height = @intCast(img_height),
+    } };
 }
 
-/// Activates bundle_path on a fresh session, submits the same fixed
-/// frame, renders it a few times to let the request settle, and
-/// requests a screenshot at out_path - bgfx's own default callback (no
-/// custom one is wired here, since RendererDesc has no callback field
-/// to carry one through the frozen ABI) writes it as out_path ++ ".tga".
+const Nv12Copy = struct {
+    y: []u8,
+    uv: []u8,
+    width: u32,
+    height: u32,
+
+    fn deinit(copy: Nv12Copy, gpa: std.mem.Allocator) void {
+        gpa.free(copy.y);
+        gpa.free(copy.uv);
+    }
+};
+
+/// Converts a decoded RGBA frame to NV12 exactly the way a camera would
+/// deliver it: full range, the classic standard, chroma averaged 2x2 -
+/// mirrors harness/tracking.zig's own conversion, the same real path a
+/// device feeds this ABI through.
+fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
+    const bytes = frame.pixels.rgba8;
+    const conversion = math.color.rgbToYuv(.bt601, .full);
+    const w = frame.width;
+    const h = frame.height;
+    const half_width = (w + 1) / 2;
+    const half_height = (h + 1) / 2;
+    const y_plane = try gpa.alloc(u8, @as(usize, w) * h);
+    errdefer gpa.free(y_plane);
+    const uv_plane = try gpa.alloc(u8, @as(usize, half_width) * half_height * 2);
+    errdefer gpa.free(uv_plane);
+
+    for (0..h) |row| {
+        for (0..w) |column| {
+            const at = (row * w + column) * 4;
+            const yuv = conversion.apply(.{
+                @as(f32, @floatFromInt(bytes[at])) / 255.0,
+                @as(f32, @floatFromInt(bytes[at + 1])) / 255.0,
+                @as(f32, @floatFromInt(bytes[at + 2])) / 255.0,
+            });
+            y_plane[row * w + column] = @intFromFloat(std.math.clamp(yuv[0], 0.0, 1.0) * 255.0);
+        }
+    }
+    for (0..half_height) |row| {
+        for (0..half_width) |column| {
+            var cb: f32 = 0;
+            var cr: f32 = 0;
+            var samples: f32 = 0;
+            for (0..2) |dy| {
+                for (0..2) |dx| {
+                    const source_y = row * 2 + dy;
+                    const source_x = column * 2 + dx;
+                    if (source_y >= h or source_x >= w) continue;
+                    const at = (source_y * w + source_x) * 4;
+                    const yuv = conversion.apply(.{
+                        @as(f32, @floatFromInt(bytes[at])) / 255.0,
+                        @as(f32, @floatFromInt(bytes[at + 1])) / 255.0,
+                        @as(f32, @floatFromInt(bytes[at + 2])) / 255.0,
+                    });
+                    cb += yuv[1];
+                    cr += yuv[2];
+                    samples += 1;
+                }
+            }
+            const at = (row * half_width + column) * 2;
+            uv_plane[at] = @intFromFloat(std.math.clamp(cb / samples, 0.0, 1.0) * 255.0);
+            uv_plane[at + 1] = @intFromFloat(std.math.clamp(cr / samples, 0.0, 1.0) * 255.0);
+        }
+    }
+    return .{ .y = y_plane, .uv = uv_plane, .width = w, .height = h };
+}
+
+/// Activates bundle_path on a fresh session with real face tracking and
+/// segmentation enabled, feeds a real corpus portrait (not a synthetic
+/// frame) to both the analysis path and the render preview, and
+/// requests a screenshot at out_path once real results have landed -
+/// bgfx's own default callback (no custom one is wired here, since
+/// RendererDesc has no callback field to carry one through the frozen
+/// ABI) writes it as out_path ++ ".tga".
 fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, out_path: [:0]const u8) !void {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
+
+    const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+    defer gpa.free(face_bytes);
+    if (abi.ck_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+        return error.EnableFaceTrackingFailed;
+    }
+    const segmentation_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, segmentation_model_path, gpa, .limited(16 << 20));
+    defer gpa.free(segmentation_bytes);
+    if (abi.ck_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) {
+        return error.EnableSegmentationFailed;
+    }
+    // Enabled unconditionally, same as face tracking and segmentation
+    // above: only beauty-baseline actually splices a beauty node, so
+    // this is a real no-op for the other reference lenses (beautyActive
+    // gates on the active lens, not just the session) rather than a
+    // per-lens special case here. Enabling before activation matters -
+    // activation applies the lens's own default effect values to
+    // whatever chain is already live, and a chain enabled afterward
+    // would silently miss them.
+    if (abi.ck_session_enable_beauty(session, beauty_resource_path) != .ok) {
+        return error.EnableBeautyFailed;
+    }
 
     const activated = abi.ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
     if (activated != .ok) {
@@ -67,20 +163,38 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         return error.ActivationFailed;
     }
 
-    const frame = try synthFrame(gpa, width, height);
-    defer frame.deinit(gpa);
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
 
     const desc: abi.FrameDesc = .{
-        .width = width,
-        .height = height,
+        .width = planes.width,
+        .height = planes.height,
         .pixel_format = 0,
         .color_standard = 0,
         .color_range = 1,
         .flags = 0,
         .timestamp_us = 1000,
     };
-    const half_w = (width + 1) / 2;
-    if (abi.ck_session_submit_frame_copy(session, &desc, frame.y.ptr, width, frame.uv.ptr, half_w * 2) != .ok) {
+    const half_w = (planes.width + 1) / 2;
+    if (abi.ck_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.TrackFrameFailed;
+    }
+
+    // Face tracking runs off-thread; wait for a real result before
+    // proceeding so the render below reflects real landmarks, not
+    // whatever the worker's first frame or two happens to still be
+    // computing.
+    var result: abi.FaceResult = undefined;
+    var polls: usize = 0;
+    while (abi.ck_session_face_result(session, &result) == .again) {
+        std.Thread.yield() catch {};
+        polls += 1;
+        if (polls > 100_000_000) return error.FaceResultTimedOut;
+    }
+
+    if (abi.ck_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
         return error.SubmitFailed;
     }
 
@@ -114,12 +228,12 @@ fn sha256Hex(data: []const u8) [64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-/// Activates lens_name's packaged bundle twice, rendering the same fixed
-/// input through each, and asserts the two screenshots are byte-
-/// identical - proving the lens is bit-stable, not just that it
+/// Activates lens_name's packaged bundle twice, rendering the same real
+/// corpus portrait through each, and asserts the two screenshots are
+/// byte-identical - proving the lens is bit-stable, not just that it
 /// happened to render something. Returns the hex hash of that output on
 /// success, null (with a printed reason) on failure.
-fn checkDeterminism(gpa: std.mem.Allocator, io: std.Io, engine: *abi.Engine, lens_name: []const u8) !?[64]u8 {
+fn checkDeterminism(gpa: std.mem.Allocator, engine: *abi.Engine, lens_name: []const u8) !?[64]u8 {
     var bundle_buf: [256]u8 = undefined;
     const bundle_path = try std.fmt.bufPrint(&bundle_buf, ".lens-packages/{s}", .{lens_name});
     var out_a_buf: [256:0]u8 = undefined;
@@ -137,9 +251,9 @@ fn checkDeterminism(gpa: std.mem.Allocator, io: std.Io, engine: *abi.Engine, len
     var path_b_buf: [256]u8 = undefined;
     const path_b = try std.fmt.bufPrint(&path_b_buf, "{s}.tga", .{out_b});
 
-    const shot_a = try std.Io.Dir.cwd().readFileAlloc(io, path_a, gpa, .limited(8 << 20));
+    const shot_a = try std.Io.Dir.cwd().readFileAlloc(harness_io, path_a, gpa, .limited(8 << 20));
     defer gpa.free(shot_a);
-    const shot_b = try std.Io.Dir.cwd().readFileAlloc(io, path_b, gpa, .limited(8 << 20));
+    const shot_b = try std.Io.Dir.cwd().readFileAlloc(harness_io, path_b, gpa, .limited(8 << 20));
     defer gpa.free(shot_b);
 
     if (!std.mem.eql(u8, shot_a, shot_b)) {
@@ -153,6 +267,7 @@ fn checkDeterminism(gpa: std.mem.Allocator, io: std.Io, engine: *abi.Engine, len
 
 pub fn main(init_args: std.process.Init) !u8 {
     const gpa = init_args.gpa;
+    harness_io = init_args.io;
 
     var arg_it = std.process.Args.Iterator.init(init_args.minimal.args);
     _ = arg_it.next();
@@ -177,7 +292,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     var current: std.Io.Writer.Allocating = .init(gpa);
     defer current.deinit();
     for (reference_lenses) |name| {
-        const hash = try checkDeterminism(gpa, init_args.io, engine, name) orelse return 1;
+        const hash = try checkDeterminism(gpa, engine, name) orelse return 1;
         try current.writer.print("{s} {s}\n", .{ name, hash });
     }
 

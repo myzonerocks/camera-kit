@@ -50,3 +50,52 @@ pub fn process(
     _ = rgba_out;
     return error.ProcessRefused;
 }
+
+pub const Interop = struct {};
+
+pub fn interopCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemory }!*Interop {
+    _ = gpa;
+    return error.Unsupported;
+}
+
+pub fn interopDestroy(gpa: std.mem.Allocator, interop: *Interop) void {
+    _ = gpa;
+    _ = interop;
+}
+
+pub fn composite(interop: *Interop, beauty: *Beauty, width: u32, height: u32) ?*anyopaque {
+    _ = interop;
+    _ = beauty;
+    _ = width;
+    _ = height;
+    return null;
+}
+
+pub const InputSurface = struct {};
+
+pub fn inputSurfaceCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemory }!*InputSurface {
+    _ = gpa;
+    return error.Unsupported;
+}
+
+pub fn inputSurfaceDestroy(gpa: std.mem.Allocator, surface: *InputSurface) void {
+    _ = gpa;
+    _ = surface;
+}
+
+pub fn inputSurfaceNativeTexture(surface: *InputSurface, device: ?*anyopaque, width: u32, height: u32) ?*anyopaque {
+    _ = surface;
+    _ = device;
+    _ = width;
+    _ = height;
+    return null;
+}
+
+pub fn processTexture(surface: *InputSurface, beauty: *Beauty, width: u32, height: u32, result: ?*const face.Result) bool {
+    _ = surface;
+    _ = beauty;
+    _ = width;
+    _ = height;
+    _ = result;
+    return false;
+}

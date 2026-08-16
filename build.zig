@@ -846,9 +846,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "render", .module = render_module },
                 .{ .name = "face", .module = face_module },
-                .{ .name = "tracking", .module = trackingStubModule(b, target, optimize, face_module, math_module) },
-                .{ .name = "segmentation", .module = segmentationStubModule(b, target, optimize, math_module) },
-                .{ .name = "beauty", .module = beautyStubModule(b, target, optimize, face_module) },
                 .{ .name = "manifest", .module = lens_manifest_module },
                 .{ .name = "trigger", .module = lens_trigger_module },
                 .{ .name = "runtime", .module = lens_runtime_module },
@@ -858,13 +855,92 @@ pub fn build(b: *std.Build) void {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
         }
+        // Real tracking/segmentation/beauty for this consumer specifically
+        // - a conformance proof against a stub capability only ever
+        // exercises a lens's own degradation path (see the conformance-
+        // harness history below), never the real thing a device runs.
+        // Own module instances, the same reason runtime_ios/runtime_
+        // android need their own: a fresh consumer needs a fresh linked
+        // instance, not a shared one.
+        const conformance_inference = have_inference_stack and flatc_exe != null;
+        if (conformance_inference) {
+            const runtime_conformance = b.createModule(.{
+                .root_source_file = b.path("adapters/tracking/runtime.zig"),
+                .target = target,
+                .optimize = optimize,
+            });
+            runtime_conformance.link_libc = true;
+            runtime_conformance.addIncludePath(b.path(".vendor/litert"));
+            const transpose_conv_bias_conformance = b.createModule(.{
+                .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "runtime", .module = runtime_conformance },
+                    .{ .name = "segment", .module = segment_module },
+                },
+            });
+            transpose_conv_bias_conformance.link_libc = true;
+            transpose_conv_bias_conformance.addIncludePath(b.path(".vendor/litert"));
+            const tracking_conformance = b.createModule(.{
+                .root_source_file = b.path("adapters/tracking/tracking.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "bundle", .module = bundle_module },
+                    .{ .name = "runtime", .module = runtime_conformance },
+                    .{ .name = "detector", .module = detector_module },
+                    .{ .name = "sampler", .module = sampler_module },
+                    .{ .name = "face", .module = face_module },
+                    .{ .name = "tracker", .module = tracker_module },
+                    .{ .name = "graph", .module = graph_module },
+                    .{ .name = "math", .module = math_module },
+                },
+            });
+            const segmentation_conformance = b.createModule(.{
+                .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "runtime", .module = runtime_conformance },
+                    .{ .name = "sampler", .module = sampler_module },
+                    .{ .name = "math", .module = math_module },
+                    .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_conformance },
+                },
+            });
+            const beauty_conformance = b.createModule(.{
+                .root_source_file = b.path("adapters/beauty/beauty.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "face", .module = face_module },
+                    .{ .name = "face106", .module = face106_module },
+                },
+            });
+            abi_conformance_module.addImport("tracking", tracking_conformance);
+            abi_conformance_module.addImport("segmentation", segmentation_conformance);
+            abi_conformance_module.addImport("beauty", beauty_conformance);
+        } else {
+            abi_conformance_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
+            abi_conformance_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
+            abi_conformance_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
+        }
         const conformance_module = b.createModule(.{
             .root_source_file = b.path("harness/conformance.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "abi", .module = abi_conformance_module }},
+            .imports = &.{
+                .{ .name = "abi", .module = abi_conformance_module },
+                .{ .name = "sampler", .module = sampler_module },
+                .{ .name = "math", .module = math_module },
+            },
         });
         conformance_module.addIncludePath(b.path(".vendor/glfw/include"));
+        // Declarations only - the gpupixel archive already carries a
+        // compiled stb_image implementation on this macOS-only target,
+        // the same reason tracking_module's own include here needs no
+        // paired stb_image_impl.c source file.
+        conformance_module.addIncludePath(b.path(".vendor/gpupixel/third_party/stb/include/stb"));
         conformance_module.link_libc = true;
         const conformance_exe = b.addExecutable(.{
             .name = "conformance",
@@ -872,6 +948,27 @@ pub fn build(b: *std.Build) void {
         });
         conformance_module.linkLibrary(bgfx_lib);
         conformance_module.linkLibrary(glfw_lib);
+        if (conformance_inference) {
+            conformance_module.link_libcpp = true;
+            conformance_module.linkLibrary(buildTfliteLib(b, target, optimize, flatc_exe.?, null));
+            conformance_module.linkLibrary(buildXnnpackLib(b, target, optimize, null, null));
+            conformance_module.linkLibrary(buildAbseilLib(b, target, optimize, null));
+            conformance_module.linkLibrary(buildRuyLib(b, target, optimize, null));
+            conformance_module.linkLibrary(buildFarmhashLib(b, target, optimize, null));
+            conformance_module.linkLibrary(buildFlatbuffersLib(b, target, optimize, null));
+            conformance_module.linkLibrary(buildFft2dLib(b, target, optimize, null));
+            conformance_module.linkLibrary(buildCpuinfoLib(b, target, optimize, null));
+            conformance_module.linkLibrary(buildPthreadpoolLib(b, target, optimize, null));
+            // beauty.zig's real implementation calls into the GPUPixel-
+            // backed shim (adapters/beauty/beauty_shim_apple.mm) - this
+            // target is already macOS-only (harness_step's own outer
+            // condition), the same reason tracking_module links it
+            // unconditionally too.
+            conformance_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
+            conformance_module.linkFramework("AppKit", .{});
+            conformance_module.linkFramework("OpenGL", .{});
+            conformance_module.linkFramework("CoreVideo", .{});
+        }
         for ([_][]const u8{ "Metal", "QuartzCore", "Cocoa", "IOKit", "CoreFoundation", "Foundation", "AppKit", "CoreMedia", "CoreVideo", "VideoToolbox" }) |framework| {
             conformance_exe.root_module.linkFramework(framework, .{});
         }

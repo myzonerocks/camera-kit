@@ -185,6 +185,25 @@ pub const Session = struct {
     /// fresh mask is ready, since bgfx's static textures are immutable.
     segmentation_texture: ?render.TextureHandle = null,
     beauty_chain: ?*beauty.Beauty = null,
+    /// The GPU beauty compositing bridge: beauty_input writes the live
+    /// preview into a platform-shared surface gpupixel reads zero-copy,
+    /// beauty_interop reads gpupixel's own output back out the same
+    /// way. Both lazily created the first time a lens with a beauty
+    /// node actually runs with beauty enabled, torn down on disable or
+    /// session destroy.
+    beauty_input: ?*beauty.InputSurface = null,
+    beauty_interop: ?*beauty.Interop = null,
+    /// beauty_input's shared surface wrapped as a render target bgfx
+    /// draws the current frame into, and beauty_interop's composited
+    /// result wrapped as a plain sampled texture - both recreated only
+    /// when the underlying native surface actually changes (a resize,
+    /// or first creation), tracked by comparing against the native
+    /// pointer last wrapped rather than assuming stability from size
+    /// alone.
+    beauty_input_target: ?render.Renderer.OffscreenTarget = null,
+    beauty_input_native: ?*anyopaque = null,
+    beauty_output_texture: ?render.TextureHandle = null,
+    beauty_output_native: ?*anyopaque = null,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -264,20 +283,126 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
     e.chain_height = height;
 }
 
-/// Draws the active lens's full composite chain - shader.pass,
-/// lut.pass, and blend.pass nodes mixed freely: the camera preview
-/// captures into one ping-pong target (view 0), every ready stage reads
-/// the previous stage and writes the other target, and whichever ready
-/// stage draws last presents straight to the swap chain instead of an
-/// offscreen one. View ids increase monotonically because bgfx orders
-/// view execution by id, not by submission order - that ordering is
-/// what makes this an actual chain rather than stages racing each
-/// other. A stage whose resource (a program, a texture) isn't ready
-/// yet - most often a lut.pass or blend.pass node whose asset hasn't
-/// landed - is skipped outright: the chain just has one fewer stage
-/// this frame, not a gap that draws nothing. A blend.pass node whose
-/// background HAS landed but segmentation is unavailable still draws,
-/// against the renderer's always-foreground default mask.
+/// Whether the live preview needs the GPU beauty compositing bridge
+/// running this frame: a session can enable beauty independently of
+/// which lens is active, but compositing every frame through gpupixel
+/// for a lens that never spliced a beauty node can never produce a
+/// visible difference, so it stays off until both hold.
+fn beautyActive(s: *const Session) bool {
+    if (s.beauty_chain == null) return false;
+    const lens = s.active_lens orelse return false;
+    return lens.hasBeautyNodes();
+}
+
+/// Runs the beauty chain over the frame the PREVIOUS call wrote into the
+/// shared surface, returns that as the composited result, then queues
+/// this frame's own camera content into the same surface for the next
+/// call to read - one frame of latency, and the reason this is
+/// structured read-then-write rather than write-then-read. bgfx only
+/// actually executes a queued draw (the write below) when this frame's
+/// own bgfx_frame() call runs, at the end of ck_engine_render_frame,
+/// strictly after this function returns; reading the surface for
+/// content this same call just queued would race a Metal write that has
+/// not happened on the GPU yet. Reading what a fully-executed PRIOR
+/// frame wrote is what makes the cross-API bridge (Metal write, GL
+/// read) correct without forcing a synchronous GPU stall every frame -
+/// the CPU roundtrip ck_session_beautify_frame already accepts a much
+/// larger per-frame cost than one frame of latency ever could.
+///
+/// The live-preview integration ck_session_beautify_frame's own doc
+/// comment names as this row's device-side counterpart. Draws into its
+/// own dedicated, platform-shared target rather than the ping-pong pair
+/// the rest of the chain shares, since that target has to stay backed
+/// by the same native surface gpupixel reads zero-copy on its own
+/// thread; consumes exactly one view id, reserved by the caller in
+/// next_view_id before any chain_order stage claims one. Degrades to
+/// returning input_texture unchanged if any step fails - the SPEC's
+/// rule for a node whose capability is unavailable holding its default
+/// state, same as blend.pass's mask.
+fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, width: u16, height: u16, input_texture: render.TextureHandle) render.TextureHandle {
+    const chain = s.beauty_chain.?;
+
+    const input_surface = s.beauty_input orelse blk: {
+        const created = beauty.inputSurfaceCreate(s.engine.gpa) catch return input_texture;
+        s.beauty_input = created;
+        break :blk created;
+    };
+    const interop = s.beauty_interop orelse blk: {
+        const created = beauty.interopCreate(s.engine.gpa) catch return input_texture;
+        s.beauty_interop = created;
+        break :blk created;
+    };
+
+    // null on backends with no separate device handle to pass (GLES: a
+    // context is implicit and thread-bound, nothing to hand across this
+    // boundary) - inputSurfaceNativeTexture's own platform
+    // implementation decides whether it actually needs one non-null
+    // (Metal does; GLES ignores the argument entirely), so a null
+    // device here is not itself a reason to give up.
+    const device = r.nativeDevice();
+    const native_texture = beauty.inputSurfaceNativeTexture(input_surface, device, width, height) orelse return input_texture;
+
+    const target_has_a_prior_write = s.beauty_input_target != null and s.beauty_input_native == native_texture;
+    if (!target_has_a_prior_write) {
+        if (s.beauty_input_target) |old| render.Renderer.destroyOffscreenTarget(old);
+        s.beauty_input_target = null;
+        // May legitimately fail the very first time a given native
+        // surface is wrapped: the underlying bgfx texture's own
+        // creation is queued, not immediate, and nothing has forced it
+        // to actually process yet this frame. Leaving beauty_input_
+        // native unset here means the next call retries the whole wrap
+        // rather than caching a handle that never resolved.
+        const wrapped = r.wrapExternalRenderTarget(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(native_texture)) orelse return input_texture;
+        s.beauty_input_target = render.Renderer.createExternalTarget(wrapped) catch {
+            r.destroyTexture(wrapped);
+            return input_texture;
+        };
+        s.beauty_input_native = native_texture;
+    }
+
+    var beautified = input_texture;
+    if (target_has_a_prior_write) {
+        var result: face.Result = undefined;
+        var tracked: ?*const face.Result = null;
+        if (s.face_tracking) |worker| {
+            if (tracking.readResult(worker, &result)) tracked = &result;
+        }
+        if (beauty.processTexture(input_surface, chain, width, height, tracked)) {
+            if (beauty.composite(interop, chain, width, height)) |composited| {
+                if (s.beauty_output_texture == null or s.beauty_output_native != composited) {
+                    if (s.beauty_output_texture) |old| r.destroyTexture(old);
+                    s.beauty_output_texture = r.wrapExternalTexture(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(composited), false);
+                    s.beauty_output_native = composited;
+                }
+                beautified = s.beauty_output_texture.?;
+            }
+        }
+    }
+
+    const view_id = next_view_id.*;
+    next_view_id.* += 1;
+    render.Renderer.setViewTarget(view_id, s.beauty_input_target.?, width, height);
+    r.submitShaderPass(view_id, r.passthroughProgram(), input_texture);
+
+    return beautified;
+}
+
+/// Draws the active lens's full composite chain - beauty, shader.pass,
+/// lut.pass, and blend.pass mixed freely: the camera preview captures
+/// into one ping-pong target (view 0), beauty (when active) composites
+/// into its own dedicated target right after, every ready lens stage
+/// reads the previous stage and writes the other ping-pong target, and
+/// whichever stage draws last presents straight to the swap chain
+/// instead of an offscreen one. View ids increase monotonically because
+/// bgfx orders view execution by id, not by submission order - that
+/// ordering is what makes this an actual chain rather than stages
+/// racing each other. A lens stage whose resource (a program, a
+/// texture) isn't ready yet - most often a lut.pass or blend.pass node
+/// whose asset hasn't landed - is skipped outright: the chain just has
+/// one fewer stage this frame, not a gap that draws nothing. A
+/// blend.pass node whose background HAS landed but segmentation is
+/// unavailable still draws, against the renderer's always-foreground
+/// default mask.
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
     var ready_count: usize = 0;
     for (s.chain_order) |entry| {
@@ -293,7 +418,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         };
         if (ready) ready_count += 1;
     }
-    if (ready_count == 0) {
+    const beauty_active = beautyActive(s);
+    if (ready_count == 0 and !beauty_active) {
         r.submitPreview(0, current.preview, rotation * 90, mirror);
         return;
     }
@@ -306,6 +432,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     render.Renderer.setViewTarget(0, targets[0], width, height);
     r.submitPreview(0, current.preview, rotation * 90, mirror);
     var input_texture = targets[0].texture;
+    var next_view_id: u8 = 1;
+
+    if (beauty_active) {
+        input_texture = applyBeautyCompositing(r, s, &next_view_id, width, height, input_texture);
+    }
 
     var drawn: usize = 0;
     var next_slot: usize = 1;
@@ -314,7 +445,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .shader => {
                 const program_idx = s.shader_programs.get(entry.graph_index) orelse continue;
                 drawn += 1;
-                const view_id: u8 = @intCast(drawn);
+                const view_id = next_view_id;
+                next_view_id += 1;
                 const output = if (drawn == ready_count) null else targets[next_slot % 2];
                 render.Renderer.setViewTarget(view_id, output, width, height);
                 r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture);
@@ -326,7 +458,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             .lut => {
                 const lut_texture = s.lut_textures.get(entry.graph_index) orelse continue;
                 drawn += 1;
-                const view_id: u8 = @intCast(drawn);
+                const view_id = next_view_id;
+                next_view_id += 1;
                 const output = if (drawn == ready_count) null else targets[next_slot % 2];
                 render.Renderer.setViewTarget(view_id, output, width, height);
                 r.submitLutPass(view_id, input_texture, lut_texture);
@@ -339,7 +472,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const background_texture = s.blend_textures.get(entry.graph_index) orelse continue;
                 const mask_texture = s.segmentation_texture orelse r.default_mask_texture;
                 drawn += 1;
-                const view_id: u8 = @intCast(drawn);
+                const view_id = next_view_id;
+                next_view_id += 1;
                 const output = if (drawn == ready_count) null else targets[next_slot % 2];
                 render.Renderer.setViewTarget(view_id, output, width, height);
                 r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
@@ -349,6 +483,16 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
         }
+    }
+
+    if (ready_count == 0) {
+        // beauty_active is guaranteed true here (the ready_count == 0
+        // and !beauty_active case already returned above): beauty's own
+        // output is a plain sampled texture, never a view's render
+        // target, so with no lens stage to hand it off to, it still
+        // needs one real draw to actually reach the swap chain.
+        render.Renderer.setViewTarget(next_view_id, null, width, height);
+        r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture);
     }
 }
 
@@ -387,6 +531,7 @@ pub fn destroySession(session: *Session) void {
     session.lens_graph.deinit();
     if (session.beauty_chain) |chain| beauty.destroy(session.engine.gpa, chain);
     session.beauty_chain = null;
+    destroyBeautyCompositing(session);
     if (session.face_tracking) |worker| tracking.destroy(worker);
     session.face_tracking = null;
     if (session.segmentation_worker) |worker| segmentation.destroy(worker);
@@ -394,6 +539,24 @@ pub fn destroySession(session: *Session) void {
     destroySegmentationTexture(session);
     releaseCurrentFrame(session);
     session.engine.gpa.destroy(session);
+}
+
+/// Tears down the GPU beauty compositing bridge's platform surfaces -
+/// safe to call whether or not they were ever actually created (both
+/// ck_session_disable_beauty and destroySession reach this unconditionally).
+fn destroyBeautyCompositing(session: *Session) void {
+    if (session.beauty_input_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    session.beauty_input_target = null;
+    session.beauty_input_native = null;
+    if (session.engine.renderer) |*r| {
+        if (session.beauty_output_texture) |tex| r.destroyTexture(tex);
+    }
+    session.beauty_output_texture = null;
+    session.beauty_output_native = null;
+    if (session.beauty_input) |surface| beauty.inputSurfaceDestroy(session.engine.gpa, surface);
+    session.beauty_input = null;
+    if (session.beauty_interop) |interop| beauty.interopDestroy(session.engine.gpa, interop);
+    session.beauty_interop = null;
 }
 
 fn releaseCurrentFrame(session: *Session) void {
@@ -481,7 +644,7 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
-            if (s.chain_order.len == 0) {
+            if (s.chain_order.len == 0 and !beautyActive(s)) {
                 r.submitPreview(0, current.preview, rotation * 90, mirror);
             } else {
                 renderCompositeChain(e, r, s, current, rotation, mirror) catch {
@@ -524,13 +687,13 @@ pub export fn ck_session_submit_frame(session: ?*Session, desc: ?*const FrameDes
         pixel_format_bgra8, pixel_format_rgba8 => {
             if (p.plane_count != 1) return .invalid_argument;
             const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
-            const texture = r.wrapExternalTexture(@intCast(d.width), @intCast(d.height), format, @intCast(p.planes[0]));
+            const texture = r.wrapExternalTexture(@intCast(d.width), @intCast(d.height), format, @intCast(p.planes[0]), false);
             s.current = .{ .desc = d.*, .preview = .{ .bgra = .{ .texture = texture } } };
         },
         pixel_format_nv12 => {
             if (p.plane_count != 2) return .invalid_argument;
-            const y = r.wrapExternalTexture(@intCast(d.width), @intCast(d.height), render.c.BGFX_TEXTURE_FORMAT_R8, @intCast(p.planes[0]));
-            const uv = r.wrapExternalTexture(@intCast(d.width / 2), @intCast(d.height / 2), render.c.BGFX_TEXTURE_FORMAT_RG8, @intCast(p.planes[1]));
+            const y = r.wrapExternalTexture(@intCast(d.width), @intCast(d.height), render.c.BGFX_TEXTURE_FORMAT_R8, @intCast(p.planes[0]), false);
+            const uv = r.wrapExternalTexture(@intCast(d.width / 2), @intCast(d.height / 2), render.c.BGFX_TEXTURE_FORMAT_RG8, @intCast(p.planes[1]), false);
             const standard: math.color.Standard = switch (d.color_standard) {
                 0 => .bt601,
                 2 => .bt2020,
@@ -750,6 +913,7 @@ pub export fn ck_session_disable_beauty(session: ?*Session) void {
     const s = session orelse return;
     if (s.beauty_chain) |chain| beauty.destroy(s.engine.gpa, chain);
     s.beauty_chain = null;
+    destroyBeautyCompositing(s);
 }
 
 /// Effect identifiers follow the header: smooth, whiten, thin face, big
