@@ -30,9 +30,16 @@ pub const Loader = struct {
         errdefer gpa.free(owned_path);
         loader.* = .{
             .gpa = gpa,
-            .io_state = std.Io.Threaded.init(gpa, .{}),
+            // The single-threaded form, not the pooled one tracking.zig's
+            // long-lived worker uses: this loader already has its own
+            // dedicated OS thread and never shares Io duties with
+            // another one, so there is nothing for a second layer of
+            // internal threading to coordinate - the same reasoning
+            // core/abi's own defaultIo() already applies.
+            .io_state = std.Io.Threaded.init_single_threaded,
             .path = owned_path,
         };
+        errdefer loader.io_state.deinit();
         loader.thread = std.Thread.spawn(.{}, run, .{loader}) catch return error.OutOfMemory;
         return loader;
     }
