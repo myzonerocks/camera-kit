@@ -109,6 +109,8 @@ final class PreviewViewController: UIViewController {
         _ = ck_session_set_beauty(session, Int32(slider.tag), slider.value)
     }
 
+    private var conformanceStarted = false
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let scale = view.window?.screen.scale ?? 3.0
@@ -116,6 +118,18 @@ final class PreviewViewController: UIViewController {
         let pixelHeight = UInt32(view.bounds.height * scale)
         metalView.metalLayer.contentsScale = scale
         metalView.metalLayer.drawableSize = CGSize(width: CGFloat(pixelWidth), height: CGFloat(pixelHeight))
+
+        // Row 8's conformance run reuses this same real window/renderer
+        // setup, just feeding a fixed corpus frame instead of live
+        // camera - see ConformanceRunner. Own engine/session instances,
+        // so the normal live-preview path below never starts.
+        if CommandLine.arguments.contains("-CKConformance") {
+            if !conformanceStarted, pixelWidth > 0 {
+                conformanceStarted = true
+                ConformanceRunner.run(metalLayer: metalView.metalLayer, width: pixelWidth, height: pixelHeight)
+            }
+            return
+        }
 
         if engine == nil, pixelWidth > 0 {
             startEngine(pixelWidth: pixelWidth, pixelHeight: pixelHeight)
