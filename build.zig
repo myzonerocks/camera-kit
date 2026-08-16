@@ -240,8 +240,8 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| lens_validate_run.addArgs(args);
     lens_validate_step.dependOn(&lens_validate_run.step);
 
-    // SPEC.md section 9: the validator runs against every reference
-    // lens, in CI. One bundle failing validation fails the build.
+    // The validator runs against every reference lens, in CI. One
+    // bundle failing validation fails the build.
     // Deliberately NOT wired into ci_step: lens_validator_exe always
     // depends on a real shaderc (the CLI's whole point is giving a real
     // answer), and ci_step is the fast default path the "gates" job's
@@ -258,7 +258,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // Packages every reference lens into .lens-packages/<name> (compiled
-    // shader bytecode alongside the source, SPEC.md section 7) - the
+    // shader bytecode alongside the source) - the
     // tracking harness activates from there to prove shader.pass nodes
     // against a real packaged bundle, not a hand-built one.
     const lens_package_reference_step = b.step("lens-package-reference", "Package every bundle under lenses/reference/ into .lens-packages/");
@@ -2409,9 +2409,9 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         .{ .name = "fs_preview_rgba", .kind = "fragment" },
         .{ .name = "fs_preview_nv12", .kind = "fragment" },
         // The one fixed vertex contract every lens shader pass compiles
-        // against (lenses/SPEC.md section 7) - source and varying def
-        // both live under lenses/shaders/, not the engine's own preview
-        // shader directory, since that's the contract lens authors read.
+        // against - source and varying def both live under
+        // lenses/shaders/, not the engine's own preview shader
+        // directory, since that's the contract lens authors read.
         .{ .name = "vs_lens_pass", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{

@@ -103,8 +103,8 @@ pub const FramePlanes = extern struct {
     planes: [3]u64,
 };
 
-/// The live signals a tick evaluates a lens's compiled triggers against
-/// (SPEC.md 6.1) - blendshapes mirrors ck_face_result's own inline-array
+/// The live signals a tick evaluates a lens's compiled triggers against -
+/// blendshapes mirrors ck_face_result's own inline-array
 /// convention rather than a pointer, so a caller reading a face result
 /// can pass its blendshapes straight through. has_face false means no
 /// face-driven signal (present or any blendshape) reads as true.
@@ -150,6 +150,15 @@ pub const Engine = struct {
     texture_pool_capacity: u16,
     staging_pool_capacity: u16,
     renderer: ?render.Renderer = null,
+    /// Ping-pong offscreen targets a shader.pass chain renders through:
+    /// camera capture and every pass but the last write into whichever
+    /// of these it isn't reading from that frame. Sized to the active
+    /// frame's dimensions and recreated only when that size changes,
+    /// never per frame - only one chain is ever in flight at a time, so
+    /// two targets are enough regardless of how many passes a lens has.
+    chain_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
+    chain_width: u16 = 0,
+    chain_height: u16 = 0,
 };
 
 const CurrentFrame = struct {
@@ -173,6 +182,10 @@ pub const Session = struct {
     /// from_directory only - the bytes-based activate has no bundle path
     /// to read compiled shaders from), destroyed on deactivation.
     shader_programs: std.AutoHashMapUnmanaged(graph.NodeIndex, u16) = .empty,
+    /// shader_programs' keys, in the chain's real draw order - only the
+    /// nodes that actually got a program. Owned, rebuilt every
+    /// activation, freed on teardown.
+    shader_pass_order: []graph.NodeIndex = &.{},
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -199,10 +212,56 @@ pub fn createEngine(gpa: std.mem.Allocator, config: EngineConfig) error{OutOfMem
 }
 
 pub fn destroyEngine(engine: *Engine) void {
+    for (engine.chain_targets) |slot| {
+        if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
+    }
     if (engine.renderer) |*r| r.deinit();
     engine.texture_pool.deinit();
     engine.staging_pool.deinit();
     engine.gpa.destroy(engine);
+}
+
+/// (Re)creates both ping-pong chain targets when the frame size changes
+/// or they don't exist yet - never per frame once a size is stable, so
+/// the render path itself allocates nothing.
+fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
+    if (e.chain_width == width and e.chain_height == height and e.chain_targets[0] != null) return;
+    for (&e.chain_targets) |*slot| {
+        if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+    }
+    e.chain_width = width;
+    e.chain_height = height;
+}
+
+/// Draws the active lens's full shader.pass chain: the camera preview
+/// captures into one ping-pong target (view 0), every pass reads the
+/// previous stage and writes the other target, and the last pass
+/// presents straight to the swap chain instead of an offscreen one.
+/// View ids increase monotonically (0 = capture, 1..N = passes) because
+/// bgfx orders view execution by id, not by submission order - that
+/// ordering is what makes this an actual chain rather than N passes
+/// racing each other.
+fn renderShaderPassChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
+    const width: u16 = @intCast(current.desc.width);
+    const height: u16 = @intCast(current.desc.height);
+    try ensureChainTargets(e, width, height);
+    const targets = [2]render.Renderer.OffscreenTarget{ e.chain_targets[0].?, e.chain_targets[1].? };
+
+    render.Renderer.setViewTarget(0, targets[0], width, height);
+    r.submitPreview(0, current.preview, rotation * 90, mirror);
+    var input_texture = targets[0].texture;
+
+    const passes = s.shader_pass_order;
+    for (passes, 0..) |graph_index, i| {
+        const program_idx = s.shader_programs.get(graph_index).?;
+        const view_id: u8 = @intCast(1 + i);
+        const is_last = i == passes.len - 1;
+        const output = if (is_last) null else targets[(i + 1) % 2];
+        render.Renderer.setViewTarget(view_id, output, width, height);
+        r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture);
+        if (output) |target| input_texture = target.texture;
+    }
 }
 
 pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!*Session {
@@ -321,7 +380,15 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
-            r.submitPreview(current.preview, rotation * 90, mirror);
+            if (s.shader_pass_order.len == 0) {
+                r.submitPreview(0, current.preview, rotation * 90, mirror);
+            } else {
+                renderShaderPassChain(e, r, s, current, rotation, mirror) catch {
+                    // A chain target failed to (re)create - present the
+                    // plain preview rather than nothing this frame.
+                    r.submitPreview(0, current.preview, rotation * 90, mirror);
+                };
+            }
         } else {
             r.touch();
         }
@@ -614,6 +681,8 @@ fn destroyShaderPrograms(session: *Session) void {
     var it = session.shader_programs.valueIterator();
     while (it.next()) |handle| render.Renderer.destroyProgram(.{ .idx = handle.* });
     session.shader_programs.clearRetainingCapacity();
+    session.engine.gpa.free(session.shader_pass_order);
+    session.shader_pass_order = &.{};
 }
 
 /// Replaces any currently active lens with the one manifest_json
@@ -654,17 +723,20 @@ pub export fn ck_session_activate_lens(session: ?*Session, manifest_json: ?[*]co
 }
 
 /// Loads whatever compiled bytecode a spliced shader.pass node names
-/// (shaders/<stem>.<profile>.bin, SPEC.md 7) and creates its bgfx
-/// program. Best-effort per node: a packaged bundle was already proven
+/// (shaders/<stem>.<profile>.bin) and creates its bgfx program.
+/// Best-effort per node: a packaged bundle was already proven
 /// to compile by the validator, so a failure here is a genuine runtime
 /// anomaly (missing file, wrong profile) rather than an authoring
 /// error - that one pass simply has no program and does not draw,
 /// rather than failing the whole activation over it.
 fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
     const lens = if (session.active_lens) |*l| l else return;
-    const passes = try lens.shaderPassNodes(gpa);
+    const passes = try lens.shaderPassNodes(gpa, &session.lens_graph);
     defer gpa.free(passes);
     if (passes.len == 0) return;
+
+    var order: std.ArrayList(graph.NodeIndex) = .empty;
+    errdefer order.deinit(gpa);
 
     const tag = render.Renderer.currentShaderProfileTag() catch return;
     const io = defaultIo();
@@ -676,8 +748,15 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         const program = render.Renderer.loadLensProgram(bytes) catch continue;
         session.shader_programs.put(gpa, pass.graph_index, program.idx) catch {
             render.Renderer.destroyProgram(program);
+            continue;
         };
+        // Best-effort like the load above: losing this alloc just drops
+        // the pass from the drawn chain, its program still gets torn
+        // down normally since destroyShaderPrograms walks the map, not
+        // this list.
+        order.append(gpa, pass.graph_index) catch {};
     }
+    session.shader_pass_order = try order.toOwnedSlice(gpa);
 }
 
 /// Activates the lens bundle at bundle_path (bundle_path/manifest.json),

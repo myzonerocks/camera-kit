@@ -1,14 +1,12 @@
-//! The reference validator for one .glens bundle, checked directly
-//! against lenses/SPEC.md: a bundle this program accepts is, by
-//! definition, valid, and where this and the spec disagree the spec is
-//! right and this has a bug. Four stages, each collecting every
-//! diagnostic it finds rather than stopping at the first: bundle
-//! structure (section 1), manifest.json (section 2 through 6, via
-//! core/lens/manifest.zig), each trigger's `when` expression (6.1, via
-//! core/lens/trigger.zig), then every shader in shaders/ compiled
-//! through the pinned toolchain (section 7). Later stages only run once
-//! the earlier one is clean, since e.g. a structurally invalid bundle
-//! has no manifest worth parsing.
+//! The reference validator for one .glens bundle: a bundle this program
+//! accepts is, by definition, valid, and where this and the format
+//! disagree the format is right and this has a bug. Four stages, each
+//! collecting every diagnostic it finds rather than stopping at the
+//! first: bundle structure, manifest.json (via core/lens/manifest.zig),
+//! each trigger's `when` expression (via core/lens/trigger.zig), then
+//! every shader in shaders/ compiled through the pinned toolchain.
+//! Later stages only run once the earlier one is clean, since e.g. a
+//! structurally invalid bundle has no manifest worth parsing.
 //!
 //!   lens_validator <bundle-path>
 
@@ -69,8 +67,8 @@ fn walkCategory(
     }
 }
 
-/// Bundle structure per SPEC.md section 1: only manifest.json at the
-/// root plus shaders/ and assets/ subtrees, every file within its
+/// Bundle structure: only manifest.json at the root plus shaders/ and
+/// assets/ subtrees, every file within its
 /// category's size limit, the whole bundle within the total limit. No
 /// path can escape the root by construction - every path here comes
 /// from walking the real directory tree, never from a string a manifest
@@ -146,15 +144,14 @@ const shader_profiles = [_]struct { profile: []const u8, platform: []const u8, t
 
 /// Every file under shaders/ is a fragment shader for a full-screen pass,
 /// authored against the runtime's one fixed vertex/varying contract
-/// (lenses/shaders/varying.def.sc, SPEC.md section 7). Compiled through
-/// the pinned shaderc toolchain to every platform profile a conforming
-/// runtime ships, since a shader that compiles for one platform and not
-/// another is exactly the failure this stage exists to catch before a
-/// lens ships. package_dir, when given, is a bundle directory tree
-/// (already a copy of the source bundle, made by packageLens below)
-/// that gets each compiled variant written into it as
-/// shaders/<name>.<tag>.bin (SPEC.md section 1/7) instead of discarding
-/// the bytes - the same compile, run once, either way.
+/// (lenses/shaders/varying.def.sc). Compiled through the pinned shaderc
+/// toolchain to every platform profile a conforming runtime ships, since
+/// a shader that compiles for one platform and not another is exactly
+/// the failure this stage exists to catch before a lens ships.
+/// package_dir, when given, is a bundle directory tree (already a copy
+/// of the source bundle, made by packageLens below) that gets each
+/// compiled variant written into it as shaders/<name>.<tag>.bin instead
+/// of discarding the bytes - the same compile, run once, either way.
 fn validateShaders(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, bundle_path: []const u8, package_dir: ?[]const u8) !bool {
     var bundle_dir = std.Io.Dir.cwd().openDir(io, bundle_path, .{ .iterate = true }) catch return true;
     defer bundle_dir.close(io);
@@ -558,8 +555,8 @@ test "a fragment shader referencing an unknown symbol fails the shader-compile s
 /// a byte inserted or deleted, a truncation, a chunk duplicated
 /// elsewhere in the string, or (occasionally) `base` ignored entirely in
 /// favor of pure random bytes. This is what turns a handful of seed
-/// corpus entries below into the thousands of malformed variations
-/// SPEC.md section 9 requires the validator survive.
+/// corpus entries below into the thousands of malformed variations the
+/// validator needs to survive without crashing.
 fn mutate(allocator: std.mem.Allocator, random: std.Random, base: []const u8) ![]u8 {
     switch (random.uintLessThan(u8, 6)) {
         0 => {
@@ -626,9 +623,9 @@ const fuzz_seed_manifests = [_][]const u8{
     ,
 };
 
-// SPEC.md section 9: the validator runs against a fuzz corpus of
-// malformed manifests in CI, and a fuzz-found crash or leak is a spec
-// violation of section 8's guarantee, not a lens-author error. Every
+// The validator runs against a fuzz corpus of malformed manifests in
+// CI, and a fuzz-found crash or leak is a real bug in the validator
+// itself, not a lens-author error. Every
 // candidate is either rejected with diagnostics or returns a Manifest
 // this test immediately deinits - std.testing.allocator catches a leak
 // in either path at the end of the run, and a crash here fails the
@@ -663,8 +660,8 @@ const fuzz_seed_shaders = [_][]const u8{
     "#include <bgfx_shader.sh>\nvoid main() {}",
 };
 
-// The shader-input half of SPEC.md section 9's fuzz corpus requirement.
-// Malformed source reaching a real compiler is expected to fail with
+// The shader-input half of the fuzz corpus. Malformed source reaching
+// a real compiler is expected to fail with
 // diagnostics, not to crash or hang our process - shaderc runs as a
 // child process specifically so a compiler crash on adversarial input
 // surfaces as a Term this test observes, never a signal our own

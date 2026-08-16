@@ -1,6 +1,6 @@
 //! Splices one lens's parsed manifest into the session's frame graph and
-//! drives it forward one tick at a time: compiled triggers (SPEC.md 6)
-//! fire their actions on the false-to-true edge, param_ramp/param_set
+//! drives it forward one tick at a time: compiled triggers fire their
+//! actions on the false-to-true edge, param_ramp/param_set
 //! update the lens's own live parameter values, and animation.Ramp
 //! carries an in-flight ramp to its target at the fixed graph timestep.
 //! This module knows the shape of a running lens - node splice/unsplice,
@@ -9,8 +9,8 @@
 //! caller (core/abi) walks tick()'s returned effect values and is the
 //! one that knows how to hand them to the engine.
 //!
-//! Node types are the closed, kit-versioned vocabulary SPEC.md 5 names
-//! (not the format's concern): only the beauty family is wired here.
+//! Node types are the closed, kit-versioned vocabulary a lens manifest
+//! can name: only the beauty family is wired here.
 //! Shader passes, glTF draws, LUT passes, and compositing are real
 //! remaining work, deliberately not stubbed in ahead of their own
 //! execution landing.
@@ -49,7 +49,7 @@ const ParamSlot = struct { name: []const u8, effect: EffectSlot };
 
 /// The param names each node type accepts and which effect slot each one
 /// drives - the only place that mapping is declared. shader.pass has no
-/// effect-slot params of its own (SPEC.md 7): which shader it runs is
+/// effect-slot params of its own: which shader it runs is
 /// its id, resolved against shaders/<id>.glsl, the same way a node's id
 /// already resolves against other nodes for wiring.
 fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
@@ -136,17 +136,28 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
-    /// Every shader.pass node this lens spliced, in splice order - what
-    /// the caller loads and creates a program for once, right after
-    /// activation, before the first frame draws.
-    pub fn shaderPassNodes(self: *const Lens, gpa: std.mem.Allocator) std.mem.Allocator.Error![]ShaderPassNode {
+    /// Every shader.pass node this lens spliced, in the graph's real
+    /// execution order - the order a chain of passes must draw in so
+    /// each one sees the previous stage's output, not just the order
+    /// they happened to be declared in the manifest. g must be the same
+    /// graph this lens was activated into.
+    pub fn shaderPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]ShaderPassNode {
+        const order = try g.executionOrder();
         var out: std.ArrayList(ShaderPassNode) = .empty;
         errdefer out.deinit(gpa);
-        for (self.nodes) |node| {
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .shader_pass) continue;
             try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.shader_stem.? });
         }
         return out.toOwnedSlice(gpa);
+    }
+
+    fn findNode(self: *const Lens, graph_index: graph.NodeIndex) ?LensNode {
+        for (self.nodes) |node| {
+            if (node.graph_index == graph_index) return node;
+        }
+        return null;
     }
 
     fn collectNodeEffects(self: *const Lens, gpa: std.mem.Allocator, out: *std.ArrayList(AppliedEffect), node: LensNode) !void {
@@ -162,8 +173,8 @@ pub const Lens = struct {
 };
 
 /// Splices lens_manifest's node subgraph into g, wired to camera_node
-/// wherever a node's input names the implicit "camera" source (SPEC.md
-/// 5). Every trigger's `when` source compiles here too - the validator
+/// wherever a node's input names the implicit "camera" source. Every
+/// trigger's `when` source compiles here too - the validator
 /// already proved a shipped bundle's triggers compile clean, so a
 /// compile failure at activation is a caller bug (a hand-built manifest
 /// that skipped validation), not a normal-operation error path.
@@ -282,7 +293,7 @@ fn clampToParam(p: manifest.Parameter, value: f32) f32 {
 }
 
 /// Advances every in-flight ramp by real_dt_us, fires every trigger that
-/// just transitioned false-to-true (SPEC.md 6), and returns the effect
+/// just transitioned false-to-true, and returns the effect
 /// values that changed as a result - only param_set/param_ramp are
 /// handled here; show/hide/play_animation/swap_subgraph/reset_timer are
 /// not yet wired to anything (deliberately, see the module doc).
@@ -427,11 +438,42 @@ test "a shader.pass node splices with no effect bindings and resolves its shader
     defer t.allocator.free(effects);
     try t.expectEqual(@as(usize, 0), effects.len);
 
-    const passes = try lens.shaderPassNodes(t.allocator);
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
     defer t.allocator.free(passes);
     try t.expectEqual(@as(usize, 1), passes.len);
     try t.expectEqualStrings("tint", passes[0].shader_stem);
     try t.expectEqual(lens.nodes[0].graph_index, passes[0].graph_index);
+}
+
+const shader_chain_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.shaderchain", "version": "1.0.0", "display_name": "Shader Chain",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "warm", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}},
+    \\    {"id": "vignette", "type": "shader.pass", "inputs": {"frame": "warm"}, "params": {}},
+    \\    {"id": "grain", "type": "shader.pass", "inputs": {"frame": "vignette"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "shaderPassNodes orders a multi-pass chain by real graph dependency, not declaration position" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, shader_chain_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 3), passes.len);
+    try t.expectEqualStrings("warm", passes[0].shader_stem);
+    try t.expectEqualStrings("vignette", passes[1].shader_stem);
+    try t.expectEqualStrings("grain", passes[2].shader_stem);
 }
 
 test "a trigger firing on the rising edge starts a ramp that settles, does not refire while held, and rearms on the falling edge" {

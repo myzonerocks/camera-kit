@@ -22,8 +22,10 @@ extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 const width: u32 = 800;
 const height: u32 = 600;
 const screenshot_path = "zig-out/harness-frame.ppm";
+const screenshot_path2 = "zig-out/harness-frame-chain.ppm";
 
 var screenshot_written: bool = false;
+var screenshot_written2: bool = false;
 var harness_io: std.Io = undefined;
 
 // The checkerboard texture embedded in the generated glTF: 8x8 RGBA PNG,
@@ -162,11 +164,16 @@ const Callbacks = struct {
         _: u32,
         yflip: bool,
     ) callconv(.c) void {
-        writePpm(std.mem.span(@as([*:0]const u8, @ptrCast(path))), shot_width, shot_height, pitch, @ptrCast(data.?), yflip) catch |err| {
+        const path_slice = std.mem.span(@as([*:0]const u8, @ptrCast(path)));
+        writePpm(path_slice, shot_width, shot_height, pitch, @ptrCast(data.?), yflip) catch |err| {
             std.debug.print("harness: screenshot write failed: {t}\n", .{err});
             return;
         };
-        screenshot_written = true;
+        if (std.mem.eql(u8, path_slice, screenshot_path)) {
+            screenshot_written = true;
+        } else {
+            screenshot_written2 = true;
+        }
     }
 };
 
@@ -314,6 +321,38 @@ pub fn main(init_args: std.process.Init) !u8 {
     c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x202020ff, 1.0, 0);
     c.bgfx_set_view_rect(0, 0, 0, @intCast(width), @intCast(height));
 
+    const ortho_view = math.Mat4.identity;
+    const ortho_proj = math.Mat4.ortho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, .zero_to_one);
+
+    // The packaged tint reference lens, loaded here (not after the loop)
+    // so the render loop below can draw a real, end-to-end shader.pass
+    // chain every frame: the same quad scene captured into an offscreen
+    // target, then a full-screen pass reading that target through this
+    // program and writing the swap chain - the same sequence
+    // ck_engine_render_frame drives for an active lens with shader
+    // passes, proven here against a real Metal-backed renderer the
+    // headless tracking harness cannot provide.
+    const shader_tag = try render.Renderer.currentShaderProfileTag();
+    const shader_bin_path = try std.fmt.allocPrint(gpa, ".lens-packages/shader-tint/shaders/tint.{s}.bin", .{shader_tag});
+    defer gpa.free(shader_bin_path);
+    const shader_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, shader_bin_path, gpa, .limited(256 * 1024));
+    defer gpa.free(shader_bytes);
+    const shader_program = try render.Renderer.loadLensProgram(shader_bytes);
+    defer render.Renderer.destroyProgram(shader_program);
+    if (shader_program.idx == std.math.maxInt(u16)) {
+        std.debug.print("harness: FAIL shader-pass program invalid\n", .{});
+        return 1;
+    }
+    std.debug.print("harness: PROOF shader-pass program created from packaged bytecode (idx {d})\n", .{shader_program.idx});
+
+    const chain_target = try render.Renderer.createOffscreenTarget(@intCast(width), @intCast(height));
+    defer render.Renderer.destroyOffscreenTarget(chain_target);
+    const capture_view: c.bgfx_view_id_t = 5;
+    const tint_view: c.bgfx_view_id_t = 6;
+    render.Renderer.setViewTarget(capture_view, chain_target, @intCast(width), @intCast(height));
+    c.bgfx_set_view_clear(capture_view, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x202020ff, 1.0, 0);
+    render.Renderer.setViewTarget(tint_view, null, @intCast(width), @intCast(height));
+
     var frame: u32 = 0;
     while (frame < 90 and c.glfwWindowShouldClose(window) == c.GLFW_FALSE) : (frame += 1) {
         c.glfwPollEvents();
@@ -322,9 +361,7 @@ pub fn main(init_args: std.process.Init) !u8 {
             switch (payloads[node_index]) {
                 .asset_source => {},
                 .transform => {
-                    const view = math.Mat4.identity;
-                    const proj = math.Mat4.ortho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, .zero_to_one);
-                    c.bgfx_set_view_transform(0, &view.cols, &proj.cols);
+                    c.bgfx_set_view_transform(0, &ortho_view.cols, &ortho_proj.cols);
                     scene.mvp = math.Mat4.identity;
                 },
                 .render_sink => {
@@ -340,11 +377,61 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (frame == 60) {
             c.bgfx_request_screen_shot(.{ .idx = std.math.maxInt(u16) }, screenshot_path);
         }
+
+        // The chain proof starts only once the plain-preview screenshot
+        // above is captured: view 6 below is a full-screen opaque draw
+        // over the same viewport as view 0, so submitting it any
+        // earlier would overwrite view 0's own output before frame 60
+        // reads it back.
+        if (frame > 60) {
+            // Same quad scene, captured into the offscreen target
+            // instead of the swap chain.
+            c.bgfx_set_view_transform(capture_view, &ortho_view.cols, &ortho_proj.cols);
+            _ = c.bgfx_set_transform(&math.Mat4.identity.cols, 1);
+            c.bgfx_set_vertex_buffer(0, scene.vertex_buffer, 0, 4);
+            c.bgfx_set_index_buffer(scene.index_buffer, 0, scene.index_count);
+            c.bgfx_set_texture(0, scene.sampler_uniform, scene.texture, std.math.maxInt(u32));
+            c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+            c.bgfx_submit(capture_view, scene.program, 0, c.BGFX_DISCARD_ALL);
+
+            // The tint pass: a full-screen quad sampling the capture,
+            // drawn with the packaged program, presenting to the swap
+            // chain.
+            var chain_tvb: c.bgfx_transient_vertex_buffer_t = undefined;
+            var chain_tib: c.bgfx_transient_index_buffer_t = undefined;
+            if (c.bgfx_get_avail_transient_vertex_buffer(4, &layout) >= 4 and c.bgfx_get_avail_transient_index_buffer(6, false) >= 6) {
+                c.bgfx_alloc_transient_vertex_buffer(&chain_tvb, 4, &layout);
+                c.bgfx_alloc_transient_index_buffer(&chain_tib, 6, false);
+                const chain_verts: [*][5]f32 = @ptrCast(@alignCast(chain_tvb.data));
+                chain_verts[0] = .{ -1.0, -1.0, 0.0, 0.0, 1.0 };
+                chain_verts[1] = .{ 1.0, -1.0, 0.0, 1.0, 1.0 };
+                chain_verts[2] = .{ 1.0, 1.0, 0.0, 1.0, 0.0 };
+                chain_verts[3] = .{ -1.0, 1.0, 0.0, 0.0, 0.0 };
+                const chain_idx: [*]u16 = @ptrCast(@alignCast(chain_tib.data));
+                for ([6]u16{ 0, 1, 2, 0, 2, 3 }, 0..) |v, vi| chain_idx[vi] = v;
+                c.bgfx_set_view_transform(tint_view, &ortho_view.cols, &ortho_proj.cols);
+                _ = c.bgfx_set_transform(&math.Mat4.identity.cols, 1);
+                c.bgfx_set_transient_vertex_buffer(0, &chain_tvb, 0, 4);
+                c.bgfx_set_transient_index_buffer(&chain_tib, 0, 6);
+                // chain_target.texture is render.zig's own @cImport'd
+                // handle type - structurally identical to this file's,
+                // but a distinct Zig type since each @cImport is its own
+                // namespace. Same bgfx.h layout (one uint16_t), so a
+                // bitcast is exact, not a reinterpretation of anything.
+                c.bgfx_set_texture(0, scene.sampler_uniform, @bitCast(chain_target.texture), std.math.maxInt(u32));
+                c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+                c.bgfx_submit(tint_view, @bitCast(shader_program), 0, c.BGFX_DISCARD_ALL);
+            }
+        }
+
+        if (frame == 75) {
+            c.bgfx_request_screen_shot(.{ .idx = std.math.maxInt(u16) }, screenshot_path2);
+        }
         _ = c.bgfx_frame(0);
     }
 
-    if (!screenshot_written) {
-        std.debug.print("harness: FAIL no screenshot was produced\n", .{});
+    if (!screenshot_written or !screenshot_written2) {
+        std.debug.print("harness: FAIL a screenshot was not produced\n", .{});
         return 1;
     }
 
@@ -375,23 +462,36 @@ pub fn main(init_args: std.process.Init) !u8 {
     }
     std.debug.print("harness: PROOF textured gltf drawn through the graph and read back\n", .{});
 
-    // The shader-tint reference lens, packaged for real by lens_validator
-    // --package (zig build lens-package-reference, wired ahead of this
-    // harness) rather than a hand-built bundle - loading its compiled
-    // bytecode into a real bgfx program proves the packaging pipeline
-    // produces bytes this platform's backend actually accepts, on a real
-    // initialized renderer the headless tracking harness cannot provide.
-    const shader_tag = try render.Renderer.currentShaderProfileTag();
-    const shader_bin_path = try std.fmt.allocPrint(gpa, ".lens-packages/shader-tint/shaders/tint.{s}.bin", .{shader_tag});
-    defer gpa.free(shader_bin_path);
-    const shader_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, shader_bin_path, gpa, .limited(256 * 1024));
-    defer gpa.free(shader_bytes);
-    const shader_program = try render.Renderer.loadLensProgram(shader_bytes);
-    defer render.Renderer.destroyProgram(shader_program);
-    if (shader_program.idx == std.math.maxInt(u16)) {
-        std.debug.print("harness: FAIL shader-pass program invalid\n", .{});
+    // The second capture: the same quad, but only reachable by way of
+    // the offscreen target and tint pass above. If the chain is wired
+    // correctly, whichever square was white in the untouched capture
+    // now reads back warmed - red boosted, green and blue pulled down -
+    // rather than pure white, proving the tint actually landed on the
+    // swap chain and not just that a program handle was valid.
+    const chain_shot = try std.Io.Dir.cwd().readFileAlloc(harness_io, screenshot_path2, gpa, .limited(32 << 20));
+    defer gpa.free(chain_shot);
+    const chain_pixels = std.mem.indexOf(u8, chain_shot, "255\n").? + 4;
+
+    const tinted = struct {
+        fn matches(p: [3]u8) bool {
+            return p[0] > 200 and p[1] > 180 and p[1] < 250 and p[2] > 150 and p[2] < 220 and p[0] > p[1] and p[1] > p[2];
+        }
+    }.matches;
+
+    // Sample both squares at both the original and a vertically mirrored
+    // y - an offscreen target's texture space is free to run either way
+    // relative to the swap chain, and the chain must prove itself either
+    // way, not assume one.
+    var chain_ok = false;
+    for ([2]u32{ 220, 380 }) |y| {
+        for ([2]u32{ 300, 500 }) |x| {
+            if (tinted(sample.at(chain_shot, chain_pixels, x, y))) chain_ok = true;
+        }
+    }
+    if (!chain_ok) {
+        std.debug.print("harness: FAIL shader-pass chain did not composite onto the swap chain\n", .{});
         return 1;
     }
-    std.debug.print("harness: PROOF shader-pass program created from packaged bytecode (idx {d})\n", .{shader_program.idx});
+    std.debug.print("harness: PROOF shader-pass chain rendered camera into an offscreen target, then the tint pass into the swap chain\n", .{});
     return 0;
 }
