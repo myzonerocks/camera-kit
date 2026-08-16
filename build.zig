@@ -2367,10 +2367,20 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
 fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const wf = b.addWriteFiles();
     var source: std.ArrayList(u8) = .empty;
-    const shaders = [_]struct { name: []const u8, kind: []const u8 }{
+    const shaders = [_]struct {
+        name: []const u8,
+        kind: []const u8,
+        source_dir: []const u8 = "adapters/bgfx/shaders",
+        varyingdef: []const u8 = "adapters/bgfx/shaders/varying.def.sc",
+    }{
         .{ .name = "vs_preview", .kind = "vertex" },
         .{ .name = "fs_preview_rgba", .kind = "fragment" },
         .{ .name = "fs_preview_nv12", .kind = "fragment" },
+        // The one fixed vertex contract every lens shader pass compiles
+        // against (lenses/SPEC.md section 7) - source and varying def
+        // both live under lenses/shaders/, not the engine's own preview
+        // shader directory, since that's the contract lens authors read.
+        .{ .name = "vs_lens_pass", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
         .{ .profile = "metal", .platform = "ios", .tag = "metal" },
@@ -2395,12 +2405,12 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         for (profiles) |profile| {
             const run = b.addRunArtifact(shaderc_exe);
             run.addArg("-f");
-            run.addFileArg(b.path(b.fmt("adapters/bgfx/shaders/{s}.sc", .{shader.name})));
+            run.addFileArg(b.path(b.fmt("{s}/{s}.sc", .{ shader.source_dir, shader.name })));
             run.addArg("-o");
             const out_name = b.fmt("{s}.{s}.bin", .{ shader.name, profile.tag });
             const out = run.addOutputFileArg(out_name);
             run.addArgs(&.{ "--type", shader.kind, "--platform", profile.platform, "-p", profile.profile, "--varyingdef" });
-            run.addFileArg(b.path("adapters/bgfx/shaders/varying.def.sc"));
+            run.addFileArg(b.path(shader.varyingdef));
             run.addArg("-i");
             run.addDirectoryArg(b.path(".vendor/bgfx/src"));
             _ = wf.addCopyFile(out, out_name);
