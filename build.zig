@@ -771,6 +771,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
+    const conformance_step = b.step("conformance", "Run a reference lens through the real ABI twice and prove bit-stable output");
     if (have_render_stack and gltf_module != null and target.result.os.tag == .macos) {
         const bgfx_lib = buildBgfxLib(b, target, optimize);
         const glfw_lib = buildGlfwLib(b, target, optimize);
@@ -828,9 +829,61 @@ pub fn build(b: *std.Build) void {
         run_harness.step.dependOn(lens_package_reference_step);
         if (b.args) |args| run_harness.addArgs(args);
         harness_step.dependOn(&run_harness.step);
+
+        // The conformance harness drives a reference lens through the
+        // real ABI end to end (activation, render frame, screenshot),
+        // not desktop.zig's own lower-level direct bgfx calls - it needs
+        // its own abi module instance for that, real render.zig instead
+        // of the stub every other abi_module instance on this target
+        // uses, since this is the one host consumer that actually opens
+        // a window and renders for real.
+        const abi_conformance_module = b.createModule(.{
+            .root_source_file = b.path("core/abi/abi.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "graph", .module = graph_module },
+                .{ .name = "math", .module = math_module },
+                .{ .name = "render", .module = render_module },
+                .{ .name = "face", .module = face_module },
+                .{ .name = "tracking", .module = trackingStubModule(b, target, optimize, face_module, math_module) },
+                .{ .name = "segmentation", .module = segmentationStubModule(b, target, optimize, math_module) },
+                .{ .name = "beauty", .module = beautyStubModule(b, target, optimize, face_module) },
+                .{ .name = "manifest", .module = lens_manifest_module },
+                .{ .name = "trigger", .module = lens_trigger_module },
+                .{ .name = "runtime", .module = lens_runtime_module },
+            },
+        });
+        if (host_asset) |am| {
+            abi_conformance_module.addImport("image", am.image);
+            abi_conformance_module.addImport("asset", am.asset);
+        }
+        const conformance_module = b.createModule(.{
+            .root_source_file = b.path("harness/conformance.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "abi", .module = abi_conformance_module }},
+        });
+        conformance_module.addIncludePath(b.path(".vendor/glfw/include"));
+        conformance_module.link_libc = true;
+        const conformance_exe = b.addExecutable(.{
+            .name = "conformance",
+            .root_module = conformance_module,
+        });
+        conformance_module.linkLibrary(bgfx_lib);
+        conformance_module.linkLibrary(glfw_lib);
+        for ([_][]const u8{ "Metal", "QuartzCore", "Cocoa", "IOKit", "CoreFoundation", "Foundation", "AppKit", "CoreMedia", "CoreVideo", "VideoToolbox" }) |framework| {
+            conformance_exe.root_module.linkFramework(framework, .{});
+        }
+        b.installArtifact(conformance_exe);
+        const run_conformance = b.addRunArtifact(conformance_exe);
+        run_conformance.setCwd(b.path("."));
+        run_conformance.step.dependOn(lens_package_reference_step);
+        conformance_step.dependOn(&run_conformance.step);
     } else {
         const missing = b.addFail("camera-kit: harness needs macos and synced render vendors, run zig build vendor-sync");
         harness_step.dependOn(&missing.step);
+        conformance_step.dependOn(&missing.step);
     }
 }
 
