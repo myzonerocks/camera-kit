@@ -434,6 +434,55 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (result.landmark_count_out != face.landmark_count) return 1;
         if (result.timestamp_us != 1000) return 1;
 
+        // Segmentation through the same public surface: one session, one
+        // enable call, the same NV12 frame ck_session_track_frame already
+        // fed to face tracking above now reaches the segmentation worker
+        // too - proving the ABI wrapper itself (Status translation,
+        // Session lifecycle), not just the worker adapter underneath it
+        // (the block below drives that worker directly, mailbox and all).
+        {
+            const segment_bytes = try std.Io.Dir.cwd().readFileAlloc(
+                harness_io,
+                ".models/selfie_segmenter.tflite",
+                gpa,
+                .limited(16 << 20),
+            );
+            defer gpa.free(segment_bytes);
+
+            const enable_seg = abi.ck_session_enable_segmentation(session, segment_bytes.ptr, segment_bytes.len, 2);
+            if (enable_seg != .ok) {
+                try out.print("abi enable segmentation: {s}\n", .{@tagName(enable_seg)});
+                try out.flush();
+                return 1;
+            }
+
+            const feed_seg = abi.ck_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2);
+            if (feed_seg != .ok) return 1;
+
+            const worker = session.segmentation_worker orelse return 1;
+            var mask: [segmentation.mask_len]f32 = undefined;
+            var abi_polls: usize = 0;
+            while (!segmentation.readMask(worker, &mask)) {
+                std.Thread.yield() catch {};
+                abi_polls += 1;
+                if (abi_polls > 100_000_000) {
+                    try out.print("abi segmentation: timed out\n", .{});
+                    try out.flush();
+                    return 1;
+                }
+            }
+            var abi_mask_min: f32 = 1.0;
+            var abi_mask_max: f32 = 0.0;
+            for (mask) |value| {
+                if (value < 0.0 or value > 1.0) return 1;
+                abi_mask_min = @min(abi_mask_min, value);
+                abi_mask_max = @max(abi_mask_max, value);
+            }
+            try out.print("abi segmentation: mask range [{d:.3}, {d:.3}]\n", .{ abi_mask_min, abi_mask_max });
+            try out.flush();
+            if (abi_mask_max - abi_mask_min < 0.05) return 1;
+        }
+
         // Segmentation, through the real worker adapter rather than a
         // bare engine call: the same latest-wins NV12 mailbox and worker
         // thread a shell would drive, proving the mutex-guarded mask
