@@ -1,4 +1,4 @@
-abi 0.5
+abi 0.6
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -33,6 +33,14 @@ type face.Result size=5968 align=8
   field landmark_count_out offset=20 size=4
   field landmarks offset=24 size=5736
   field blendshapes offset=5760 size=208
+type abi.LensSignals size=232 align=8
+  field has_face offset=0 size=1
+  field hands_present offset=1 size=1
+  field tap offset=2 size=1
+  field reserved offset=3 size=1
+  field world_tracking_state offset=8 size=8
+  field audio_level offset=16 size=8
+  field blendshapes offset=24 size=208
 fn uint32_t ck_abi_version(void)
 fn void *ck_alloc(size_t size)
 fn void ck_free(void *ptr, size_t size)
@@ -57,3 +65,6 @@ fn ck_status ck_session_enable_beauty(ck_session *session, const char *resource_
 fn void ck_session_disable_beauty(ck_session *session)
 fn ck_status ck_session_set_beauty(ck_session *session, int32_t effect, float value)
 fn ck_status ck_session_beautify_frame(ck_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)
+fn ck_status ck_session_activate_lens(ck_session *session, const uint8_t *manifest_json, size_t manifest_len)
+fn void ck_session_deactivate_lens(ck_session *session)
+fn ck_status ck_session_tick_lens(ck_session *session, uint32_t dt_us, const ck_lens_signals *signals)

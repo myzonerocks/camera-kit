@@ -16,11 +16,14 @@ const render = @import("render");
 const tracking = @import("tracking");
 const face = @import("face");
 const beauty = @import("beauty");
+const manifest = @import("manifest");
+const trigger = @import("trigger");
+const runtime = @import("runtime");
 
 pub const FaceResult = face.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 5;
+pub const abi_minor: u16 = 6;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -83,6 +86,21 @@ pub const FramePlanes = extern struct {
     planes: [3]u64,
 };
 
+/// The live signals a tick evaluates a lens's compiled triggers against
+/// (SPEC.md 6.1) - blendshapes mirrors ck_face_result's own inline-array
+/// convention rather than a pointer, so a caller reading a face result
+/// can pass its blendshapes straight through. has_face false means no
+/// face-driven signal (present or any blendshape) reads as true.
+pub const LensSignals = extern struct {
+    has_face: bool,
+    hands_present: bool,
+    tap: bool,
+    reserved: u8 = 0,
+    world_tracking_state: f64,
+    audio_level: f64,
+    blendshapes: [face.blendshape_count]f32,
+};
+
 comptime {
     std.debug.assert(@sizeOf(FrameDesc) == 32);
     std.debug.assert(@offsetOf(FrameDesc, "timestamp_us") == 24);
@@ -93,6 +111,9 @@ comptime {
     std.debug.assert(@sizeOf(RendererDesc) == if (@sizeOf(usize) == 8) 16 else 12);
     std.debug.assert(@sizeOf(FramePlanes) == 32);
     std.debug.assert(@offsetOf(FramePlanes, "planes") == 8);
+    std.debug.assert(@sizeOf(LensSignals) == 232);
+    std.debug.assert(@offsetOf(LensSignals, "world_tracking_state") == 8);
+    std.debug.assert(@offsetOf(LensSignals, "blendshapes") == 24);
 }
 
 const default_texture_pool_capacity: u32 = 16;
@@ -127,6 +148,9 @@ pub const Session = struct {
     copied_frames: u64 = 0,
     face_tracking: ?*tracking.Tracking = null,
     beauty_chain: ?*beauty.Beauty = null,
+    lens_graph: graph.Graph,
+    camera_node: graph.NodeIndex,
+    active_lens: ?runtime.Lens = null,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -161,15 +185,28 @@ pub fn destroyEngine(engine: *Engine) void {
 
 pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!*Session {
     const session = try engine.gpa.create(Session);
+    errdefer engine.gpa.destroy(session);
     const budget = if (config.frame_budget_us == 0) default_frame_budget_us else config.frame_budget_us;
     session.* = .{
         .engine = engine,
         .controller = graph.DegradeController.init(.{ .budget_us = budget }),
+        .lens_graph = graph.Graph.init(engine.gpa),
+        .camera_node = undefined,
+    };
+    session.camera_node = session.lens_graph.addNode(.{
+        .role = .source,
+        .outputs = &.{.{ .kind = .texture }},
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable, // a fresh graph's first node cannot violate any other EditError
     };
     return session;
 }
 
 pub fn destroySession(session: *Session) void {
+    if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
+    session.active_lens = null;
+    session.lens_graph.deinit();
     if (session.beauty_chain) |chain| beauty.destroy(session.engine.gpa, chain);
     session.beauty_chain = null;
     if (session.face_tracking) |worker| tracking.destroy(worker);
@@ -533,6 +570,78 @@ pub export fn ck_session_beautify_frame(session: ?*Session, rgba_in: ?[*]const u
     return .ok;
 }
 
+fn toTriggerSignals(s: LensSignals) trigger.Signals {
+    return .{
+        .face_present = s.has_face,
+        .hands_present = s.hands_present,
+        .world_tracking_state = s.world_tracking_state,
+        .audio_level = s.audio_level,
+        .tap = s.tap,
+        .blendshapes = if (s.has_face) &s.blendshapes else null,
+    };
+}
+
+fn applyLensEffects(session: *Session, effects: []const runtime.AppliedEffect) void {
+    const chain = session.beauty_chain orelse return;
+    for (effects) |applied| beauty.set(chain, @enumFromInt(@intFromEnum(applied.effect)), applied.value);
+}
+
+/// Replaces any currently active lens with the one manifest_json
+/// describes, splicing its nodes into the session's graph and applying
+/// its default effect values to the beauty chain if one is enabled. The
+/// new lens is fully parsed and spliced before the old one is torn
+/// down: a manifest that fails to parse, or that names an unsupported
+/// node type, leaves whatever was already active running rather than
+/// destroying a working lens over a failed swap.
+fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []const u8) !void {
+    var diag_arena = std.heap.ArenaAllocator.init(gpa);
+    defer diag_arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = diag_arena.allocator() };
+    var parsed = try manifest.parse(gpa, &diags, manifest_json) orelse return error.InvalidManifest;
+    errdefer parsed.deinit();
+
+    var new_lens = try runtime.activate(gpa, &session.lens_graph, session.camera_node, parsed);
+    errdefer new_lens.deinit(&session.lens_graph);
+
+    const effects = try new_lens.currentEffects(gpa);
+    defer gpa.free(effects);
+
+    if (session.active_lens) |*old| old.deinit(&session.lens_graph);
+    session.active_lens = new_lens;
+    applyLensEffects(session, effects);
+}
+
+pub export fn ck_session_activate_lens(session: ?*Session, manifest_json: ?[*]const u8, manifest_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const bytes = manifest_json orelse return .invalid_argument;
+    if (manifest_len == 0) return .invalid_argument;
+    activateLens(s, s.engine.gpa, bytes[0..manifest_len]) catch |err| return switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        else => .invalid_argument,
+    };
+    return .ok;
+}
+
+pub export fn ck_session_deactivate_lens(session: ?*Session) void {
+    const s = session orelse return;
+    if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
+    s.active_lens = null;
+}
+
+/// Advances the active lens by dt_us of real time and applies every
+/// effect value its triggers/ramps changed to the beauty chain, if one
+/// is enabled. Reports CK_AGAIN with no active lens, matching the
+/// no-chain-yet convention ck_session_set_beauty already uses.
+pub export fn ck_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
+    const s = session orelse return .invalid_argument;
+    const sig = signals orelse return .invalid_argument;
+    if (s.active_lens == null) return .again;
+    const effects = runtime.tick(&s.active_lens.?, s.engine.gpa, dt_us, toTriggerSignals(sig.*)) catch return .out_of_memory;
+    defer s.engine.gpa.free(effects);
+    applyLensEffects(s, effects);
+    return .ok;
+}
+
 const t = std.testing;
 
 test "alloc and free round-trip through the abi allocator" {
@@ -648,4 +757,85 @@ test "beauty on a build without the effects engine refuses" {
     var pixels = [_]u8{0} ** 16;
     try t.expectEqual(Status.again, ck_session_beautify_frame(session, &pixels, 2, 2, &pixels));
     ck_session_disable_beauty(session);
+}
+
+const test_lens_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.abi", "version": "1.0.0", "display_name": "ABI",
+    \\  "engine_compat": ">=0.5", "capabilities": ["face"],
+    \\  "parameters": [
+    \\    {"name": "smooth_amount", "type": "float", "default": 0.25, "min": 0.0, "max": 1.0}
+    \\  ],
+    \\  "nodes": [
+    \\    {"id": "reshape", "type": "beauty.reshape", "inputs": {"frame": "camera"}, "params": {"thin_face": "$smooth_amount"}}
+    \\  ],
+    \\  "triggers": [
+    \\    {"when": "face.blendshape('jawOpen') > 0.6", "action": {"kind": "param_ramp", "target": "smooth_amount", "to": 1.0, "duration_ms": 200}}
+    \\  ]
+    \\}
+;
+
+test "activating a lens splices its nodes and applies its default effect values" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    try t.expectEqual(Status.ok, ck_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    try t.expect(session.active_lens != null);
+    try t.expectEqual(@as(usize, 1), session.active_lens.?.nodes.len);
+    try t.expectEqual(@as(f32, 0.25), session.active_lens.?.param_values[0]);
+    // No beauty chain enabled: applying effect values is a silent no-op,
+    // not an error - activation still succeeds.
+
+    ck_session_deactivate_lens(session);
+    try t.expect(session.active_lens == null);
+    // Only the camera source remains scheduled - the lens node was
+    // unspliced, not just detached.
+    try t.expectEqual(@as(usize, 1), (try session.lens_graph.executionOrder()).len);
+}
+
+test "activating a second lens replaces the first, and invalid input is rejected cleanly" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    try t.expectEqual(Status.ok, ck_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    try t.expectEqual(Status.ok, ck_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    try t.expectEqual(@as(usize, 1), session.active_lens.?.nodes.len);
+
+    const garbage = "not a manifest";
+    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens(session, garbage.ptr, garbage.len));
+    // A failed activation does not disturb the previously active lens.
+    try t.expect(session.active_lens != null);
+
+    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens(null, garbage.ptr, garbage.len));
+    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens(session, null, 0));
+
+    ck_session_deactivate_lens(session);
+    ck_session_deactivate_lens(session); // idempotent
+}
+
+test "ticking with no active lens reports again; ticking a firing trigger advances its ramp" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var closed_signals = std.mem.zeroes(LensSignals);
+    try t.expectEqual(Status.again, ck_session_tick_lens(session, 8_333, &closed_signals));
+
+    try t.expectEqual(Status.ok, ck_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+
+    var open_signals = std.mem.zeroes(LensSignals);
+    open_signals.has_face = true;
+    const jaw_open = face.blendshapeIndex("jawOpen").?;
+    open_signals.blendshapes[jaw_open] = 0.9;
+
+    try t.expectEqual(Status.ok, ck_session_tick_lens(session, 8_333, &open_signals));
+    try t.expect(session.active_lens.?.param_values[0] > 0.25);
+    try t.expect(session.active_lens.?.param_values[0] < 1.0);
+
+    try t.expectEqual(Status.invalid_argument, ck_session_tick_lens(session, 8_333, null));
 }

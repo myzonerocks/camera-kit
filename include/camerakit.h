@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define CK_ABI_MAJOR 0u
-#define CK_ABI_MINOR 5u
+#define CK_ABI_MINOR 6u
 #define CK_ABI_VERSION ((CK_ABI_MAJOR << 16) | CK_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against CK_ABI_MAJOR. */
@@ -162,6 +162,23 @@ typedef struct ck_face_result {
     float blendshapes[CK_FACE_BLENDSHAPE_COUNT];
 } ck_face_result;
 
+/* The live signals ck_session_tick_lens evaluates a lens's compiled
+ * triggers against (a GLF `when` expression's signal reads). blendshapes
+ * mirrors ck_face_result's own inline-array convention rather than a
+ * pointer, so a caller already holding a face result can pass its
+ * blendshapes straight through; has_face false means every face-driven
+ * signal (present, and any blendshape) reads as false regardless of
+ * what blendshapes holds. Layout: 232 bytes, static-asserted below. */
+typedef struct ck_lens_signals {
+    bool has_face;
+    bool hands_present;
+    bool tap;
+    uint8_t reserved;
+    double world_tracking_state;
+    double audio_level;
+    float blendshapes[CK_FACE_BLENDSHAPE_COUNT];
+} ck_lens_signals;
+
 /* Bounds for the engine's frame-path pools. Zero means the built-in
  * default. Layout: 8 bytes. */
 typedef struct ck_engine_config {
@@ -265,6 +282,25 @@ ck_status ck_session_set_beauty(ck_session *session, int32_t effect, float value
  * row. */
 ck_status ck_session_beautify_frame(ck_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out);
 
+/* Graph thread. Replaces any currently active lens (unsplicing it first)
+ * with the one manifest_json describes, splices its node subgraph into
+ * the session's frame graph, and applies its default effect values to
+ * the beauty chain if one is enabled. The bytes are copied; the caller
+ * may release them on return. A manifest that fails to parse, or that
+ * names a node type this build does not support, activates nothing and
+ * reports CK_INVALID_ARGUMENT. */
+ck_status ck_session_activate_lens(ck_session *session, const uint8_t *manifest_json, size_t manifest_len);
+
+/* Graph thread. Unsplices the active lens and frees everything its
+ * activation allocated. Accepts no active lens and does nothing. */
+void ck_session_deactivate_lens(ck_session *session);
+
+/* Graph thread. Advances the active lens by dt_us of real time,
+ * evaluating its compiled triggers against signals and applying every
+ * effect value that changed as a result to the beauty chain, if one is
+ * enabled. Reports CK_AGAIN with no active lens. */
+ck_status ck_session_tick_lens(ck_session *session, uint32_t dt_us, const ck_lens_signals *signals);
+
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(ck_frame_desc) == 32, "ck_frame_desc layout is frozen");
 _Static_assert(sizeof(ck_landmarks) == 24, "ck_landmarks layout is frozen");
@@ -274,6 +310,9 @@ _Static_assert(sizeof(ck_face_result) == 5968, "ck_face_result layout is frozen"
 _Static_assert(offsetof(ck_face_result, landmarks) == 24, "ck_face_result layout is frozen");
 _Static_assert(sizeof(ck_renderer_desc) == (sizeof(void *) == 8 ? 16 : 12), "ck_renderer_desc layout is frozen");
 _Static_assert(sizeof(ck_frame_planes) == 32, "ck_frame_planes layout is frozen");
+_Static_assert(sizeof(ck_lens_signals) == 232, "ck_lens_signals layout is frozen");
+_Static_assert(offsetof(ck_lens_signals, world_tracking_state) == 8, "ck_lens_signals layout is frozen");
+_Static_assert(offsetof(ck_lens_signals, blendshapes) == 24, "ck_lens_signals layout is frozen");
 #endif
 
 #ifdef __cplusplus

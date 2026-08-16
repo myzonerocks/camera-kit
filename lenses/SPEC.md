@@ -142,7 +142,12 @@ never touching the frame-time path.
 ## 6. Triggers
 
 A trigger binds a signal expression to an action, evaluated once per frame,
-O(1) per trigger with no allocation:
+O(1) per trigger with no allocation. An action fires once, on the frame
+the expression transitions from false to true - not on every frame it
+holds true. A level-triggered `param_ramp` would restart its ramp from
+wherever the in-flight value currently sits every single frame and never
+converge on its target; edge-triggered firing is the only reading under
+which the curve primitives in 6.3 behave as described.
 
 ```jsonc
 {

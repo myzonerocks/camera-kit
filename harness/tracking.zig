@@ -463,6 +463,50 @@ pub fn main(init_args: std.process.Init) !u8 {
         try out.print("abi beauty: mean delta {d:.3}\n", .{abi_mean});
         try out.flush();
         if (abi_mean <= 0.5) return 1;
+
+        // A lens activated and ticked through the same public surface,
+        // its trigger keyed to face.present and sourced from this same
+        // session's real tracked result - not a synthetic signal. Proves
+        // activate/tick/dispatch land on the same beauty chain
+        // ck_session_beautify_frame reads, with real inference data.
+        const lens_manifest =
+            \\{
+            \\  "glf": "1.0", "id": "com.example.harness", "version": "1.0.0", "display_name": "Harness",
+            \\  "engine_compat": ">=0.5", "capabilities": ["face"],
+            \\  "parameters": [{"name": "smooth_amount", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+            \\  "nodes": [{"id": "face", "type": "beauty.face", "inputs": {"frame": "camera"}, "params": {"smooth": "$smooth_amount"}}],
+            \\  "triggers": [{"when": "face.present", "action": {"kind": "param_set", "target": "smooth_amount", "to": 0.9}}]
+            \\}
+        ;
+        if (abi.ck_session_activate_lens(session, lens_manifest.ptr, lens_manifest.len) != .ok) {
+            try out.print("abi lens: activate refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        var signals = std.mem.zeroes(abi.LensSignals);
+        signals.has_face = true;
+        signals.blendshapes = result.blendshapes;
+        if (abi.ck_session_tick_lens(session, 8_333, &signals) != .ok) {
+            try out.print("abi lens: tick refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        const lens_beautified = try gpa.alloc(u8, beauty_pixels);
+        defer gpa.free(lens_beautified);
+        if (abi.ck_session_beautify_frame(session, corpus.frame.pixels.rgba8.ptr, corpus.frame.width, corpus.frame.height, lens_beautified.ptr) != .ok) {
+            try out.print("abi lens: beautify refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        var lens_delta: u64 = 0;
+        for (corpus.frame.pixels.rgba8, lens_beautified) |a4, b4| {
+            lens_delta += @abs(@as(i32, a4) - @as(i32, b4));
+        }
+        const lens_mean = @as(f64, @floatFromInt(lens_delta)) / @as(f64, @floatFromInt(beauty_pixels));
+        try out.print("abi lens: mean delta {d:.3}\n", .{lens_mean});
+        try out.flush();
+        if (lens_mean <= 0.5) return 1;
+        abi.ck_session_deactivate_lens(session);
     }
 
 
