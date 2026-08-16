@@ -965,12 +965,34 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             },
         });
         abi_android.addImport("tracking", tracking_android);
-        // Segmentation stays on the stub here even though the inference
-        // stack is present: the custom op needs its own linked module
-        // instance the same way runtime_ios/runtime_android do, real
-        // work for when something on this platform actually calls the
-        // worker (see docs/private/todo.md).
-        abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
+        const segment_android = b.createModule(.{
+            .root_source_file = b.path("core/tracking/segment.zig"),
+            .target = android_target,
+            .optimize = optimize,
+        });
+        const transpose_conv_bias_android = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_android },
+                .{ .name = "segment", .module = segment_android },
+            },
+        });
+        transpose_conv_bias_android.link_libc = true;
+        transpose_conv_bias_android.addIncludePath(b.path(".vendor/litert"));
+        const segmentation_android = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_android },
+                .{ .name = "sampler", .module = tracking_cores_android.sampler },
+                .{ .name = "math", .module = math_android },
+                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_android },
+            },
+        });
+        abi_android.addImport("segmentation", segmentation_android);
         const face106_android = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = android_target,
@@ -2354,12 +2376,34 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
             },
         });
         abi_ios.addImport("tracking", tracking_ios);
-        // Segmentation stays on the stub here even though the inference
-        // stack is present: the custom op needs its own linked module
-        // instance the same way runtime_ios does, real work for when
-        // something on this platform actually calls the worker (see
-        // docs/private/todo.md).
-        abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
+        const segment_ios = b.createModule(.{
+            .root_source_file = b.path("core/tracking/segment.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+        });
+        const transpose_conv_bias_ios = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_ios },
+                .{ .name = "segment", .module = segment_ios },
+            },
+        });
+        transpose_conv_bias_ios.link_libc = true;
+        transpose_conv_bias_ios.addIncludePath(b.path(".vendor/litert"));
+        const segmentation_ios = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_ios },
+                .{ .name = "sampler", .module = tracking_cores_ios.sampler },
+                .{ .name = "math", .module = math_ios },
+                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_ios },
+            },
+        });
+        abi_ios.addImport("segmentation", segmentation_ios);
         const face106_ios = b.createModule(.{
             .root_source_file = b.path("core/tracking/face106.zig"),
             .target = ios_target,
