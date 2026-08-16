@@ -39,6 +39,7 @@ const abi_functions = [_][]const u8{
     "ck_status ck_session_set_beauty(ck_session *session, int32_t effect, float value)",
     "ck_status ck_session_beautify_frame(ck_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
     "ck_status ck_session_activate_lens(ck_session *session, const uint8_t *manifest_json, size_t manifest_len)",
+    "ck_status ck_session_activate_lens_from_directory(ck_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
     "void ck_session_deactivate_lens(ck_session *session)",
     "ck_status ck_session_tick_lens(ck_session *session, uint32_t dt_us, const ck_lens_signals *signals)",
 };

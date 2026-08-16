@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define CK_ABI_MAJOR 0u
-#define CK_ABI_MINOR 6u
+#define CK_ABI_MINOR 7u
 #define CK_ABI_VERSION ((CK_ABI_MAJOR << 16) | CK_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against CK_ABI_MAJOR. */
@@ -290,6 +290,17 @@ ck_status ck_session_beautify_frame(ck_session *session, const uint8_t *rgba_in,
  * names a node type this build does not support, activates nothing and
  * reports CK_INVALID_ARGUMENT. */
 ck_status ck_session_activate_lens(ck_session *session, const uint8_t *manifest_json, size_t manifest_len);
+
+/* Graph thread. Same activation ck_session_activate_lens performs, from
+ * bundle_path/manifest.json, plus one further step that function cannot
+ * do without a bundle path to read from: a bgfx program is created for
+ * every shader.pass node the lens splices, loading whichever compiled
+ * variant under bundle_path/shaders/ matches the running platform's
+ * active graphics backend. A shader failing to load leaves that one
+ * pass without a program rather than failing the whole activation - a
+ * packaged bundle was already proven to compile by the validator, so a
+ * load failure here is a runtime anomaly, not an authoring error. */
+ck_status ck_session_activate_lens_from_directory(ck_session *session, const uint8_t *bundle_path, size_t bundle_path_len);
 
 /* Graph thread. Unsplices the active lens and frees everything its
  * activation allocated. Accepts no active lens and does nothing. */

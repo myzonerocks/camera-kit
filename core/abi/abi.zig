@@ -18,12 +18,29 @@ const face = @import("face");
 const beauty = @import("beauty");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
+
+// A directory-based lens activation needs to read files (manifest.json,
+// compiled shader bytecode) from within an exported ck_ function, which
+// no shell hands an Io instance into - this library owns one blocking
+// implementation for that, single-threaded since it's only ever
+// occasional small reads at lens activation, never the frame path.
+// std.Io.Threaded assumes a POSIX-like host and cannot even be typed
+// for wasm32-freestanding (no threads, no file syscalls) - directory-
+// based activation is unsupported there the same way beauty/tracking
+// already are, guarded before this is ever reached, not by pretending
+// the type exists.
+const has_file_io = !builtin.cpu.arch.isWasm();
+var default_threaded_io: if (has_file_io) std.Io.Threaded else void =
+    if (has_file_io) std.Io.Threaded.init_single_threaded else {};
+fn defaultIo() std.Io {
+    return default_threaded_io.io();
+}
 const runtime = @import("runtime");
 
 pub const FaceResult = face.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 6;
+pub const abi_minor: u16 = 7;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -151,6 +168,11 @@ pub const Session = struct {
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
+    /// One bgfx program per currently-spliced shader.pass node, keyed by
+    /// its graph index. Created at activation (ck_session_activate_lens_
+    /// from_directory only - the bytes-based activate has no bundle path
+    /// to read compiled shaders from), destroyed on deactivation.
+    shader_programs: std.AutoHashMapUnmanaged(graph.NodeIndex, u16) = .empty,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -204,6 +226,8 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
 }
 
 pub fn destroySession(session: *Session) void {
+    destroyShaderPrograms(session);
+    session.shader_programs.deinit(session.engine.gpa);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
     session.lens_graph.deinit();
@@ -586,6 +610,12 @@ fn applyLensEffects(session: *Session, effects: []const runtime.AppliedEffect) v
     for (effects) |applied| beauty.set(chain, @enumFromInt(@intFromEnum(applied.effect)), applied.value);
 }
 
+fn destroyShaderPrograms(session: *Session) void {
+    var it = session.shader_programs.valueIterator();
+    while (it.next()) |handle| render.Renderer.destroyProgram(.{ .idx = handle.* });
+    session.shader_programs.clearRetainingCapacity();
+}
+
 /// Replaces any currently active lens with the one manifest_json
 /// describes, splicing its nodes into the session's graph and applying
 /// its default effect values to the beauty chain if one is enabled. The
@@ -606,6 +636,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     const effects = try new_lens.currentEffects(gpa);
     defer gpa.free(effects);
 
+    destroyShaderPrograms(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
     applyLensEffects(session, effects);
@@ -622,8 +653,69 @@ pub export fn ck_session_activate_lens(session: ?*Session, manifest_json: ?[*]co
     return .ok;
 }
 
+/// Loads whatever compiled bytecode a spliced shader.pass node names
+/// (shaders/<stem>.<profile>.bin, SPEC.md 7) and creates its bgfx
+/// program. Best-effort per node: a packaged bundle was already proven
+/// to compile by the validator, so a failure here is a genuine runtime
+/// anomaly (missing file, wrong profile) rather than an authoring
+/// error - that one pass simply has no program and does not draw,
+/// rather than failing the whole activation over it.
+fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const passes = try lens.shaderPassNodes(gpa);
+    defer gpa.free(passes);
+    if (passes.len == 0) return;
+
+    const tag = render.Renderer.currentShaderProfileTag() catch return;
+    const io = defaultIo();
+    for (passes) |pass| {
+        const bin_path = std.fmt.allocPrint(gpa, "{s}/shaders/{s}.{s}.bin", .{ bundle_path, pass.shader_stem, tag }) catch continue;
+        defer gpa.free(bin_path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, bin_path, gpa, .limited(256 * 1024)) catch continue;
+        defer gpa.free(bytes);
+        const program = render.Renderer.loadLensProgram(bytes) catch continue;
+        session.shader_programs.put(gpa, pass.graph_index, program.idx) catch {
+            render.Renderer.destroyProgram(program);
+        };
+    }
+}
+
+/// Activates the lens bundle at bundle_path (bundle_path/manifest.json),
+/// then creates a bgfx program for every shader.pass node it spliced.
+/// Additive alongside ck_session_activate_lens rather than a new
+/// parameter on it: that function's signature is frozen the moment it
+/// shipped, and only a bundle directory - not raw manifest bytes - can
+/// name where a shader.pass node's compiled bytecode lives.
+// Explicit anyerror, not inferred: the has_file_io branch below prunes
+// away entirely on wasm, which would otherwise narrow the inferred
+// error set to just Unsupported there and break the OutOfMemory arm
+// ck_session_activate_lens_from_directory's catch already handles for
+// every other target.
+fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) anyerror!void {
+    if (comptime !has_file_io) return error.Unsupported;
+    const manifest_path = try std.fmt.allocPrint(gpa, "{s}/manifest.json", .{bundle_path});
+    defer gpa.free(manifest_path);
+    const manifest_json = try std.Io.Dir.cwd().readFileAlloc(defaultIo(), manifest_path, gpa, .limited(manifest.max_manifest_bytes + 1));
+    defer gpa.free(manifest_json);
+    try activateLens(session, gpa, manifest_json);
+    try createShaderPrograms(session, gpa, bundle_path);
+}
+
+pub export fn ck_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const path = bundle_path orelse return .invalid_argument;
+    if (bundle_path_len == 0) return .invalid_argument;
+    activateLensFromDirectory(s, s.engine.gpa, path[0..bundle_path_len]) catch |err| return switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        error.Unsupported => .unsupported,
+        else => .invalid_argument,
+    };
+    return .ok;
+}
+
 pub export fn ck_session_deactivate_lens(session: ?*Session) void {
     const s = session orelse return;
+    destroyShaderPrograms(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
 }
@@ -838,4 +930,29 @@ test "ticking with no active lens reports again; ticking a firing trigger advanc
     try t.expect(session.active_lens.?.param_values[0] < 1.0);
 
     try t.expectEqual(Status.invalid_argument, ck_session_tick_lens(session, 8_333, null));
+}
+
+test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const bundle_path = "lenses/reference/shader-tint";
+    try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expect(session.active_lens != null);
+    try t.expectEqual(@as(usize, 1), session.active_lens.?.nodes.len);
+    // This build has no compiled render stack (the stub always reports
+    // RendererUnavailable) - the lens still activates cleanly, its
+    // shader.pass node just has no program, exactly the degradation
+    // ck_session_set_beauty already establishes for a missing engine.
+    try t.expectEqual(@as(usize, 0), session.shader_programs.count());
+
+    ck_session_deactivate_lens(session);
+    try t.expect(session.active_lens == null);
+    try t.expectEqual(@as(usize, 0), session.shader_programs.count());
+
+    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(null, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(session, null, 0));
+    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(session, bundle_path.ptr, 0));
 }
