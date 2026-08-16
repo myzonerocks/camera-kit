@@ -31,6 +31,7 @@
 #include "core/gpupixel_context.h"
 
 #import <CoreVideo/CoreVideo.h>
+#import <Metal/Metal.h>
 
 #if TARGET_OS_OSX
 #import <OpenGL/OpenGL.h>
@@ -39,6 +40,13 @@
 #import <OpenGLES/EAGL.h>
 #import <OpenGLES/ES2/gl.h>
 #endif
+
+extern "C" int32_t ck_beauty_process_external_texture(void* handle,
+                                                       uint32_t gl_texture,
+                                                       int32_t sampler_kind,
+                                                       int32_t width,
+                                                       int32_t height,
+                                                       const float* landmarks106);
 
 namespace {
 
@@ -294,6 +302,229 @@ struct AppleInterop {
 
 #endif
 
+#if TARGET_OS_OSX
+
+// The reverse bridge: bgfx (Metal) writes the current preview frame into
+// this shared surface on its own thread, gpupixel (GL) reads it back out
+// on its own thread - the same shared CVPixelBuffer AppleInterop composites
+// through, just two API-specific views built for opposite directions. The
+// Metal side and the GL side each own their own cache (a texture cache is
+// bound to whatever context created it, and these are never the same
+// context), so EnsureMetalSurface and EnsureGLImport touch disjoint fields
+// until both have run at least once. The two never race in practice: every
+// caller in this codebase reaches gpupixel through SyncRunWithContext,
+// which blocks the calling (bgfx) thread until gpupixel's own thread is
+// done, so a frame's Metal write always finishes strictly before that same
+// frame's GL read starts, and the next frame's Metal write cannot start
+// until this one returns.
+struct AppleInputSurface {
+  CVPixelBufferRef pixel_buffer = nullptr;
+  CVMetalTextureCacheRef metal_cache = nullptr;
+  CVMetalTextureRef metal_texture = nullptr;
+  CVOpenGLTextureCacheRef gl_cache = nullptr;
+  CVOpenGLTextureRef gl_texture = nullptr;
+  int width = 0;
+  int height = 0;
+
+  ~AppleInputSurface() {
+    if (gl_texture) CFRelease(gl_texture);
+    if (gl_cache) CFRelease(gl_cache);
+    if (metal_texture) CFRelease(metal_texture);
+    if (metal_cache) CFRelease(metal_cache);
+    if (pixel_buffer) CFRelease(pixel_buffer);
+  }
+
+  // Runs on bgfx's own thread. device is bgfx's own MTL::Device, handed
+  // in by the caller rather than queried here - this file stays free of
+  // any bgfx dependency, matching every other adapter boundary in this
+  // codebase, and a build that links gpupixel without linking real bgfx
+  // (harness/tracking.zig, real beauty over the stub renderer) still
+  // compiles and links clean.
+  bool EnsureMetalSurface(id<MTLDevice> device, int new_width, int new_height) {
+    if (metal_texture && width == new_width && height == new_height) return true;
+    if (device == nil) return false;
+
+    if (gl_texture) { CFRelease(gl_texture); gl_texture = nullptr; }
+    if (gl_cache) { CFRelease(gl_cache); gl_cache = nullptr; }
+    if (metal_texture) { CFRelease(metal_texture); metal_texture = nullptr; }
+    if (pixel_buffer) { CFRelease(pixel_buffer); pixel_buffer = nullptr; }
+
+    NSDictionary* attributes = @{
+      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+      (NSString*)kCVPixelBufferOpenGLCompatibilityKey : @YES,
+      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+    };
+    CVReturn buffer_status = CVPixelBufferCreate(
+        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    if (buffer_status != kCVReturnSuccess) return false;
+
+    if (metal_cache == nullptr) {
+      CVReturn created = CVMetalTextureCacheCreate(
+          kCFAllocatorDefault, nullptr, device, nullptr, &metal_cache);
+      if (created != kCVReturnSuccess) {
+        CFRelease(pixel_buffer);
+        pixel_buffer = nullptr;
+        return false;
+      }
+    }
+
+    CVReturn texture_status = CVMetalTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault, metal_cache, pixel_buffer, nullptr,
+        MTLPixelFormatBGRA8Unorm, new_width, new_height, 0, &metal_texture);
+    if (texture_status != kCVReturnSuccess) {
+      CFRelease(pixel_buffer);
+      pixel_buffer = nullptr;
+      return false;
+    }
+
+    width = new_width;
+    height = new_height;
+    return true;
+  }
+
+  // The unretained id<MTLTexture> bgfx wraps with wrapExternalTexture -
+  // valid until the next EnsureMetalSurface call that actually resizes,
+  // exactly like AppleInterop::pixel_buffer's own contract.
+  void* NativeTexture() const {
+    if (metal_texture == nullptr) return nullptr;
+    return (__bridge void*)CVMetalTextureGetTexture(metal_texture);
+  }
+
+  // Runs on gpupixel's own GL thread (the caller dispatches through
+  // SyncRunWithContext): imports the same pixel_buffer bgfx just wrote
+  // into as a GL texture bound to whichever context is current there.
+  // Skipped when a GL texture is already live for the current
+  // pixel_buffer - EnsureMetalSurface only tears gl_texture down when it
+  // actually recreates pixel_buffer, so the common per-frame case (size
+  // unchanged) reimports nothing and just reads fresh content through
+  // the texture already bound.
+  bool EnsureGLImport() {
+    if (gl_texture) return true;
+    if (pixel_buffer == nullptr) return false;
+
+    CGLContextObj cgl_context = CGLGetCurrentContext();
+    if (cgl_context == nullptr) return false;
+
+    if (gl_cache == nullptr) {
+      CGLPixelFormatObj pixel_format = CGLGetPixelFormat(cgl_context);
+      CVReturn created = CVOpenGLTextureCacheCreate(
+          kCFAllocatorDefault, nullptr, cgl_context, pixel_format, nullptr,
+          &gl_cache);
+      if (created != kCVReturnSuccess) return false;
+    }
+
+    CVReturn texture_status = CVOpenGLTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault, gl_cache, pixel_buffer, nullptr, &gl_texture);
+    return texture_status == kCVReturnSuccess;
+  }
+
+  GLenum GLTarget() const { return CVOpenGLTextureGetTarget(gl_texture); }
+  GLuint GLName() const { return CVOpenGLTextureGetName(gl_texture); }
+  // 0 = GL_TEXTURE_2D (sampler2D), 1 = GL_TEXTURE_RECTANGLE (samplerRect) -
+  // beauty_shim.cc picks its blit shader from this without itself
+  // depending on any apple-only GL constant. The legacy desktop GL
+  // texture cache always vends rectangle textures on macOS, never 2D.
+  int32_t SamplerKind() const { return GLTarget() != GL_TEXTURE_2D ? 1 : 0; }
+};
+
+#else  // TARGET_OS_IOS
+
+// Same shape as the macOS struct above, over CVOpenGLESTextureCache
+// instead of CVOpenGLTextureCache - the ES cache always vends
+// GL_TEXTURE_2D, unlike the legacy desktop one, so SamplerKind is
+// always 0 here.
+struct AppleInputSurface {
+  CVPixelBufferRef pixel_buffer = nullptr;
+  CVMetalTextureCacheRef metal_cache = nullptr;
+  CVMetalTextureRef metal_texture = nullptr;
+  CVOpenGLESTextureCacheRef gl_cache = nullptr;
+  CVOpenGLESTextureRef gl_texture = nullptr;
+  int width = 0;
+  int height = 0;
+
+  ~AppleInputSurface() {
+    if (gl_texture) CFRelease(gl_texture);
+    if (gl_cache) CFRelease(gl_cache);
+    if (metal_texture) CFRelease(metal_texture);
+    if (metal_cache) CFRelease(metal_cache);
+    if (pixel_buffer) CFRelease(pixel_buffer);
+  }
+
+  bool EnsureMetalSurface(id<MTLDevice> device, int new_width, int new_height) {
+    if (metal_texture && width == new_width && height == new_height) return true;
+    if (device == nil) return false;
+
+    if (gl_texture) { CFRelease(gl_texture); gl_texture = nullptr; }
+    if (gl_cache) { CFRelease(gl_cache); gl_cache = nullptr; }
+    if (metal_texture) { CFRelease(metal_texture); metal_texture = nullptr; }
+    if (pixel_buffer) { CFRelease(pixel_buffer); pixel_buffer = nullptr; }
+
+    NSDictionary* attributes = @{
+      (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
+      (NSString*)kCVPixelBufferOpenGLESCompatibilityKey : @YES,
+      (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
+    };
+    CVReturn buffer_status = CVPixelBufferCreate(
+        kCFAllocatorDefault, new_width, new_height, kCVPixelFormatType_32BGRA,
+        (__bridge CFDictionaryRef)attributes, &pixel_buffer);
+    if (buffer_status != kCVReturnSuccess) return false;
+
+    if (metal_cache == nullptr) {
+      CVReturn created = CVMetalTextureCacheCreate(
+          kCFAllocatorDefault, nullptr, device, nullptr, &metal_cache);
+      if (created != kCVReturnSuccess) {
+        CFRelease(pixel_buffer);
+        pixel_buffer = nullptr;
+        return false;
+      }
+    }
+
+    CVReturn texture_status = CVMetalTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault, metal_cache, pixel_buffer, nullptr,
+        MTLPixelFormatBGRA8Unorm, new_width, new_height, 0, &metal_texture);
+    if (texture_status != kCVReturnSuccess) {
+      CFRelease(pixel_buffer);
+      pixel_buffer = nullptr;
+      return false;
+    }
+
+    width = new_width;
+    height = new_height;
+    return true;
+  }
+
+  void* NativeTexture() const {
+    if (metal_texture == nullptr) return nullptr;
+    return (__bridge void*)CVMetalTextureGetTexture(metal_texture);
+  }
+
+  bool EnsureGLImport() {
+    if (gl_texture) return true;
+    if (pixel_buffer == nullptr) return false;
+
+    EAGLContext* eagl_context = [EAGLContext currentContext];
+    if (eagl_context == nullptr) return false;
+
+    if (gl_cache == nullptr) {
+      CVReturn created = CVOpenGLESTextureCacheCreate(
+          kCFAllocatorDefault, nullptr, eagl_context, nullptr, &gl_cache);
+      if (created != kCVReturnSuccess) return false;
+    }
+
+    CVReturn texture_status = CVOpenGLESTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault, gl_cache, pixel_buffer, nullptr, GL_TEXTURE_2D,
+        GL_RGBA, width, height, GL_BGRA_EXT, GL_UNSIGNED_BYTE, 0, &gl_texture);
+    return texture_status == kCVReturnSuccess;
+  }
+
+  GLenum GLTarget() const { return CVOpenGLESTextureGetTarget(gl_texture); }
+  GLuint GLName() const { return CVOpenGLESTextureGetName(gl_texture); }
+  int32_t SamplerKind() const { return 0; }
+};
+
+#endif
+
 }  // namespace
 
 extern "C" {
@@ -341,6 +572,52 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
   return ok ? interop->pixel_buffer : nullptr;
 }
 
+void* ck_beauty_input_create(void) {
+  return new (std::nothrow) AppleInputSurface();
+}
+
+void ck_beauty_input_destroy(void* handle) {
+  delete static_cast<AppleInputSurface*>(handle);
+}
+
+// Runs on bgfx's own thread. (Re)creates the shared surface against
+// device (bgfx's own MTL::Device, reinterpreted from the raw pointer the
+// caller already extracted from bgfx_get_internal_data) and returns the
+// id<MTLTexture> view of it, unretained: valid until the next call that
+// actually resizes, or ck_beauty_input_destroy.
+void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
+  if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
+  auto* input = static_cast<AppleInputSurface*>(handle);
+  id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device;
+  if (!input->EnsureMetalSurface(mtl_device, width, height)) return nullptr;
+  return input->NativeTexture();
+}
+
+// Runs on gpupixel's own GL thread by dispatching through
+// SyncRunWithContext itself - the caller never needs to know that detail,
+// matching ck_beauty_interop_composite's own contract. Imports the shared
+// surface bgfx just wrote into and pushes it through the beauty chain via
+// ck_beauty_process_external_texture (beauty_shim.cc); returns 0 on
+// success, matching ck_beauty_process's own status convention.
+int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
+                                int32_t width, int32_t height,
+                                const float* landmarks106) {
+  if (input_handle == nullptr || beauty_handle == nullptr) return 1;
+  auto* input = static_cast<AppleInputSurface*>(input_handle);
+
+  bool ok = true;
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    if (!input->EnsureGLImport()) {
+      ok = false;
+      return;
+    }
+    ok = ck_beauty_process_external_texture(
+             beauty_handle, input->GLName(), input->SamplerKind(),
+             width, height, landmarks106) == 0;
+  });
+  return ok ? 0 : 1;
+}
+
 }  // extern "C"
 
 #else  // Every other apple-adjacent target this file might compile for.
@@ -355,6 +632,25 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
   (void)width;
   (void)height;
   return nullptr;
+}
+void* ck_beauty_input_create(void) { return nullptr; }
+void ck_beauty_input_destroy(void* handle) { (void)handle; }
+void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
+  (void)handle;
+  (void)device;
+  (void)width;
+  (void)height;
+  return nullptr;
+}
+int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
+                                int32_t width, int32_t height,
+                                const float* landmarks106) {
+  (void)input_handle;
+  (void)beauty_handle;
+  (void)width;
+  (void)height;
+  (void)landmarks106;
+  return 1;
 }
 }
 

@@ -61,18 +61,33 @@ pub const Renderer = struct {
         _ = height;
     }
 
-    pub fn wrapExternalTexture(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize) TextureHandle {
+    pub fn wrapExternalTexture(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize, render_target: bool) TextureHandle {
         _ = r;
         _ = width;
         _ = height;
         _ = format;
         _ = native_ptr;
+        _ = render_target;
         return .{};
+    }
+
+    pub fn wrapExternalRenderTarget(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize) ?TextureHandle {
+        _ = r;
+        _ = width;
+        _ = height;
+        _ = format;
+        _ = native_ptr;
+        return null;
     }
 
     pub fn destroyTexture(r: *Renderer, handle: TextureHandle) void {
         _ = r;
         _ = handle;
+    }
+
+    pub fn nativeDevice(r: *Renderer) ?*anyopaque {
+        _ = r;
+        return null;
     }
 
     pub fn createStaticTexture(width: u16, height: u16, rgba: []const u8) TextureHandle {
@@ -86,6 +101,11 @@ pub const Renderer = struct {
         _ = width;
         _ = height;
         _ = mask;
+        return .{};
+    }
+
+    pub fn passthroughProgram(r: *Renderer) ProgramHandle {
+        _ = r;
         return .{};
     }
 
@@ -184,6 +204,11 @@ pub const Renderer = struct {
 
     pub fn destroyOffscreenTarget(target: OffscreenTarget) void {
         _ = target;
+    }
+
+    pub fn createExternalTarget(handle: TextureHandle) !OffscreenTarget {
+        _ = handle;
+        return error.RendererUnavailable;
     }
 
     pub fn setViewTarget(view_id: u8, target: ?OffscreenTarget, width: u16, height: u16) void {

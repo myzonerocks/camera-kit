@@ -123,6 +123,18 @@ pub const Renderer = struct {
         bgfx_init.resolution.reset = if (options.vsync) c.BGFX_RESET_VSYNC else c.BGFX_RESET_NONE;
         bgfx_init.platformData.nwh = options.native_window_handle;
         bgfx_init.callback = options.callback;
+        // Calling bgfx_render_frame once on this thread before bgfx_init
+        // is bgfx's own documented opt-in to single-threaded mode: this
+        // thread becomes both the API thread and the render thread,
+        // instead of bgfx spawning a separate render thread it would
+        // otherwise own. wrapExternalTexture's bgfx_override_internal_
+        // texture_ptr (zero-copy camera ingress, and the beauty
+        // compositing bridge) is documented "must be called only on
+        // render thread" - every caller in this codebase runs it from
+        // whatever thread submitted the frame, never from a thread bgfx
+        // itself spawned, so single-threaded mode is what actually makes
+        // that contract hold rather than racing bgfx's internal thread.
+        _ = c.bgfx_render_frame(-1);
         if (!c.bgfx_init(&bgfx_init)) return error.RendererInit;
         errdefer c.bgfx_shutdown();
 
@@ -299,17 +311,63 @@ pub const Renderer = struct {
     /// Wraps a platform texture (MTLTexture and friends) as a bgfx handle
     /// without copying pixels. The platform object must outlive the frame
     /// that samples it; the shell guarantees that by holding the buffer
-    /// until the next frame completes.
-    pub fn wrapExternalTexture(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize) c.bgfx_texture_handle_t {
+    /// until the next frame completes. render_target must be true for a
+    /// handle createExternalTarget will wrap into a framebuffer - bgfx
+    /// validates the BGFX_TEXTURE_RT flag against the shell texture at
+    /// creation, before override ever runs, so a handle created without
+    /// it can never become a render target later no matter what the
+    /// underlying native texture itself supports.
+    pub fn wrapExternalTexture(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize, render_target: bool) c.bgfx_texture_handle_t {
         _ = r;
-        const handle = c.bgfx_create_texture_2d(width, height, false, 1, format, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, null, 0);
+        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | (if (render_target) c.BGFX_TEXTURE_RT else 0);
+        const handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
         _ = c.bgfx_override_internal_texture_ptr(handle, native_ptr, 0);
+        return handle;
+    }
+
+    /// Same as wrapExternalTexture(render_target: true), except it
+    /// verifies the override actually landed instead of assuming it
+    /// did. bgfx_override_internal_texture_ptr documents returning 0
+    /// when the handle's own creation - itself an asynchronously queued
+    /// command, only processed on a later bgfx_frame() - has not been
+    /// picked up yet. Every wrapExternalTexture caller elsewhere creates
+    /// and uses its handle across a natural gap of at least one frame()
+    /// (camera ingress submits on one call, render samples on a later
+    /// one); createExternalTarget's caller is the one case that would
+    /// otherwise create a handle and immediately draw into it inside the
+    /// same ck_engine_render_frame, before bgfx has ever had a frame
+    /// boundary to actually create it. Returns null on that still-
+    /// pending case so the caller can retry next frame instead of
+    /// caching a handle that silently never points at the real texture.
+    pub fn wrapExternalRenderTarget(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize) ?c.bgfx_texture_handle_t {
+        _ = r;
+        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | c.BGFX_TEXTURE_RT;
+        const handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
+        const resolved = c.bgfx_override_internal_texture_ptr(handle, native_ptr, 0);
+        if (resolved == 0) {
+            c.bgfx_destroy_texture(handle);
+            return null;
+        }
         return handle;
     }
 
     pub fn destroyTexture(r: *Renderer, handle: c.bgfx_texture_handle_t) void {
         _ = r;
         if (handle.idx != invalid_handle) c.bgfx_destroy_texture(handle);
+    }
+
+    /// bgfx's own native device handle for the active backend - an
+    /// MTL::Device on Metal, whose pointer value is the same underlying
+    /// id<MTLDevice> object metal-cpp wraps with no extra indirection.
+    /// What lets a platform adapter (the beauty compositing bridge)
+    /// create native resources bgfx can wrap back in without owning any
+    /// bgfx dependency itself - the same separation wrapExternalTexture's
+    /// own native_ptr argument already keeps.
+    pub fn nativeDevice(r: *Renderer) ?*anyopaque {
+        _ = r;
+        const data = c.bgfx_get_internal_data();
+        if (data == null or data.*.context == null) return null;
+        return data.*.context;
     }
 
     /// Uploads a decoded, immutable image (a lens's LUT, say) as a real
@@ -364,6 +422,17 @@ pub const Renderer = struct {
         return true;
     }
 
+    /// The trivial RGBA passthrough program submitPreview's own bgra
+    /// branch already draws with - exposed so a caller outside this
+    /// module (the beauty compositing bridge, blitting a plain texture
+    /// into a platform-shared target through submitShaderPass) can reach
+    /// it without touching Renderer's fields directly, the same
+    /// boundary every other cross-module access in this file already
+    /// keeps.
+    pub fn passthroughProgram(r: *Renderer) c.bgfx_program_handle_t {
+        return r.rgba_program;
+    }
+
     /// Draws the camera frame as the full-view preview into view_id.
     /// `rotation_degrees` spins the quad for sensor orientation; `mirror`
     /// flips horizontally for front cameras.
@@ -404,6 +473,19 @@ pub const Renderer = struct {
 
     pub fn destroyOffscreenTarget(target: OffscreenTarget) void {
         if (target.framebuffer.idx != invalid_handle) c.bgfx_destroy_frame_buffer(target.framebuffer);
+    }
+
+    /// Wraps an existing texture handle (typically one wrapExternalTexture
+    /// just produced, over a platform-shared surface) as a render target
+    /// bgfx can draw into via setViewTarget - what lets a shared surface
+    /// receive a bgfx draw instead of only ever being sampled from. The
+    /// texture's own lifecycle stays with whoever created it; destroying
+    /// the returned target (destroyOffscreenTarget, same as any other
+    /// OffscreenTarget) never touches it.
+    pub fn createExternalTarget(handle: c.bgfx_texture_handle_t) !OffscreenTarget {
+        const framebuffer = c.bgfx_create_frame_buffer_from_handles(1, &handle, false);
+        if (framebuffer.idx == invalid_handle) return error.FrameBufferCreate;
+        return .{ .framebuffer = framebuffer, .texture = handle };
     }
 
     /// Assigns view_id's render target: an offscreen target, or the

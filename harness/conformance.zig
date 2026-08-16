@@ -29,6 +29,7 @@ const baseline_path = "lenses/conformance-baseline.txt";
 const corpus_path = ".models/corpus/face_frontal_b.jpg";
 const face_bundle_path = ".models/face_landmarker.task";
 const segmentation_model_path = ".models/selfie_segmenter.tflite";
+const beauty_resource_path = ".vendor/gpupixel/src";
 
 var harness_io: std.Io = undefined;
 
@@ -143,6 +144,17 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
     defer gpa.free(segmentation_bytes);
     if (abi.ck_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) {
         return error.EnableSegmentationFailed;
+    }
+    // Enabled unconditionally, same as face tracking and segmentation
+    // above: only beauty-baseline actually splices a beauty node, so
+    // this is a real no-op for the other reference lenses (beautyActive
+    // gates on the active lens, not just the session) rather than a
+    // per-lens special case here. Enabling before activation matters -
+    // activation applies the lens's own default effect values to
+    // whatever chain is already live, and a chain enabled afterward
+    // would silently miss them.
+    if (abi.ck_session_enable_beauty(session, beauty_resource_path) != .ok) {
+        return error.EnableBeautyFailed;
     }
 
     const activated = abi.ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);

@@ -237,6 +237,22 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Whether this lens spliced any beauty.* node - what gates whether
+    /// the live preview needs the GPU beauty compositing bridge running
+    /// at all. A lens with no beauty node still lets a session enable
+    /// beauty (currentEffects then applies nothing, all identity values),
+    /// but compositing every frame through gpupixel for a chain that can
+    /// never produce a visible difference would be pure waste.
+    pub fn hasBeautyNodes(self: *const Lens) bool {
+        for (self.nodes) |node| {
+            switch (node.node_type) {
+                .beauty_face, .beauty_reshape, .beauty_lipstick, .beauty_blusher => return true,
+                else => {},
+            }
+        }
+        return false;
+    }
+
     fn findNode(self: *const Lens, graph_index: graph.NodeIndex) ?LensNode {
         for (self.nodes) |node| {
             if (node.graph_index == graph_index) return node;

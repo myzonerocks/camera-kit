@@ -14,8 +14,12 @@
 // Source::GetFramebuffer() (public) returns this type, but the engine
 // ships its definition under src/core rather than the public include
 // tree - a gap in their own header split, not a private member we are
-// reaching around.
+// reaching around. gpupixel_context.h is the same situation:
+// GPUPixelContext::GetInstance()/GetFramebufferFactory()/
+// SetActiveGlProgram are how SourceRawData itself renders, just not
+// exposed through the public tree either.
 #include "core/gpupixel_framebuffer.h"
+#include "core/gpupixel_context.h"
 
 namespace {
 
@@ -41,8 +45,141 @@ class TextureTapSink : public gpupixel::Sink {
   uint32_t captured_texture = 0;
 };
 
+// GL_TEXTURE_RECTANGLE has no equivalent in GLES, so the constant only
+// exists to compile against on macOS - the only platform whose sampler_
+// kind (see ck_beauty_process_external_texture) can ever select it.
+#if defined(GPUPIXEL_MAC)
+constexpr uint32_t kRectangleTextureTarget = GL_TEXTURE_RECTANGLE_ARB;
+#else
+constexpr uint32_t kRectangleTextureTarget = GL_TEXTURE_2D;
+#endif
+
+const char* kExternalVertexShaderSource = R"(
+    attribute vec4 position;
+    attribute vec4 inputTextureCoordinate;
+    varying vec2 textureCoordinate;
+    void main() {
+      gl_Position = position;
+      textureCoordinate = inputTextureCoordinate.xy;
+    })";
+
+const char* kExternal2DFragmentShaderSource = R"(
+    varying vec2 textureCoordinate;
+    uniform sampler2D inputImageTexture;
+    void main() {
+      gl_FragColor = texture2D(inputImageTexture, textureCoordinate);
+    })";
+
+// samplerRect/texture2DRect is legacy-desktop-GL-only: the platform
+// interop layer never selects sampler_kind 1 anywhere but macOS, whose
+// CVOpenGLTextureCache always vends rectangle textures.
+const char* kExternalRectFragmentShaderSource = R"(
+    #extension GL_ARB_texture_rectangle : enable
+    varying vec2 textureCoordinate;
+    uniform sampler2DRect inputImageTexture;
+    uniform vec2 inputImageTextureSize;
+    void main() {
+      gl_FragColor = texture2DRect(inputImageTexture, textureCoordinate * inputImageTextureSize);
+    })";
+
+// Feeds an already-GL-imported external texture (a shared surface bgfx
+// just wrote a frame into, imported by the platform interop layer on
+// whatever GL context is current there) into the beauty chain by
+// blitting it into a framebuffer this class owns - the GPU-input mirror
+// of SourceRawData's CPU upload path. Never owns the external texture;
+// the platform interop layer keeps its texture cache and source buffer
+// alive across calls.
+class SourceExternalTexture : public gpupixel::Source {
+ public:
+  static std::shared_ptr<SourceExternalTexture> Create() {
+    auto ret = std::shared_ptr<SourceExternalTexture>(new SourceExternalTexture());
+    bool ok = true;
+    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext(
+        [&] { ok = ret->Init(); });
+    return ok ? ret : nullptr;
+  }
+
+  bool Init() {
+    program_2d_ = gpupixel::GPUPixelGLProgram::CreateWithShaderString(
+        kExternalVertexShaderSource, kExternal2DFragmentShaderSource);
+    if (program_2d_ == nullptr) return false;
+    // sampler2DRect/texture2DRect do not exist in GLSL ES - only
+    // compiled where sampler_kind can actually select it (macOS).
+    // Compiling this on iOS would fail every beauty chain there for a
+    // program that platform's interop layer never even asks for.
+#if defined(GPUPIXEL_MAC)
+    program_rect_ = gpupixel::GPUPixelGLProgram::CreateWithShaderString(
+        kExternalVertexShaderSource, kExternalRectFragmentShaderSource);
+    return program_rect_ != nullptr;
+#else
+    return true;
+#endif
+  }
+
+  // Runs on gpupixel's own GL thread - the caller already dispatches
+  // through SyncRunWithContext before reaching here (both the apple and,
+  // later, android platform interop layers share that contract with
+  // SourceRawData::ProcessData).
+  bool RenderExternalTexture(uint32_t gl_texture,
+                             int32_t sampler_kind,
+                             int32_t width,
+                             int32_t height) {
+    if (!framebuffer_ || framebuffer_->GetWidth() != width ||
+        framebuffer_->GetHeight() != height) {
+      framebuffer_ = gpupixel::GPUPixelContext::GetInstance()
+                         ->GetFramebufferFactory()
+                         ->CreateFramebuffer(width, height);
+    }
+    this->SetFramebuffer(framebuffer_, gpupixel::NoRotation);
+
+    const bool use_rect = sampler_kind == 1;
+    gpupixel::GPUPixelGLProgram* program = use_rect ? program_rect_ : program_2d_;
+    gpupixel::GPUPixelContext::GetInstance()->SetActiveGlProgram(program);
+    this->GetFramebuffer()->Activate();
+
+    static const float kImageVertices[] = {
+        -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f,
+    };
+    static const float kTexCoords[] = {
+        0.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f,
+    };
+
+    const uint32_t position_attribute = program->GetAttribLocation("position");
+    const uint32_t tex_coord_attribute =
+        program->GetAttribLocation("inputTextureCoordinate");
+    glEnableVertexAttribArray(position_attribute);
+    glVertexAttribPointer(position_attribute, 2, GL_FLOAT, 0, 0, kImageVertices);
+    glEnableVertexAttribArray(tex_coord_attribute);
+    glVertexAttribPointer(tex_coord_attribute, 2, GL_FLOAT, 0, 0, kTexCoords);
+
+    const uint32_t target = use_rect ? kRectangleTextureTarget : GL_TEXTURE_2D;
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(target, gl_texture);
+    program->SetUniformValue("inputImageTexture", 0);
+    if (use_rect) {
+      program->SetUniformValue("inputImageTextureSize",
+                               gpupixel::Vector2(static_cast<float>(width),
+                                                 static_cast<float>(height)));
+    }
+
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisableVertexAttribArray(position_attribute);
+    glDisableVertexAttribArray(tex_coord_attribute);
+    glBindTexture(target, 0);
+    this->GetFramebuffer()->Deactivate();
+
+    Source::DoRender(true);
+    return true;
+  }
+
+ private:
+  gpupixel::GPUPixelGLProgram* program_2d_ = nullptr;
+  gpupixel::GPUPixelGLProgram* program_rect_ = nullptr;
+};
+
 struct BeautyContext {
   std::shared_ptr<gpupixel::SourceRawData> source;
+  std::shared_ptr<SourceExternalTexture> source_gpu;
   std::shared_ptr<gpupixel::BeautyFaceFilter> beauty;
   std::shared_ptr<gpupixel::FaceReshapeFilter> reshape;
   std::shared_ptr<gpupixel::LipstickFilter> lipstick;
@@ -50,6 +187,14 @@ struct BeautyContext {
   std::shared_ptr<gpupixel::SinkRawData> sink;
   std::shared_ptr<TextureTapSink> texture_tap;
 };
+
+void ApplyLandmarks(BeautyContext* context, const float* landmarks106) {
+  if (landmarks106 == nullptr) return;
+  std::vector<float> points(landmarks106, landmarks106 + 106 * 2);
+  context->reshape->SetFaceLandmarks(points);
+  context->lipstick->SetFaceLandmarks(points);
+  context->blusher->SetFaceLandmarks(points);
+}
 
 }  // namespace
 
@@ -64,15 +209,16 @@ void* ck_beauty_create(const char* resource_path) {
     return nullptr;
   }
   context->source = gpupixel::SourceRawData::Create();
+  context->source_gpu = SourceExternalTexture::Create();
   context->beauty = gpupixel::BeautyFaceFilter::Create();
   context->reshape = gpupixel::FaceReshapeFilter::Create();
   context->lipstick = gpupixel::LipstickFilter::Create();
   context->blusher = gpupixel::BlusherFilter::Create();
   context->sink = gpupixel::SinkRawData::Create();
   context->texture_tap = std::make_shared<TextureTapSink>();
-  if (!context->source || !context->beauty || !context->reshape ||
-      !context->lipstick || !context->blusher || !context->sink ||
-      !context->texture_tap) {
+  if (!context->source || !context->source_gpu || !context->beauty ||
+      !context->reshape || !context->lipstick || !context->blusher ||
+      !context->sink || !context->texture_tap) {
     delete context;
     return nullptr;
   }
@@ -81,6 +227,11 @@ void* ck_beauty_create(const char* resource_path) {
       ->AddSink(context->reshape)
       ->AddSink(context->beauty)
       ->AddSink(context->sink);
+  // A second, independent entry point into the same downstream chain:
+  // source_gpu is its own Source with its own empty sinks_ map, so this
+  // only adds one new edge (source_gpu -> lipstick) without touching
+  // lipstick's own already-wired sinks at all.
+  context->source_gpu->AddSink(context->lipstick);
   context->beauty->AddSink(context->texture_tap);
   return context;
 }
@@ -145,12 +296,7 @@ int32_t ck_beauty_process(void* handle,
       width <= 0 || height <= 0) {
     return 1;
   }
-  if (landmarks106 != nullptr) {
-    std::vector<float> points(landmarks106, landmarks106 + 106 * 2);
-    context->reshape->SetFaceLandmarks(points);
-    context->lipstick->SetFaceLandmarks(points);
-    context->blusher->SetFaceLandmarks(points);
-  }
+  ApplyLandmarks(context, landmarks106);
   context->source->ProcessData(rgba_in, width, height, width * 4,
                                gpupixel::GPUPIXEL_FRAME_TYPE_RGBA);
   const uint8_t* processed = context->sink->GetRgbaBuffer();
@@ -161,6 +307,30 @@ int32_t ck_beauty_process(void* handle,
     return 1;
   }
   std::memcpy(rgba_out, processed, static_cast<size_t>(width) * height * 4);
+  return 0;
+}
+
+/// The GPU-input mirror of ck_beauty_process: gl_texture is already
+/// live on whatever GL context is current on the calling thread (the
+/// platform interop layer guarantees that before calling this, the same
+/// way it guarantees a current context for ck_beauty_interop_composite).
+/// sampler_kind: 0 = GL_TEXTURE_2D, 1 = GL_TEXTURE_RECTANGLE (macOS
+/// only). Pulls the result back out through ck_beauty_output_texture,
+/// same as the CPU path's own chain.
+int32_t ck_beauty_process_external_texture(void* handle,
+                                           uint32_t gl_texture,
+                                           int32_t sampler_kind,
+                                           int32_t width,
+                                           int32_t height,
+                                           const float* landmarks106) {
+  auto* context = static_cast<BeautyContext*>(handle);
+  if (context == nullptr || gl_texture == 0 || width <= 0 || height <= 0) {
+    return 1;
+  }
+  ApplyLandmarks(context, landmarks106);
+  if (!context->source_gpu->RenderExternalTexture(gl_texture, sampler_kind, width, height)) {
+    return 1;
+  }
   return 0;
 }
 

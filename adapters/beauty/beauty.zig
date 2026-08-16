@@ -88,6 +88,24 @@ pub fn set(beauty: *Beauty, effect: Effect, value: f32) void {
     ck_beauty_set(beauty.handle, @intFromEnum(effect), std.math.clamp(value, 0.0, 1.0));
 }
 
+/// Fills contour from a tracked face result's landmarks, scaled to the
+/// frame, or returns null while no usable face holds - the one contour-
+/// resolution rule both process() and processTexture() apply.
+fn contourFromResult(result: ?*const face.Result, width: u32, height: u32, contour: *[face106.point_count * 2]f32) ?[*]const f32 {
+    const tracked = result orelse return null;
+    if (tracked.landmark_count_out != face.landmark_count or tracked.presence < 0.5) return null;
+    var landmarks: [face.landmark_count]face.Landmark = undefined;
+    for (&landmarks, 0..) |*landmark, at| {
+        landmark.* = .{
+            .x = tracked.landmarks[at * 3],
+            .y = tracked.landmarks[at * 3 + 1],
+            .z = tracked.landmarks[at * 3 + 2],
+        };
+    }
+    face106.fill(&landmarks, @floatFromInt(width), @floatFromInt(height), contour);
+    return contour;
+}
+
 /// Runs the chain over one frame in place through a scratch copy the
 /// caller provides, with the tracked contour when a face holds.
 pub fn process(
@@ -99,22 +117,58 @@ pub fn process(
     rgba_out: [*]u8,
 ) error{ProcessRefused}!void {
     var contour: [face106.point_count * 2]f32 = undefined;
-    var contour_ptr: ?[*]const f32 = null;
-    if (result) |tracked| {
-        if (tracked.landmark_count_out == face.landmark_count and tracked.presence >= 0.5) {
-            var landmarks: [face.landmark_count]face.Landmark = undefined;
-            for (&landmarks, 0..) |*landmark, at| {
-                landmark.* = .{
-                    .x = tracked.landmarks[at * 3],
-                    .y = tracked.landmarks[at * 3 + 1],
-                    .z = tracked.landmarks[at * 3 + 2],
-                };
-            }
-            face106.fill(&landmarks, @floatFromInt(width), @floatFromInt(height), &contour);
-            contour_ptr = &contour;
-        }
-    }
+    const contour_ptr = contourFromResult(result, width, height, &contour);
     if (ck_beauty_process(beauty.handle, rgba_in, @intCast(width), @intCast(height), contour_ptr, rgba_out) != 0) {
         return error.ProcessRefused;
     }
+}
+
+extern fn ck_beauty_input_create() ?*anyopaque;
+extern fn ck_beauty_input_destroy(handle: ?*anyopaque) void;
+extern fn ck_beauty_input_surface(handle: ?*anyopaque, device: ?*anyopaque, width: i32, height: i32) ?*anyopaque;
+extern fn ck_beauty_input_process(input_handle: ?*anyopaque, beauty_handle: ?*anyopaque, width: i32, height: i32, landmarks106: ?[*]const f32) i32;
+
+/// The reverse of Interop: a platform-shared surface bgfx writes the
+/// live preview into zero-copy, that gpupixel then reads zero-copy on
+/// its own thread - what lets the beauty chain run over the frame
+/// actually reaching the screen instead of only ever the ABI's CPU
+/// roundtrip. One instance per session, independent of Beauty and
+/// Interop for the same reason Interop is: it owns platform surface
+/// state, not chain state.
+pub const InputSurface = struct {
+    handle: *anyopaque,
+};
+
+pub fn inputSurfaceCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemory }!*InputSurface {
+    const handle = ck_beauty_input_create() orelse return error.Unsupported;
+    const surface = gpa.create(InputSurface) catch {
+        ck_beauty_input_destroy(handle);
+        return error.OutOfMemory;
+    };
+    surface.* = .{ .handle = handle };
+    return surface;
+}
+
+pub fn inputSurfaceDestroy(gpa: std.mem.Allocator, surface: *InputSurface) void {
+    ck_beauty_input_destroy(surface.handle);
+    gpa.destroy(surface);
+}
+
+/// (Re)creates the shared surface against device (bgfx's own native
+/// device handle, render.Renderer.nativeDevice) sized to width/height,
+/// and returns bgfx's own view of it - a native texture pointer
+/// wrapExternalTexture can bind with no copy. Unretained: valid until
+/// the next call that actually resizes, or inputSurfaceDestroy.
+pub fn inputSurfaceNativeTexture(surface: *InputSurface, device: ?*anyopaque, width: u32, height: u32) ?*anyopaque {
+    return ck_beauty_input_surface(surface.handle, device, @intCast(width), @intCast(height));
+}
+
+/// Runs the beauty chain over the frame bgfx just wrote into surface,
+/// with the tracked contour when a face holds - the GPU-input mirror of
+/// process(). Call after that write has been submitted for this frame;
+/// composite() then reads the result back out, same as the CPU path.
+pub fn processTexture(surface: *InputSurface, beauty: *Beauty, width: u32, height: u32, result: ?*const face.Result) bool {
+    var contour: [face106.point_count * 2]f32 = undefined;
+    const contour_ptr = contourFromResult(result, width, height, &contour);
+    return ck_beauty_input_process(surface.handle, beauty.handle, @intCast(width), @intCast(height), contour_ptr) == 0;
 }
