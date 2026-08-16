@@ -18,7 +18,7 @@ const abi = @import("abi");
 const math = @import("math");
 
 const face106 = @import("face106");
-const transpose_conv_bias = @import("transpose_conv_bias");
+const segmentation = @import("segmentation");
 const builtin = @import("builtin");
 
 /// The beauty chain needs a windowing gl context; the harness proves it
@@ -434,9 +434,13 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (result.landmark_count_out != face.landmark_count) return 1;
         if (result.timestamp_us != 1000) return 1;
 
-        // Segmentation, loaded straight from disk rather than through the
-        // face bundle: the model needs the Convolution2DTransposeBias
-        // custom op registered before the interpreter can even load it.
+        // Segmentation, through the real worker adapter rather than a
+        // bare engine call: the same latest-wins NV12 mailbox and worker
+        // thread a shell would drive, proving the mutex-guarded mask
+        // buffer end to end (not graph.ResultSlot's seqlock - that copies
+        // its payload one atomic word at a time, fine for face.Result's
+        // few kilobytes but tens of thousands of individual atomic ops
+        // per mask at frame rate).
         {
             const segment_bytes = try std.Io.Dir.cwd().readFileAlloc(
                 harness_io,
@@ -446,25 +450,41 @@ pub fn main(init_args: std.process.Init) !u8 {
             );
             defer gpa.free(segment_bytes);
 
-            var segment_engine = try runtime.Engine.initWithCustomOps(segment_bytes, 2, &.{transpose_conv_bias.register});
-            defer segment_engine.deinit();
-
-            if (segment_engine.inputCount() != 1 or segment_engine.outputCount() != 1) return 1;
+            const seg = try segmentation.create(gpa, segment_bytes, 2);
+            defer segmentation.destroy(seg);
 
             // The same corpus portrait the face pipeline already proved
-            // itself against, cropped and resized the same way face
-            // detection samples its own first pass (the whole frame,
-            // letterboxed to square) - real preprocessing, not a synthetic
-            // frame, so a layout bug in the crop or the custom op's
-            // upsample would show up as a degenerate (near-uniform) mask
-            // rather than passing on arbitrary input.
-            var segment_input: [256 * 256 * 3]f32 = undefined;
-            sampler.sampleRegion(corpus.frame, sampler.frameSquare(corpus.frame.width, corpus.frame.height), .unit, 256, &segment_input);
-            try segment_engine.writeInput(0, std.mem.sliceAsBytes(&segment_input));
-            try segment_engine.invoke();
+            // itself against, already converted to NV12 above - real
+            // preprocessing through the worker's own crop (the whole
+            // frame, letterboxed to square, matching face detection's
+            // first pass) rather than a synthetic frame, so a layout bug
+            // in the crop or the custom op's upsample would show up as a
+            // degenerate (near-uniform) mask rather than passing on
+            // arbitrary input.
+            segmentation.submitNv12(
+                seg,
+                planes.width,
+                planes.height,
+                1000,
+                math.color.yuvToRgb(.bt601, .full),
+                planes.y.ptr,
+                planes.width,
+                planes.uv.ptr,
+                ((planes.width + 1) / 2) * 2,
+            );
 
-            const mask = try segment_engine.outputFloats(0);
-            if (mask.len != 256 * 256) return 1;
+            var mask: [segmentation.mask_len]f32 = undefined;
+            var mask_polls: usize = 0;
+            while (!segmentation.readMask(seg, &mask)) {
+                std.Thread.yield() catch {};
+                mask_polls += 1;
+                if (mask_polls > 100_000_000) {
+                    try out.print("segmentation: timed out\n", .{});
+                    try out.flush();
+                    return 1;
+                }
+            }
+
             var mask_min: f32 = 1.0;
             var mask_max: f32 = 0.0;
             for (mask) |value| {

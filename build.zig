@@ -544,6 +544,17 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
             },
         });
+        const segmentation_module = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_module },
+                .{ .name = "sampler", .module = sampler_module },
+                .{ .name = "math", .module = math_module },
+                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_module },
+            },
+        });
         const beauty_real_module = b.createModule(.{
             .root_source_file = b.path("adapters/beauty/beauty.zig"),
             .target = target,
@@ -591,7 +602,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "abi", .module = abi_tracking_module },
                 .{ .name = "face106", .module = face106_module },
-                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_module },
+                .{ .name = "segmentation", .module = segmentation_module },
             },
         });
         if (target.result.os.tag == .macos) {
