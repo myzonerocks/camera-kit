@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     // after that the stream stays on the declared copy path.
     private var zeroCopyRefused = false
 
-    // Row 8's conformance run reuses this same real window/renderer setup,
+    // The conformance run reuses this same real window/renderer setup,
     // just feeding a fixed corpus frame instead of live camera - see
     // ConformanceRunner. Set via `am start --ez CKConformance true`, the
     // direct equivalent of the ios shell's -CKConformance launch argument.

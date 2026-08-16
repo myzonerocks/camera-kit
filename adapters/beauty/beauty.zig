@@ -33,8 +33,7 @@ pub const Beauty = struct {
 };
 
 /// The GPU-side bridge from the beauty chain's own output texture into a
-/// platform-shared surface bgfx reads zero-copy from, per
-/// docs/private/DECISIONS.md's 2026-08-15 entry. One instance per
+/// platform-shared surface bgfx reads zero-copy from. One instance per
 /// session; independent of Beauty itself since it owns platform surface
 /// state, not chain state.
 pub const Interop = struct {

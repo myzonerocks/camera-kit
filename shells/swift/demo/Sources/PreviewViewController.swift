@@ -119,7 +119,7 @@ final class PreviewViewController: UIViewController {
         metalView.metalLayer.contentsScale = scale
         metalView.metalLayer.drawableSize = CGSize(width: CGFloat(pixelWidth), height: CGFloat(pixelHeight))
 
-        // Row 8's conformance run reuses this same real window/renderer
+        // The conformance run reuses this same real window/renderer
         // setup, just feeding a fixed corpus frame instead of live
         // camera - see ConformanceRunner. Own engine/session instances,
         // so the normal live-preview path below never starts.
