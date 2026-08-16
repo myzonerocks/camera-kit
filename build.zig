@@ -241,7 +241,6 @@ pub fn build(b: *std.Build) void {
     const lens_manifest_tests = b.addTest(.{ .root_module = lens_manifest_module });
     const lens_trigger_tests = b.addTest(.{ .root_module = lens_trigger_module });
     const lens_animation_tests = b.addTest(.{ .root_module = lens_animation_module });
-    const lens_validator_tests = b.addTest(.{ .root_module = lens_validator_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
@@ -261,7 +260,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(lens_manifest_tests).step);
     test_step.dependOn(&b.addRunArtifact(lens_trigger_tests).step);
     test_step.dependOn(&b.addRunArtifact(lens_animation_tests).step);
-    test_step.dependOn(&b.addRunArtifact(lens_validator_tests).step);
 
     // Adapters compile against the vendored trees. Without them the rest of
     // the build still works, vendor-sync included; only the steps that need
@@ -302,6 +300,59 @@ pub fn build(b: *std.Build) void {
     };
     const shaderc_exe = addShadercTool(b, optimize);
     const flatc_exe = addFlatcTool(b);
+
+    // The CLI always validates shaders for real - that is the point of
+    // the tool - so it unconditionally depends on shaderc.
+    const lens_validator_options = b.addOptions();
+    if (shaderc_exe) |tool| {
+        lens_validator_options.addOptionPath("shaderc_path", tool.getEmittedBin());
+    } else {
+        lens_validator_options.addOption([]const u8, "shaderc_path", "");
+    }
+    lens_validator_options.addOption([]const u8, "shader_include_dir", ".vendor/bgfx/src");
+    lens_validator_options.addOption([]const u8, "varyingdef_path", "lenses/shaders/varying.def.sc");
+    lens_validator_module.addOptions("build_options", lens_validator_options);
+
+    // The test suite's shaderc dependency is opt-in: shaderc is a full
+    // C++ toolchain (spirv-tools/glslang/glsl-optimizer/spirv-cross)
+    // built from source, and forcing that build into the default fast
+    // `zig build test`/`zig build ci` path (used by every quick local
+    // check and the hosted gates job's 15-minute budget) is what left
+    // this exact spot broken once already - a cold hosted runner never
+    // finished the build in time. -Dlens-shaders=true opts a slower,
+    // separately-timed job into full coverage; the default path's
+    // shader-compile-stage tests skip cleanly instead of forcing a cold
+    // multi-toolchain build no other test in this suite needs.
+    const lens_shader_tests_enabled = b.option(
+        bool,
+        "lens-shaders",
+        "Build shaderc and run the lens validator's shader-compile-stage tests (slow on a cold cache)",
+    ) orelse false;
+    const lens_validator_test_module = b.createModule(.{
+        .root_source_file = b.path("lenses/validator/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "manifest", .module = lens_manifest_module },
+            .{ .name = "trigger", .module = lens_trigger_module },
+        },
+    });
+    const lens_test_options = b.addOptions();
+    if (lens_shader_tests_enabled) {
+        if (shaderc_exe) |tool| {
+            lens_test_options.addOptionPath("shaderc_path", tool.getEmittedBin());
+        } else {
+            lens_test_options.addOption([]const u8, "shaderc_path", "");
+        }
+    } else {
+        lens_test_options.addOption([]const u8, "shaderc_path", "");
+    }
+    lens_test_options.addOption([]const u8, "shader_include_dir", ".vendor/bgfx/src");
+    lens_test_options.addOption([]const u8, "varyingdef_path", "lenses/shaders/varying.def.sc");
+    lens_validator_test_module.addOptions("build_options", lens_test_options);
+    const lens_validator_tests = b.addTest(.{ .root_module = lens_validator_test_module });
+    test_step.dependOn(&b.addRunArtifact(lens_validator_tests).step);
+
     const have_inference_stack = blk: {
         for ([_][]const u8{
             ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt",
@@ -2041,7 +2092,12 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     const fcpp_dir = ".vendor/bgfx/3rdparty/fcpp";
     const spirv_cross = ".vendor/bgfx/3rdparty/spirv-cross";
 
-    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS" };
+    // shaderc.h defaults SHADERC_CONFIG_HAS_DXC on for both Windows and
+    // Linux, assuming a DXC install neither this vendor tree nor this
+    // build provides (shaderc_dxil.cpp then reaches for <unknwnbase.h>,
+    // a Windows SDK header, and fails outright on Linux). We only ever
+    // emit metal/spirv/essl, never DXIL/D3D12, so it's a straight cut.
+    const cxx17 = [_][]const u8{ "-std=c++20", "-fno-strict-aliasing", "-fno-sanitize=undefined", "-w", "-DBX_CONFIG_DEBUG=0", "-D__STDC_FORMAT_MACROS", "-DSHADERC_CONFIG_HAS_DXC=0" };
     const c_flags = [_][]const u8{ "-fno-sanitize=undefined", "-w" };
 
     const spirv_opt_module = b.createModule(.{ .target = target, .optimize = opt });

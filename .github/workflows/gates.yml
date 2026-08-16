@@ -81,3 +81,33 @@ jobs:
             zigcache-tracking-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
       - name: tracking harness
         run: zig build tracking-harness
+
+  lens-shaders:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: .local/zig
+          key: zig-${{ runner.os }}-${{ hashFiles('.zigversion') }}
+      - name: toolchain
+        run: |
+          tools/toolchain-sync
+          echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .vendor
+            .vendor-archives
+          key: vendor-${{ hashFiles('third_party/**/pin.zon') }}
+      - name: vendor sync
+        run: zig build vendor-sync
+      - uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zigcache-lens-shaders-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
+          restore-keys: |
+            zigcache-lens-shaders-${{ runner.os }}-${{ hashFiles('.zigversion') }}-
+      - name: lens validator shader tests
+        run: zig build test -Dlens-shaders=true

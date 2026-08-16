@@ -191,14 +191,20 @@ falling back to `linear`.
 
 ## 7. Assets
 
-Shaders are GLSL source, compiled at bundle load time (not lens-authoring
-time) through the kit's pinned shader toolchain to the running platform's
-native form (Metal / SPIR-V / WGSL), under the same resource limits the
-kit's own shaders compile under (Part 1.4/14 of the engineering history —
-bounded compile time, no toolchain escape hatches, compiler diagnostics
-surfaced as validation errors naming the source file and line). A shader
-that fails to compile fails the bundle's validation; there is no partial
-lens.
+Every file in `shaders/` is a fragment shader for a full-screen pass over
+the current frame — a lens does not author its own vertex stage. The
+runtime supplies one fixed vertex contract, `lenses/shaders/varying.def.sc`,
+shared by every lens shader pass: `a_position`/`a_texcoord0` in,
+`v_texcoord0` out, the same shape as the kit's own preview passes. A lens
+fragment shader is GLSL source written to that contract (bgfx's shader
+dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`), compiled at
+bundle load time (not lens-authoring time) through the kit's pinned shader
+toolchain to the running platform's native form (Metal / SPIR-V / ESSL),
+under the same resource limits the kit's own shaders compile under (Part
+1.4/14 of the engineering history — bounded compile time, no toolchain
+escape hatches, compiler diagnostics surfaced as validation errors naming
+the source file and line). A shader that fails to compile fails the
+bundle's validation; there is no partial lens.
 
 glTF/GLB assets bind through the kit's existing cgltf adapter — same
 allocator-bridged parse, same refusal of external file references (a glTF
