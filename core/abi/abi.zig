@@ -275,6 +275,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         const ready = switch (entry.kind) {
             .shader => s.shader_programs.contains(entry.graph_index),
             .lut => s.lut_textures.contains(entry.graph_index),
+            // blend.pass has no asset loader or draw call yet (real
+            // remaining work) - never ready, same graceful skip an
+            // unloaded lut.pass gets, not a stand-in for real rendering.
+            .blend => false,
         };
         if (ready) ready_count += 1;
     }
@@ -320,6 +324,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     next_slot += 1;
                 }
             },
+            .blend => continue,
         }
     }
 }

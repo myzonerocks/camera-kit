@@ -10,8 +10,8 @@
 //! one that knows how to hand them to the engine.
 //!
 //! Node types are the closed, kit-versioned vocabulary a lens manifest
-//! can name: only the beauty family is wired here.
-//! Shader passes, glTF draws, LUT passes, and compositing are real
+//! can name: the beauty family, shader passes, LUT passes, and mask-
+//! driven blend passes are all wired here. glTF draws are real
 //! remaining work, deliberately not stubbed in ahead of their own
 //! execution landing.
 
@@ -34,7 +34,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -43,15 +43,17 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.blusher")) return .beauty_blusher;
     if (std.mem.eql(u8, type_str, "shader.pass")) return .shader_pass;
     if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
+    if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
     return null;
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };
 
 /// The param names each node type accepts and which effect slot each one
-/// drives - the only place that mapping is declared. shader.pass and
-/// lut.pass have no effect-slot params of their own: each one's id
-/// names the asset it runs (a shader source file or a LUT image), the
+/// drives - the only place that mapping is declared. shader.pass,
+/// lut.pass, and blend.pass have no effect-slot params of their own:
+/// each one's id names the asset it runs (a shader source file, a LUT
+/// image, or - for blend.pass - the background image it swaps in), the
 /// same way a node's id already resolves against other nodes for
 /// wiring.
 fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
@@ -66,7 +68,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass => &.{},
+        .shader_pass, .lut_pass, .blend_pass => &.{},
     };
 }
 
@@ -81,10 +83,11 @@ const LensNode = struct {
     graph_index: graph.NodeIndex,
     node_type: NodeType,
     bindings: [effect_slot_count]?ParamSource = @splat(null),
-    /// Set only for .shader_pass and .lut_pass nodes: the node's own id,
-    /// which also names the asset it runs (shaders/<id>.glsl for
-    /// shader.pass, assets/<id>.png for lut.pass) - a slice into the
-    /// Lens's own retained manifest arena, not separately owned.
+    /// Set only for .shader_pass, .lut_pass, and .blend_pass nodes: the
+    /// node's own id, which also names the asset it runs
+    /// (shaders/<id>.glsl for shader.pass, assets/<id>.png for lut.pass
+    /// and for blend.pass's background image) - a slice into the Lens's
+    /// own retained manifest arena, not separately owned.
     asset_stem: ?[]const u8 = null,
 };
 
@@ -105,11 +108,20 @@ pub const LutPassNode = struct {
     lut_stem: []const u8,
 };
 
-pub const PassKind = enum { shader, lut };
+/// One blend.pass node ready for the caller to load and draw - which
+/// graph node it is, and the background image (assets/<stem>.png) it
+/// swaps in behind the segmentation mask.
+pub const BlendPassNode = struct {
+    graph_index: graph.NodeIndex,
+    background_stem: []const u8,
+};
 
-/// One shader.pass or lut.pass node, tagged with which - the caller's
-/// real draw order for a chain that may mix both kinds, since the
-/// graph itself makes no distinction between them beyond node_type.
+pub const PassKind = enum { shader, lut, blend };
+
+/// One shader.pass, lut.pass, or blend.pass node, tagged with which -
+/// the caller's real draw order for a chain that may mix all three
+/// kinds, since the graph itself makes no distinction between them
+/// beyond node_type.
 pub const CompositePass = struct {
     graph_index: graph.NodeIndex,
     kind: PassKind,
@@ -188,10 +200,26 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
-    /// Every shader.pass and lut.pass node this lens spliced, in one
-    /// real execution-order sequence - the actual draw order for a
-    /// chain that mixes both kinds, which shaderPassNodes/lutPassNodes
-    /// alone cannot express since each only ever sees its own kind.
+    /// Every blend.pass node this lens spliced, in the graph's real
+    /// execution order - mirrors shaderPassNodes/lutPassNodes exactly,
+    /// one more node type over.
+    pub fn blendPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]BlendPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(BlendPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .blend_pass) continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .background_stem = node.asset_stem.? });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every shader.pass, lut.pass, and blend.pass node this lens
+    /// spliced, in one real execution-order sequence - the actual draw
+    /// order for a chain that mixes any of the three kinds, which
+    /// shaderPassNodes/lutPassNodes/blendPassNodes alone cannot express
+    /// since each only ever sees its own kind.
     pub fn compositePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]CompositePass {
         const order = try g.executionOrder();
         var out: std.ArrayList(CompositePass) = .empty;
@@ -201,6 +229,7 @@ pub const Lens = struct {
             const kind: PassKind = switch (node.node_type) {
                 .shader_pass => .shader,
                 .lut_pass => .lut,
+                .blend_pass => .blend,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
@@ -289,7 +318,10 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         nodes[spliced_count] = .{
             .graph_index = graph_index,
             .node_type = node_type,
-            .asset_stem = if (node_type == .shader_pass or node_type == .lut_pass) node.id else null,
+            .asset_stem = switch (node_type) {
+                .shader_pass, .lut_pass, .blend_pass => node.id,
+                else => null,
+            },
         };
 
         for (node.inputs) |input| {
@@ -571,6 +603,49 @@ test "a lut.pass node splices with no effect bindings and resolves its LUT by id
     try t.expectEqual(@as(usize, 0), passes.len);
 }
 
+const blend_pass_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.blendpass", "version": "1.0.0", "display_name": "Blend Pass",
+    \\  "engine_compat": ">=0.5", "capabilities": ["segmentation"],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "beach", "type": "blend.pass", "inputs": {"frame": "camera"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a blend.pass node splices with no effect bindings and resolves its background by id" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, blend_pass_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(@as(usize, 1), lens.nodes.len);
+    try t.expectEqual(NodeType.blend_pass, lens.nodes[0].node_type);
+
+    const effects = try lens.currentEffects(t.allocator);
+    defer t.allocator.free(effects);
+    try t.expectEqual(@as(usize, 0), effects.len);
+
+    const blends = try lens.blendPassNodes(t.allocator, &g);
+    defer t.allocator.free(blends);
+    try t.expectEqual(@as(usize, 1), blends.len);
+    try t.expectEqualStrings("beach", blends[0].background_stem);
+    try t.expectEqual(lens.nodes[0].graph_index, blends[0].graph_index);
+
+    // Neither of the other two accessors picks up this node type's node.
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 0), passes.len);
+    const luts = try lens.lutPassNodes(t.allocator, &g);
+    defer t.allocator.free(luts);
+    try t.expectEqual(@as(usize, 0), luts.len);
+}
+
 const mixed_chain_manifest =
     \\{
     \\  "glf": "1.0", "id": "com.example.mixedchain", "version": "1.0.0", "display_name": "Mixed Chain",
@@ -625,6 +700,42 @@ test "compositePassNodes interleaves both kinds in one real draw-order sequence"
     try t.expectEqual(lens.nodes[0].graph_index, chain[0].graph_index);
     try t.expectEqual(lens.nodes[1].graph_index, chain[1].graph_index);
     try t.expectEqual(lens.nodes[2].graph_index, chain[2].graph_index);
+}
+
+const three_way_chain_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.threewaychain", "version": "1.0.0", "display_name": "Three Way Chain",
+    \\  "engine_compat": ">=0.5", "capabilities": ["segmentation"],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "tint", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}},
+    \\    {"id": "warm-lut", "type": "lut.pass", "inputs": {"frame": "tint"}, "params": {}},
+    \\    {"id": "beach", "type": "blend.pass", "inputs": {"frame": "warm-lut"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "compositePassNodes interleaves all three kinds in one real draw-order sequence" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, three_way_chain_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const chain = try lens.compositePassNodes(t.allocator, &g);
+    defer t.allocator.free(chain);
+    try t.expectEqual(@as(usize, 3), chain.len);
+    try t.expectEqual(PassKind.shader, chain[0].kind);
+    try t.expectEqual(PassKind.lut, chain[1].kind);
+    try t.expectEqual(PassKind.blend, chain[2].kind);
+
+    const blends = try lens.blendPassNodes(t.allocator, &g);
+    defer t.allocator.free(blends);
+    try t.expectEqual(@as(usize, 1), blends.len);
+    try t.expectEqualStrings("beach", blends[0].background_stem);
 }
 
 test "a trigger firing on the rising edge starts a ramp that settles, does not refire while held, and rearms on the falling edge" {
