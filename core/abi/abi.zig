@@ -1117,6 +1117,8 @@ test "activating a second lens replaces the first, and invalid input is rejected
 }
 
 test "ticking with no active lens reports again; ticking a firing trigger advances its ramp" {
+    std.debug.print("DIAG13: enter\n", .{});
+    defer std.debug.print("DIAG13: exit\n", .{});
     const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
     defer destroyEngine(engine);
     const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
@@ -1140,6 +1142,8 @@ test "ticking with no active lens reports again; ticking a firing trigger advanc
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {
+    std.debug.print("DIAG14: enter\n", .{});
+    defer std.debug.print("DIAG14: exit\n", .{});
     const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
     defer destroyEngine(engine);
     const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
@@ -1190,6 +1194,8 @@ const lut_checker_png = [_]u8{
 };
 
 test "activating a lens with a lut.pass node loads its LUT image for real, off the calling thread" {
+    std.debug.print("DIAG15: enter\n", .{});
+    defer std.debug.print("DIAG15: exit\n", .{});
     const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
     defer destroyEngine(engine);
     const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
@@ -1204,7 +1210,9 @@ test "activating a lens with a lut.pass node loads its LUT image for real, off t
     var path_buf: [64]u8 = undefined;
     const bundle_path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
 
+    std.debug.print("DIAG15: before activate\n", .{});
     try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    std.debug.print("DIAG15: after activate, loaders={d}\n", .{session.lut_loaders.count()});
     try t.expectEqual(@as(usize, 1), session.lut_loaders.count());
     try t.expectEqual(@as(usize, 1), session.chain_order.len);
     try t.expectEqual(runtime.PassKind.lut, session.chain_order[0].kind);
@@ -1217,6 +1225,7 @@ test "activating a lens with a lut.pass node loads its LUT image for real, off t
         decoded = loader.take();
         if (decoded == null) std.atomic.spinLoopHint();
     }
+    std.debug.print("DIAG15: after poll, spins={d}, got={}\n", .{ spins, decoded != null });
     const got = decoded orelse return error.TestUnexpectedResult;
     defer t.allocator.free(got.rgba);
     try t.expectEqual(@as(u32, 8), got.width);
@@ -1227,6 +1236,8 @@ test "activating a lens with a lut.pass node loads its LUT image for real, off t
     // ck_engine_render_frame (this build has no compiled render stack)
     // is still cleaned up correctly on deactivation, not leaked or
     // double-freed.
+    std.debug.print("DIAG15: before deactivate\n", .{});
     ck_session_deactivate_lens(session);
+    std.debug.print("DIAG15: after deactivate\n", .{});
     try t.expectEqual(@as(usize, 0), session.lut_loaders.count());
 }
