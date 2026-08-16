@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.background-swap",
+  "version": "1.0.0",
+  "display_name": "Background Swap",
+  "engine_compat": ">=0.5",
+  "capabilities": ["segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "beach", "type": "blend.pass", "inputs": {"frame": "camera"}, "params": {}}
+  ],
+  "triggers": []
+}
