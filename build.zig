@@ -204,6 +204,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const lens_runtime_module = b.createModule(.{
+        .root_source_file = b.path("core/lens/runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "graph", .module = graph_module },
+            .{ .name = "manifest", .module = lens_manifest_module },
+            .{ .name = "trigger", .module = lens_trigger_module },
+            .{ .name = "animation", .module = lens_animation_module },
+            .{ .name = "face", .module = face_module },
+        },
+    });
+
     const lens_validator_module = b.createModule(.{
         .root_source_file = b.path("lenses/validator/main.zig"),
         .target = target,
@@ -241,6 +254,7 @@ pub fn build(b: *std.Build) void {
     const lens_manifest_tests = b.addTest(.{ .root_module = lens_manifest_module });
     const lens_trigger_tests = b.addTest(.{ .root_module = lens_trigger_module });
     const lens_animation_tests = b.addTest(.{ .root_module = lens_animation_module });
+    const lens_runtime_tests = b.addTest(.{ .root_module = lens_runtime_module });
     const test_step = b.step("test", "Run all tests");
     ci_step.dependOn(test_step);
     test_step.dependOn(&b.addRunArtifact(gate_tests).step);
@@ -260,6 +274,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(lens_manifest_tests).step);
     test_step.dependOn(&b.addRunArtifact(lens_trigger_tests).step);
     test_step.dependOn(&b.addRunArtifact(lens_animation_tests).step);
+    test_step.dependOn(&b.addRunArtifact(lens_runtime_tests).step);
 
     // Adapters compile against the vendored trees. Without them the rest of
     // the build still works, vendor-sync included; only the steps that need
