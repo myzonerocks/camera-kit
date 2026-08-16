@@ -125,7 +125,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     };
     if (abi.ck_engine_init_renderer(engine, &renderer_desc) != .ok) return error.RendererInit;
 
-    for ([_][]const u8{ "shader-tint", "beauty-baseline" }) |name| {
+    for ([_][]const u8{ "shader-tint", "beauty-baseline", "background-swap" }) |name| {
         if (!try checkDeterminism(gpa, init_args.io, engine, name)) return 1;
     }
     return 0;
