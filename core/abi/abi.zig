@@ -333,7 +333,13 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
         break :blk created;
     };
 
-    const device = r.nativeDevice() orelse return input_texture;
+    // null on backends with no separate device handle to pass (GLES: a
+    // context is implicit and thread-bound, nothing to hand across this
+    // boundary) - inputSurfaceNativeTexture's own platform
+    // implementation decides whether it actually needs one non-null
+    // (Metal does; GLES ignores the argument entirely), so a null
+    // device here is not itself a reason to give up.
+    const device = r.nativeDevice();
     const native_texture = beauty.inputSurfaceNativeTexture(input_surface, device, width, height) orelse return input_texture;
 
     const target_has_a_prior_write = s.beauty_input_target != null and s.beauty_input_native == native_texture;

@@ -28,6 +28,13 @@
 
 #include "core/gpupixel_context.h"
 
+extern "C" int32_t ck_beauty_process_external_texture(void* handle,
+                                                       uint32_t gl_texture,
+                                                       int32_t sampler_kind,
+                                                       int32_t width,
+                                                       int32_t height,
+                                                       const float* landmarks106);
+
 namespace {
 
 const char* kBlitVertexShader =
@@ -188,6 +195,147 @@ struct AndroidInterop {
   }
 };
 
+// The reverse bridge: bgfx writes the current preview frame into this
+// shared AHardwareBuffer on its own thread, gpupixel reads it back out
+// on its own thread - the same shared buffer AndroidInterop composites
+// through above, just two EGLImage views built for opposite directions
+// instead of one. Both bgfx and gpupixel run GLES contexts here (unlike
+// the apple bridge's Metal write / GL read split), but a GL texture
+// object is still per-context, so each side imports its own EGLImage
+// sibling of the same buffer rather than sharing a GLuint directly - the
+// same reason AndroidInterop's own gl_texture is never handed across
+// contexts either. The two never race in practice: every caller in this
+// codebase reaches gpupixel through SyncRunWithContext, which blocks the
+// calling (bgfx) thread until gpupixel's own thread is done, so a
+// frame's bgfx write always finishes strictly before that same frame's
+// gpupixel read starts, and the next frame's write cannot start until
+// this one returns.
+struct AndroidInputSurface {
+  AHardwareBuffer* buffer = nullptr;
+  EGLImageKHR write_image = EGL_NO_IMAGE_KHR;
+  GLuint write_texture = 0;
+  EGLImageKHR read_image = EGL_NO_IMAGE_KHR;
+  GLuint read_texture = 0;
+  int width = 0;
+  int height = 0;
+
+  ~AndroidInputSurface() {
+    EGLDisplay display = eglGetCurrentDisplay();
+    if (write_texture) glDeleteTextures(1, &write_texture);
+    if (read_texture) glDeleteTextures(1, &read_texture);
+    if (display != EGL_NO_DISPLAY) {
+      if (write_image != EGL_NO_IMAGE_KHR) eglDestroyImageKHR(display, write_image);
+      if (read_image != EGL_NO_IMAGE_KHR) eglDestroyImageKHR(display, read_image);
+    }
+    if (buffer) AHardwareBuffer_release(buffer);
+  }
+
+  // Runs on bgfx's own thread. (Re)allocates the shared buffer sized to
+  // new_width/new_height and imports bgfx's own write-side EGLImage view
+  // of it - GPU_COLOR_OUTPUT so bgfx can render into it, GPU_SAMPLED_
+  // IMAGE so gpupixel can later read it. Tearing down read_image/
+  // read_texture here too is correct even though this runs on the wrong
+  // thread to touch GL objects gpupixel owns: this only happens on an
+  // actual resize, and EnsureReadSurface below detects a stale buffer by
+  // pointer identity and recreates its own view lazily next time
+  // gpupixel runs, the same contract AppleInputSurface's Metal/GL split
+  // already established.
+  //
+  // The returned GLuint is only meaningful to bgfx's GLES backend -
+  // wrapExternalRenderTarget hands it straight to bgfx_override_
+  // internal_texture_ptr, whose Vulkan-backend implementation expects a
+  // VkImage-derived handle instead, not a small integer reinterpreted as
+  // one. When bgfx runs on Vulkan (device supports it, render.zig chose
+  // that backend at init) there is no current EGL context on this
+  // thread at all, so eglGetCurrentDisplay() below returns EGL_NO_
+  // DISPLAY and this fails cleanly before ever reaching the override
+  // call - the same "unavailable capability holds its default state"
+  // degradation as everywhere else, not a new special case. A real
+  // Vulkan render-target import (a second AHardwareBuffer path through
+  // android_vk.zig, mirroring the read-side import that already exists
+  // for camera ingress) is real, larger, separate work, gated on the
+  // same physical-device requirement first Vulkan/zero-copy execution
+  // already is.
+  bool EnsureWriteSurface(int new_width, int new_height) {
+    if (write_texture != 0 && width == new_width && height == new_height) return true;
+    if (!Extensions().Ready()) return false;
+
+    EGLDisplay display = eglGetCurrentDisplay();
+    if (display == EGL_NO_DISPLAY) return false;
+
+    if (write_texture) { glDeleteTextures(1, &write_texture); write_texture = 0; }
+    if (write_image != EGL_NO_IMAGE_KHR) { eglDestroyImageKHR(display, write_image); write_image = EGL_NO_IMAGE_KHR; }
+    if (read_texture) { glDeleteTextures(1, &read_texture); read_texture = 0; }
+    if (read_image != EGL_NO_IMAGE_KHR) { eglDestroyImageKHR(display, read_image); read_image = EGL_NO_IMAGE_KHR; }
+    if (buffer) { AHardwareBuffer_release(buffer); buffer = nullptr; }
+
+    AHardwareBuffer_Desc desc = {};
+    desc.width = static_cast<uint32_t>(new_width);
+    desc.height = static_cast<uint32_t>(new_height);
+    desc.layers = 1;
+    desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+    desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                 AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+    if (AHardwareBuffer_allocate(&desc, &buffer) != 0) return false;
+
+    EGLClientBuffer client_buffer = Extensions().get_native_client_buffer(buffer);
+    if (client_buffer == nullptr) return false;
+
+    const EGLint image_attrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+    write_image = eglCreateImageKHR(display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+                                    client_buffer, image_attrs);
+    if (write_image == EGL_NO_IMAGE_KHR) return false;
+
+    glGenTextures(1, &write_texture);
+    glBindTexture(GL_TEXTURE_2D, write_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    Extensions().egl_image_target_texture_2d(GL_TEXTURE_2D, write_image);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    width = new_width;
+    height = new_height;
+    return true;
+  }
+
+  // Runs on gpupixel's own GL thread (the caller dispatches through
+  // SyncRunWithContext): imports the same buffer bgfx just wrote into as
+  // gpupixel's own EGLImage/texture sibling, bound to whichever context
+  // is current there. Skipped when a read texture is already live for
+  // the current buffer - EnsureWriteSurface only tears read_texture down
+  // when it actually reallocates buffer, so the common per-frame case
+  // (size unchanged) reimports nothing and just reads fresh content
+  // through the texture already bound.
+  bool EnsureReadSurface() {
+    if (read_texture != 0) return true;
+    if (buffer == nullptr) return false;
+    if (!Extensions().Ready()) return false;
+
+    EGLDisplay display = eglGetCurrentDisplay();
+    if (display == EGL_NO_DISPLAY) return false;
+
+    EGLClientBuffer client_buffer = Extensions().get_native_client_buffer(buffer);
+    if (client_buffer == nullptr) return false;
+
+    const EGLint image_attrs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+    read_image = eglCreateImageKHR(display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+                                   client_buffer, image_attrs);
+    if (read_image == EGL_NO_IMAGE_KHR) return false;
+
+    glGenTextures(1, &read_texture);
+    glBindTexture(GL_TEXTURE_2D, read_texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    Extensions().egl_image_target_texture_2d(GL_TEXTURE_2D, read_image);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return true;
+  }
+};
+
 }  // namespace
 
 extern "C" {
@@ -275,6 +423,59 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
   });
 
   return ok ? interop->buffer : nullptr;
+}
+
+void* ck_beauty_input_create(void) {
+  return new (std::nothrow) AndroidInputSurface();
+}
+
+void ck_beauty_input_destroy(void* handle) {
+  delete static_cast<AndroidInputSurface*>(handle);
+}
+
+// Runs on bgfx's own thread. device is unused - GL has no separate
+// device handle to pass the way Metal does, a context is implicit and
+// thread-bound - kept only so the caller (abi.zig) can stay platform-
+// neutral about the parameter. (Re)creates the shared surface and
+// returns the write-side GLuint texture id (cast to a pointer) bgfx can
+// wrap with wrapExternalRenderTarget, unretained: valid until the next
+// call that actually resizes, or ck_beauty_input_destroy.
+void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
+  (void)device;
+  if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
+  auto* input = static_cast<AndroidInputSurface*>(handle);
+  if (!input->EnsureWriteSurface(width, height)) return nullptr;
+  return reinterpret_cast<void*>(static_cast<uintptr_t>(input->write_texture));
+}
+
+// Runs on gpupixel's own GL thread by dispatching through
+// SyncRunWithContext itself - the caller never needs to know that
+// detail, matching ck_beauty_interop_composite's own contract. Imports
+// the shared buffer bgfx just wrote into (its own EGLImage/texture
+// sibling, not bgfx's write_texture directly - a GL texture object is
+// per-context) and pushes it through the beauty chain via
+// ck_beauty_process_external_texture (beauty_shim.cc); returns 0 on
+// success, matching ck_beauty_process's own status convention.
+int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
+                                int32_t width, int32_t height,
+                                const float* landmarks106) {
+  if (input_handle == nullptr || beauty_handle == nullptr) return 1;
+  auto* input = static_cast<AndroidInputSurface*>(input_handle);
+
+  bool ok = true;
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    if (!input->EnsureReadSurface()) {
+      ok = false;
+      return;
+    }
+    // Imported as GL_TEXTURE_2D (sampler_kind 0), the same target
+    // AndroidInterop's own EGLImage import already uses successfully -
+    // GL_OES_EGL_image_external's samplerExternalOES is a different,
+    // unrelated extension this bridge never needs.
+    ok = ck_beauty_process_external_texture(beauty_handle, input->read_texture, 0,
+                                            width, height, landmarks106) == 0;
+  });
+  return ok ? 0 : 1;
 }
 
 }  // extern "C"

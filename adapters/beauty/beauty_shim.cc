@@ -353,6 +353,27 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture, int32_t
   (void)height;
   return nullptr;
 }
+void* ck_beauty_input_create() {
+  return nullptr;
+}
+void ck_beauty_input_destroy(void* handle) {
+  (void)handle;
+}
+void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
+  (void)handle;
+  (void)device;
+  (void)width;
+  (void)height;
+  return nullptr;
+}
+int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle, int32_t width, int32_t height, const float* landmarks106) {
+  (void)input_handle;
+  (void)beauty_handle;
+  (void)width;
+  (void)height;
+  (void)landmarks106;
+  return 1;
+}
 #endif
 
 }  // extern "C"
