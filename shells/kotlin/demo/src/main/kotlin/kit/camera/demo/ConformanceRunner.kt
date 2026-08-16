@@ -11,8 +11,7 @@ import java.security.MessageDigest
 import kit.camera.Engine
 import kit.camera.Session
 
-// Row 8's cross-platform conformance proof, android-emulator flavor:
-// mirrors harness/conformance.zig's own determinism check (the same
+// Mirrors harness/conformance.zig's own determinism check (the same
 // reference lens, the same corpus frame, rendered twice through the
 // real ABI, byte-identical screenshots) but driven from the real Kotlin
 // shell instead of a desktop GLFW window - the same real
@@ -20,8 +19,7 @@ import kit.camera.Session
 // MainActivity's live preview already runs, just fed a bundled corpus
 // frame instead of the camera. Reached only behind the CKConformance
 // intent extra; a normal launch never touches this file. Emulator
-// output is a dev signal, never proof language, the same rule every
-// other simulator/emulator run in this project follows.
+// output is a dev signal, not a substitute for a run on real hardware.
 //
 // Proves beauty-baseline, not just shader-tint: unlike the iOS
 // Simulator (whose EAGLContext creation fails cleanly on recent

@@ -3,8 +3,7 @@ import QuartzCore
 import UIKit
 import os
 
-/// Row 8's cross-platform conformance proof, iOS-simulator flavor:
-/// mirrors harness/conformance.zig's own determinism check (the same
+/// Mirrors harness/conformance.zig's own determinism check (the same
 /// reference lens, the same corpus frame, rendered twice through the
 /// real ABI, byte-identical screenshots) but driven from a real Swift
 /// shell instead of a desktop GLFW window - the same real
@@ -12,8 +11,8 @@ import os
 /// ck_engine_render_frame path the live demo already runs, just fed a
 /// fixed frame instead of the camera. Reached only behind the
 /// -CKConformance launch argument; a normal launch never touches this
-/// file. Simulator output is a dev signal, never proof language, the
-/// same rule every other simulator/emulator run in this project follows.
+/// file. Simulator output is a dev signal, not a substitute for a run
+/// on real hardware.
 ///
 /// Proves shader-tint, not beauty-baseline: GPUPixelContext's EAGLContext
 /// creation fails cleanly (ck_session_enable_beauty returns unsupported,
