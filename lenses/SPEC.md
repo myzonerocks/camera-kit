@@ -26,7 +26,8 @@ runtime treats both identically, reading through a virtual file interface):
 ```
 mylens.glens/
   manifest.json          required, described below
-  shaders/                *.glsl, referenced by relative path from manifest
+  shaders/                *.glsl source, plus *.<profile>.bin next to each
+                          one once packaged (section 7) - metal/spirv/essl
   assets/                 *.gltf, *.glb, *.png, LUTs, referenced by relative path
 ```
 
@@ -202,14 +203,25 @@ runtime supplies one fixed vertex contract, `lenses/shaders/varying.def.sc`,
 shared by every lens shader pass: `a_position`/`a_texcoord0` in,
 `v_texcoord0` out, the same shape as the kit's own preview passes. A lens
 fragment shader is GLSL source written to that contract (bgfx's shader
-dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`), compiled at
-bundle load time (not lens-authoring time) through the kit's pinned shader
-toolchain to the running platform's native form (Metal / SPIR-V / ESSL),
-under the same resource limits the kit's own shaders compile under (Part
-1.4/14 of the engineering history — bounded compile time, no toolchain
-escape hatches, compiler diagnostics surfaced as validation errors naming
-the source file and line). A shader that fails to compile fails the
-bundle's validation; there is no partial lens.
+dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`).
+
+Compilation happens at package time, not on the device: the kit's pinned
+shader toolchain runs wherever a bundle is built or validated, producing
+compiled bytecode for every platform profile a conforming runtime ships
+(Metal / SPIR-V / ESSL), under the same resource limits the kit's own
+shaders compile under (Part 1.4/14 of the engineering history — bounded
+compile time, no toolchain escape hatches, compiler diagnostics surfaced
+as validation errors naming the source file and line). A shader that
+fails to compile fails the bundle's validation; there is no partial
+lens. The runtime never compiles GLSL — it loads whichever precompiled
+profile matches its own active graphics backend and hands the bytes
+straight to its shader loader, the same call the kit's own built-in
+passes already go through. This is deliberate, not a shortcut: nothing
+else in the engine compiles a shader on the device, a mobile app has no
+business carrying a C++ shader compiler toolchain just to run
+user-authored effects, and a bundle that fails to compile is caught at
+package time by the same validator a lens author already runs, not
+discovered by an end user's device.
 
 glTF/GLB assets bind through the kit's existing cgltf adapter — same
 allocator-bridged parse, same refusal of external file references (a glTF
