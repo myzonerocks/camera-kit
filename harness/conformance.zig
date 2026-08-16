@@ -125,20 +125,43 @@ pub fn main(init_args: std.process.Init) !u8 {
     };
     if (abi.ck_engine_init_renderer(engine, &renderer_desc) != .ok) return error.RendererInit;
 
-    try renderOnce(gpa, engine, ".lens-packages/shader-tint", "zig-out/conformance-shader-tint-a");
+    for ([_][]const u8{ "shader-tint", "beauty-baseline" }) |name| {
+        if (!try checkDeterminism(gpa, init_args.io, engine, name)) return 1;
+    }
+    return 0;
+}
+
+/// Activates lens_name's packaged bundle twice, rendering the same fixed
+/// input through each, and asserts the two screenshots are byte-
+/// identical. True if the lens is bit-stable, false (with a printed
+/// reason) if not.
+fn checkDeterminism(gpa: std.mem.Allocator, io: std.Io, engine: *abi.Engine, lens_name: []const u8) !bool {
+    var bundle_buf: [256]u8 = undefined;
+    const bundle_path = try std.fmt.bufPrint(&bundle_buf, ".lens-packages/{s}", .{lens_name});
+    var out_a_buf: [256:0]u8 = undefined;
+    const out_a = try std.fmt.bufPrintZ(&out_a_buf, "zig-out/conformance-{s}-a", .{lens_name});
+    var out_b_buf: [256:0]u8 = undefined;
+    const out_b = try std.fmt.bufPrintZ(&out_b_buf, "zig-out/conformance-{s}-b", .{lens_name});
+
+    try renderOnce(gpa, engine, bundle_path, out_a);
     settle(engine);
-    try renderOnce(gpa, engine, ".lens-packages/shader-tint", "zig-out/conformance-shader-tint-b");
+    try renderOnce(gpa, engine, bundle_path, out_b);
     settle(engine);
 
-    const shot_a = try std.Io.Dir.cwd().readFileAlloc(init_args.io, "zig-out/conformance-shader-tint-a.tga", gpa, .limited(8 << 20));
+    var path_a_buf: [256]u8 = undefined;
+    const path_a = try std.fmt.bufPrint(&path_a_buf, "{s}.tga", .{out_a});
+    var path_b_buf: [256]u8 = undefined;
+    const path_b = try std.fmt.bufPrint(&path_b_buf, "{s}.tga", .{out_b});
+
+    const shot_a = try std.Io.Dir.cwd().readFileAlloc(io, path_a, gpa, .limited(8 << 20));
     defer gpa.free(shot_a);
-    const shot_b = try std.Io.Dir.cwd().readFileAlloc(init_args.io, "zig-out/conformance-shader-tint-b.tga", gpa, .limited(8 << 20));
+    const shot_b = try std.Io.Dir.cwd().readFileAlloc(io, path_b, gpa, .limited(8 << 20));
     defer gpa.free(shot_b);
 
     if (!std.mem.eql(u8, shot_a, shot_b)) {
-        std.debug.print("conformance: FAIL shader-tint produced different output across two runs of the same fixed input\n", .{});
-        return 1;
+        std.debug.print("conformance: FAIL {s} produced different output across two runs of the same fixed input\n", .{lens_name});
+        return false;
     }
-    std.debug.print("conformance: PROOF shader-tint is bit-stable across two runs of the same fixed input through the real ABI ({d} bytes)\n", .{shot_a.len});
-    return 0;
+    std.debug.print("conformance: PROOF {s} is bit-stable across two runs of the same fixed input through the real ABI ({d} bytes)\n", .{ lens_name, shot_a.len });
+    return true;
 }
