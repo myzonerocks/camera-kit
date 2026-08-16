@@ -242,6 +242,13 @@ pub fn build(b: *std.Build) void {
 
     // SPEC.md section 9: the validator runs against every reference
     // lens, in CI. One bundle failing validation fails the build.
+    // Deliberately NOT wired into ci_step: lens_validator_exe always
+    // depends on a real shaderc (the CLI's whole point is giving a real
+    // answer), and ci_step is the fast default path the "gates" job's
+    // 15 minute budget assumes stays free of that cold C++ toolchain
+    // build - the exact mistake that already broke this job once. The
+    // "lens-shaders" hosted job, which already opts into shaderc's
+    // build cost, runs this step explicitly instead.
     const lens_reference_step = b.step("lens-validate-reference", "Validate every bundle under lenses/reference/");
     for (listReferenceLenses(b)) |lens_dir| {
         const run = b.addRunArtifact(lens_validator_exe);
@@ -249,7 +256,6 @@ pub fn build(b: *std.Build) void {
         run.addArg(lens_dir);
         lens_reference_step.dependOn(&run.step);
     }
-    ci_step.dependOn(lens_reference_step);
 
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
