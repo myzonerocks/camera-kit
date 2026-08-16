@@ -112,6 +112,12 @@ export interface SessionEvents {
 // to a WebGL2 texture and drawn full-canvas. The browser delivers decoded
 // RGB; the raw-plane path with the core's conversion matrix arrives with
 // VideoFrame ingestion.
+// The skin-smoothing "whiten" look is a tone curve plus a three-stage
+// lookup-texture pass, run natively here in WebGL2/GLSL ES rather than
+// through a shared native pipeline, since browsers have no way to hand a
+// wasm GL context to WebGPU/WebGL2 the way native platforms can.
+const WHITEN_LUT_NAMES = ["lookup_gray", "lookup_origin", "lookup_skin", "lookup_light"] as const;
+
 export class PreviewSession {
   private stream: MediaStream | null = null;
   /// The camera element frames render from; analysis passes sample it too.
@@ -119,6 +125,9 @@ export class PreviewSession {
   private gl: WebGL2RenderingContext;
   private program: WebGLProgram;
   private texture: WebGLTexture;
+  private whitenLuts: WebGLTexture[] = [];
+  private whitenAmount = 0;
+  private whitenUniform: WebGLUniformLocation | null;
   private raf = 0;
   private lastTick = 0;
   private fpsWindowStart = 0;
@@ -134,10 +143,16 @@ export class PreviewSession {
     private canvas: HTMLCanvasElement,
     private events: SessionEvents = {},
   ) {
-    const gl = canvas.getContext("webgl2");
+    // preserveDrawingBuffer keeps the last drawn frame in place between
+    // rAF callbacks - without it the browser is free to clear the
+    // default framebuffer right after compositing, so anything reading
+    // pixels back outside the render loop itself (screenshots, the
+    // prover's readPixels calls) can race a blank buffer.
+    const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
     if (!gl) throw new Error("webgl2 unavailable");
     this.gl = gl;
     this.program = this.buildProgram();
+    this.whitenUniform = gl.getUniformLocation(this.program, "u_whiten");
     const texture = gl.createTexture();
     if (!texture) throw new Error("texture create failed");
     this.texture = texture;
@@ -153,6 +168,52 @@ export class PreviewSession {
     this.events.onState?.(state);
   }
 
+  /// Zero until the LUT textures actually finish loading, matching the
+  /// shader's own `if (u_whiten > 0.0)` skip - the effect degrades to a
+  /// no-op rather than sampling unbound textures while the fetch is in
+  /// flight.
+  setWhiten(amount: number): void {
+    this.whitenAmount = this.whitenLuts.length === WHITEN_LUT_NAMES.length ? amount : 0;
+  }
+
+  /// Fetches and decodes the four LUT textures the whiten pass samples,
+  /// relative to lutBaseUrl (the demo's own res/ directory). Safe to
+  /// call once after construction; setWhiten stays a no-op until this
+  /// resolves.
+  async loadWhitenLuts(lutBaseUrl: string | URL): Promise<void> {
+    const gl = this.gl;
+    const bitmaps = await Promise.all(
+      WHITEN_LUT_NAMES.map((name) =>
+        fetch(new URL(`${name}.png`, lutBaseUrl))
+          .then((r) => r.blob())
+          .then((b) => createImageBitmap(b)),
+      ),
+    );
+    this.whitenLuts = bitmaps.map((bitmap) => {
+      const tex = gl.createTexture();
+      if (!tex) throw new Error("lut texture create failed");
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+      return tex;
+    });
+
+    // Each LUT gets its own fixed texture unit (1-4; 0 stays the camera
+    // frame) - bound once here since the LUTs themselves never change,
+    // unlike u_whiten which tick() updates every frame.
+    const samplerNames = ["u_lookupGray", "u_lookupOrigin", "u_lookupSkin", "u_lookupCustom"];
+    gl.useProgram(this.program);
+    for (const [index, tex] of this.whitenLuts.entries()) {
+      gl.activeTexture(gl.TEXTURE1 + index);
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform1i(gl.getUniformLocation(this.program, samplerNames[index]!), 1 + index);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+  }
+
   private buildProgram(): WebGLProgram {
     const gl = this.gl;
     const vsSource = `#version 300 es
@@ -163,12 +224,91 @@ export class PreviewSession {
         gl_Position = vec4(corners[gl_VertexID], 0., 1.);
         v_uv = uvs[gl_VertexID];
       }`;
+    // The whiten branch below is a verbatim port of gpupixel's own
+    // GLES fragment shader (beauty_face_unit_filter.cc), not a
+    // reimplementation - same tone curve constants, same three-stage
+    // 4x4-atlas LUT indexing math, same mix/alpha blending.
     const fsSource = `#version 300 es
-      precision mediump float;
+      precision highp float;
       uniform sampler2D u_frame;
+      uniform sampler2D u_lookupGray;
+      uniform sampler2D u_lookupOrigin;
+      uniform sampler2D u_lookupSkin;
+      uniform sampler2D u_lookupCustom;
+      uniform float u_whiten;
       in vec2 v_uv;
       out vec4 fragColor;
-      void main() { fragColor = texture(u_frame, v_uv); }`;
+
+      const float levelRangeInv = 1.02657;
+      const float levelBlack = 0.0258820;
+      const float alpha = 0.7;
+
+      void main() {
+        vec4 iColor = texture(u_frame, v_uv);
+        vec3 color = iColor.rgb;
+
+        if (u_whiten > 0.0) {
+          vec3 colorEPM = color;
+          color = clamp((colorEPM - vec3(levelBlack)) * levelRangeInv, 0.0, 1.0);
+          vec3 texel = vec3(
+            texture(u_lookupGray, vec2(color.r, 0.5)).r,
+            texture(u_lookupGray, vec2(color.g, 0.5)).g,
+            texture(u_lookupGray, vec2(color.b, 0.5)).b
+          );
+          texel = mix(color, texel, 0.5);
+          texel = mix(colorEPM, texel, alpha);
+
+          texel = clamp(texel, 0.0, 1.0);
+          float blueColor = texel.b * 15.0;
+          vec2 quad1;
+          quad1.y = floor(floor(blueColor) * 0.25);
+          quad1.x = floor(blueColor) - (quad1.y * 4.0);
+          vec2 quad2;
+          quad2.y = floor(ceil(blueColor) * 0.25);
+          quad2.x = ceil(blueColor) - (quad2.y * 4.0);
+          vec2 texPos2 = texel.rg * 0.234375 + 0.0078125;
+          vec2 texPos1 = quad1 * 0.25 + texPos2;
+          texPos2 = quad2 * 0.25 + texPos2;
+          vec3 newColor1Origin = texture(u_lookupOrigin, texPos1).rgb;
+          vec3 newColor2Origin = texture(u_lookupOrigin, texPos2).rgb;
+          vec3 colorOrigin = mix(newColor1Origin, newColor2Origin, fract(blueColor));
+          texel = mix(colorOrigin, color, alpha);
+
+          texel = clamp(texel, 0.0, 1.0);
+          blueColor = texel.b * 15.0;
+          quad1.y = floor(floor(blueColor) * 0.25);
+          quad1.x = floor(blueColor) - (quad1.y * 4.0);
+          quad2.y = floor(ceil(blueColor) * 0.25);
+          quad2.x = ceil(blueColor) - (quad2.y * 4.0);
+          texPos2 = texel.rg * 0.234375 + 0.0078125;
+          texPos1 = quad1 * 0.25 + texPos2;
+          texPos2 = quad2 * 0.25 + texPos2;
+          vec3 newColor1 = texture(u_lookupSkin, texPos1).rgb;
+          vec3 newColor2 = texture(u_lookupSkin, texPos2).rgb;
+          color = mix(newColor1, newColor2, fract(blueColor));
+          color = clamp(color, 0.0, 1.0);
+
+          float blueColorCustom = color.b * 63.0;
+          vec2 quad1Custom;
+          quad1Custom.y = floor(floor(blueColorCustom) / 8.0);
+          quad1Custom.x = floor(blueColorCustom) - (quad1Custom.y * 8.0);
+          vec2 quad2Custom;
+          quad2Custom.y = floor(ceil(blueColorCustom) / 8.0);
+          quad2Custom.x = ceil(blueColorCustom) - (quad2Custom.y * 8.0);
+          vec2 texPos1Custom;
+          texPos1Custom.x = (quad1Custom.x / 8.0) + 0.5 / 512.0 + ((1.0 / 8.0 - 1.0 / 512.0) * color.r);
+          texPos1Custom.y = (quad1Custom.y / 8.0) + 0.5 / 512.0 + ((1.0 / 8.0 - 1.0 / 512.0) * color.g);
+          vec2 texPos2Custom;
+          texPos2Custom.x = (quad2Custom.x / 8.0) + 0.5 / 512.0 + ((1.0 / 8.0 - 1.0 / 512.0) * color.r);
+          texPos2Custom.y = (quad2Custom.y / 8.0) + 0.5 / 512.0 + ((1.0 / 8.0 - 1.0 / 512.0) * color.g);
+          newColor1 = texture(u_lookupCustom, texPos1Custom).rgb;
+          newColor2 = texture(u_lookupCustom, texPos2Custom).rgb;
+          vec3 colorCustom = mix(newColor1, newColor2, fract(blueColorCustom));
+          color = mix(color, colorCustom, u_whiten);
+        }
+
+        fragColor = vec4(color, iColor.a);
+      }`;
     const compile = (type: number, source: string): WebGLShader => {
       const shader = gl.createShader(type);
       if (!shader) throw new Error("shader create failed");
@@ -239,7 +379,9 @@ export class PreviewSession {
       }
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       gl.useProgram(this.program);
+      gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.uniform1f(this.whitenUniform, this.whitenAmount);
       gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
       this.renderedFrames += 1;
       this.fpsWindowFrames += 1;
@@ -266,5 +408,19 @@ export class PreviewSession {
       pixel,
     );
     return pixel;
+  }
+
+  /// Sums every RGBA byte over the whole canvas - a courser but far more
+  /// robust brightness/content probe than one fixed pixel, since a
+  /// synthetic test pattern (Chrome's fake capture device, say) is free
+  /// to put its own "lit" content anywhere and leave any single fixed
+  /// coordinate dark for long stretches.
+  readFrameSum(): number {
+    const gl = this.gl;
+    const pixels = new Uint8Array(this.canvas.width * this.canvas.height * 4);
+    gl.readPixels(0, 0, this.canvas.width, this.canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let sum = 0;
+    for (const value of pixels) sum += value;
+    return sum;
   }
 }

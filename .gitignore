@@ -70,12 +70,14 @@ shells/ts/**/*.wasm.map
 shells/kotlin/demo/src/main/assets/
 
 # Raster images are fetched corpus or scratch artifacts, never source -
-# except a reference lens's own assets/*.png, which is real bundle
-# content the format itself defines (lut.pass and blend.pass name an
-# asset by id the same way shader.pass names a .glsl source file).
+# except a reference lens's own assets/*.png (lut.pass and blend.pass
+# name an asset by id the same way shader.pass names a .glsl source
+# file) and the web demo's own beauty LUT textures, copied in once
+# rather than fetched at build time.
 *.jpg
 *.jpeg
 *.png
 !lenses/**/*.png
+!shells/ts/demo/res/*.png
 *.webp
 *.bmp

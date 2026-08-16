@@ -177,6 +177,22 @@ async function run(): Promise<void> {
     (window as unknown as Record<string, unknown>).trackingError = String(err);
     console.log(`tracking unavailable: ${String(err)}`);
   });
+
+  await preview.loadWhitenLuts(new URL("./res/", import.meta.url));
+  const whitenSlider = document.getElementById("whiten") as HTMLInputElement | null;
+  whitenSlider?.addEventListener("input", () => {
+    preview.setWhiten(Number(whitenSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setWhiten = (value: number) => {
+    preview.setWhiten(value);
+  };
+  (window as unknown as Record<string, unknown>).readCenterPixel = () => Array.from(preview.readCenterPixel());
+  (window as unknown as Record<string, unknown>).readFrameSum = () => preview.readFrameSum();
+  // Pausing the video element stops the per-frame texture re-upload,
+  // freezing whatever the shader is currently sampling.
+  (window as unknown as Record<string, unknown>).freezeCamera = () => preview.video.pause();
+  (window as unknown as Record<string, unknown>).resumeCamera = () => preview.video.play();
+  (window as unknown as Record<string, unknown>).whitenLutsReady = true;
 }
 
 run().catch((err) => {
