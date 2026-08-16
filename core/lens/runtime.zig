@@ -105,6 +105,16 @@ pub const LutPassNode = struct {
     lut_stem: []const u8,
 };
 
+pub const PassKind = enum { shader, lut };
+
+/// One shader.pass or lut.pass node, tagged with which - the caller's
+/// real draw order for a chain that may mix both kinds, since the
+/// graph itself makes no distinction between them beyond node_type.
+pub const CompositePass = struct {
+    graph_index: graph.NodeIndex,
+    kind: PassKind,
+};
+
 pub const ActivateError = error{
     UnknownNodeId,
     UnknownParameter,
@@ -174,6 +184,26 @@ pub const Lens = struct {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .lut_pass) continue;
             try out.append(gpa, .{ .graph_index = node.graph_index, .lut_stem = node.asset_stem.? });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every shader.pass and lut.pass node this lens spliced, in one
+    /// real execution-order sequence - the actual draw order for a
+    /// chain that mixes both kinds, which shaderPassNodes/lutPassNodes
+    /// alone cannot express since each only ever sees its own kind.
+    pub fn compositePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]CompositePass {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(CompositePass) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            const kind: PassKind = switch (node.node_type) {
+                .shader_pass => .shader,
+                .lut_pass => .lut,
+                else => continue,
+            };
+            try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -574,6 +604,27 @@ test "shader.pass and lut.pass nodes interleave in one chain, each accessor seei
     defer t.allocator.free(luts);
     try t.expectEqual(@as(usize, 1), luts.len);
     try t.expectEqualStrings("warm-lut", luts[0].lut_stem);
+}
+
+test "compositePassNodes interleaves both kinds in one real draw-order sequence" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, mixed_chain_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const chain = try lens.compositePassNodes(t.allocator, &g);
+    defer t.allocator.free(chain);
+    try t.expectEqual(@as(usize, 3), chain.len);
+    try t.expectEqual(NodeType.shader_pass, lens.nodes[0].node_type);
+    try t.expectEqual(PassKind.shader, chain[0].kind);
+    try t.expectEqual(PassKind.lut, chain[1].kind);
+    try t.expectEqual(PassKind.shader, chain[2].kind);
+    try t.expectEqual(lens.nodes[0].graph_index, chain[0].graph_index);
+    try t.expectEqual(lens.nodes[1].graph_index, chain[1].graph_index);
+    try t.expectEqual(lens.nodes[2].graph_index, chain[2].graph_index);
 }
 
 test "a trigger firing on the rising edge starts a ramp that settles, does not refire while held, and rearms on the falling edge" {

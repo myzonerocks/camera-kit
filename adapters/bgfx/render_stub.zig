@@ -145,6 +145,10 @@ pub const Renderer = struct {
         return error.RendererUnavailable;
     }
 
+    pub fn loadLutProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
     pub fn destroyProgram(program: ProgramHandle) void {
         _ = program;
     }

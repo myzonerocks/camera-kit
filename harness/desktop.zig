@@ -23,9 +23,11 @@ const width: u32 = 800;
 const height: u32 = 600;
 const screenshot_path = "zig-out/harness-frame.ppm";
 const screenshot_path2 = "zig-out/harness-frame-chain.ppm";
+const screenshot_path3 = "zig-out/harness-frame-lut.ppm";
 
 var screenshot_written: bool = false;
 var screenshot_written2: bool = false;
+var screenshot_written3: bool = false;
 var harness_io: std.Io = undefined;
 
 // The checkerboard texture embedded in the generated glTF: 8x8 RGBA PNG,
@@ -171,8 +173,10 @@ const Callbacks = struct {
         };
         if (std.mem.eql(u8, path_slice, screenshot_path)) {
             screenshot_written = true;
-        } else {
+        } else if (std.mem.eql(u8, path_slice, screenshot_path2)) {
             screenshot_written2 = true;
+        } else {
+            screenshot_written3 = true;
         }
     }
 };
@@ -353,12 +357,12 @@ pub fn main(init_args: std.process.Init) !u8 {
     // decode path adapters/image already has its own tests for.
     // Not explicitly destroyed, matching the checker texture above -
     // bgfx_shutdown reclaims both when the harness exits.
-    const lut_texture = render.Renderer.createStaticTexture(@intCast(tex_w), @intCast(tex_h), decoded[0 .. @as(usize, tex_w) * tex_h * 4]);
-    if (lut_texture.idx == std.math.maxInt(u16)) {
+    const static_texture_proof = render.Renderer.createStaticTexture(@intCast(tex_w), @intCast(tex_h), decoded[0 .. @as(usize, tex_w) * tex_h * 4]);
+    if (static_texture_proof.idx == std.math.maxInt(u16)) {
         std.debug.print("harness: FAIL static texture invalid\n", .{});
         return 1;
     }
-    std.debug.print("harness: PROOF static texture created from decoded bytes (idx {d})\n", .{lut_texture.idx});
+    std.debug.print("harness: PROOF static texture created from decoded bytes (idx {d})\n", .{static_texture_proof.idx});
     std.debug.print("harness: PROOF shader-pass program created from packaged bytecode (idx {d})\n", .{shader_program.idx});
 
     const chain_target = try render.Renderer.createOffscreenTarget(@intCast(width), @intCast(height));
@@ -368,6 +372,20 @@ pub fn main(init_args: std.process.Init) !u8 {
     render.Renderer.setViewTarget(capture_view, chain_target, @intCast(width), @intCast(height));
     c.bgfx_set_view_clear(capture_view, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x202020ff, 1.0, 0);
     render.Renderer.setViewTarget(tint_view, null, @intCast(width), @intCast(height));
+
+    // The lut.pass proof: a solid-magenta "LUT" rather than a real
+    // gradient one, so the expected output has one unambiguous answer
+    // regardless of strip-LUT addressing math - any input color sampled
+    // against a uniformly magenta texture reads back magenta, which
+    // isolates what this proof actually cares about (submitLutPass
+    // binds the right texture on the right unit and the fixed program
+    // runs), not whether the strip-LUT arithmetic itself is exact.
+    const magenta = [_]u8{ 255, 0, 255, 255 } ** 4;
+    const lut_texture = render.Renderer.createStaticTexture(2, 2, &magenta);
+    const lut_sampler_uniform = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
+    const lut_program = try render.Renderer.loadLutProgram();
+    const lut_view: c.bgfx_view_id_t = 7;
+    render.Renderer.setViewTarget(lut_view, null, @intCast(width), @intCast(height));
 
     var frame: u32 = 0;
     while (frame < 90 and c.glfwWindowShouldClose(window) == c.GLFW_FALSE) : (frame += 1) {
@@ -443,10 +461,45 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (frame == 75) {
             c.bgfx_request_screen_shot(.{ .idx = std.math.maxInt(u16) }, screenshot_path2);
         }
+
+        // The lut.pass proof starts only once the chain screenshot
+        // above is captured, for the same reason the chain proof
+        // itself waited on the plain-preview one: view 7 is another
+        // full-screen opaque draw over the same viewport.
+        if (frame > 75) {
+            var lut_tvb: c.bgfx_transient_vertex_buffer_t = undefined;
+            var lut_tib: c.bgfx_transient_index_buffer_t = undefined;
+            if (c.bgfx_get_avail_transient_vertex_buffer(4, &layout) >= 4 and c.bgfx_get_avail_transient_index_buffer(6, false) >= 6) {
+                c.bgfx_alloc_transient_vertex_buffer(&lut_tvb, 4, &layout);
+                c.bgfx_alloc_transient_index_buffer(&lut_tib, 6, false);
+                const lut_verts: [*][5]f32 = @ptrCast(@alignCast(lut_tvb.data));
+                lut_verts[0] = .{ -1.0, -1.0, 0.0, 0.0, 1.0 };
+                lut_verts[1] = .{ 1.0, -1.0, 0.0, 1.0, 1.0 };
+                lut_verts[2] = .{ 1.0, 1.0, 0.0, 1.0, 0.0 };
+                lut_verts[3] = .{ -1.0, 1.0, 0.0, 0.0, 0.0 };
+                const lut_idx: [*]u16 = @ptrCast(@alignCast(lut_tib.data));
+                for ([6]u16{ 0, 1, 2, 0, 2, 3 }, 0..) |v, vi| lut_idx[vi] = v;
+                c.bgfx_set_view_transform(lut_view, &ortho_view.cols, &ortho_proj.cols);
+                _ = c.bgfx_set_transform(&math.Mat4.identity.cols, 1);
+                c.bgfx_set_transient_vertex_buffer(0, &lut_tvb, 0, 4);
+                c.bgfx_set_transient_index_buffer(&lut_tib, 0, 6);
+                // Input on unit 0 (the same offscreen capture the tint
+                // pass already reads), the solid-magenta "LUT" on
+                // unit 1 - submitLutPass's own binding layout.
+                c.bgfx_set_texture(0, scene.sampler_uniform, @bitCast(chain_target.texture), std.math.maxInt(u32));
+                c.bgfx_set_texture(1, lut_sampler_uniform, @bitCast(lut_texture), std.math.maxInt(u32));
+                c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+                c.bgfx_submit(lut_view, @bitCast(lut_program), 0, c.BGFX_DISCARD_ALL);
+            }
+        }
+
+        if (frame == 88) {
+            c.bgfx_request_screen_shot(.{ .idx = std.math.maxInt(u16) }, screenshot_path3);
+        }
         _ = c.bgfx_frame(0);
     }
 
-    if (!screenshot_written or !screenshot_written2) {
+    if (!screenshot_written or !screenshot_written2 or !screenshot_written3) {
         std.debug.print("harness: FAIL a screenshot was not produced\n", .{});
         return 1;
     }
@@ -509,5 +562,35 @@ pub fn main(init_args: std.process.Init) !u8 {
         return 1;
     }
     std.debug.print("harness: PROOF shader-pass chain rendered camera into an offscreen target, then the tint pass into the swap chain\n", .{});
+
+    // The third capture: the same offscreen quad, this time through
+    // submitLutPass's own binding layout with a solid-magenta "LUT" -
+    // every sampled point must read back exactly magenta regardless of
+    // whether it was originally background, white, or red, since a
+    // uniform LUT texture returns the same color for any input. Any
+    // other result means the pass sampled the wrong texture, the wrong
+    // unit, or ran the wrong program.
+    const lut_shot = try std.Io.Dir.cwd().readFileAlloc(harness_io, screenshot_path3, gpa, .limited(32 << 20));
+    defer gpa.free(lut_shot);
+    const lut_pixels = std.mem.indexOf(u8, lut_shot, "255\n").? + 4;
+
+    const is_magenta = struct {
+        fn matches(p: [3]u8) bool {
+            return p[0] > 240 and p[1] < 20 and p[2] > 240;
+        }
+    }.matches;
+
+    var lut_ok = true;
+    for ([3]u32{ 60, 220, 380 }) |y| {
+        for ([3]u32{ 60, 300, 500 }) |x| {
+            const px = sample.at(lut_shot, lut_pixels, x, y);
+            if (!is_magenta(px)) {
+                std.debug.print("harness: FAIL lut-pass pixel at ({d},{d}) was {any}, expected magenta\n", .{ x, y, px });
+                lut_ok = false;
+            }
+        }
+    }
+    if (!lut_ok) return 1;
+    std.debug.print("harness: PROOF lut-pass sampled the LUT texture on its own unit through the fixed program, landing on the swap chain\n", .{});
     return 0;
 }

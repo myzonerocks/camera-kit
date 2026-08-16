@@ -139,17 +139,7 @@ pub const Renderer = struct {
             },
             else => return error.RendererUnsupported,
         };
-        // A lut.pass node's fragment shader is kit-authored, not lens-
-        // authored - unlike shader.pass, there is nothing to load per
-        // lens, so this compiles once here exactly like rgba/nv12
-        // above, sharing the same full-screen vertex contract every
-        // lens shader pass already compiles against.
-        const lut_program = switch (backend) {
-            c.BGFX_RENDERER_TYPE_METAL => try loadProgram(blobs.vs_lens_pass_metal, blobs.fs_lut_pass_metal),
-            c.BGFX_RENDERER_TYPE_VULKAN => try loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_lut_pass_spirv),
-            c.BGFX_RENDERER_TYPE_OPENGLES => try loadProgram(blobs.vs_lens_pass_essl, blobs.fs_lut_pass_essl),
-            else => return error.RendererUnsupported,
-        };
+        const lut_program = try loadLutProgram();
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
@@ -218,6 +208,21 @@ pub const Renderer = struct {
             else => return error.RendererUnsupported,
         };
         return loadProgram(vs_blob, fs_bytes);
+    }
+
+    /// The one fixed lut.pass program every lens shares - kit-authored,
+    /// so unlike loadLensProgram this takes no bytes; there is nothing
+    /// per-lens to compile for this node type. A real Renderer instance
+    /// builds this once at init and keeps it in lut_program; this
+    /// static form exists so a caller without an instance (a proof, a
+    /// test) can still get the exact same program.
+    pub fn loadLutProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_lut_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_lut_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_lut_pass_essl),
+            else => error.RendererUnsupported,
+        };
     }
 
     pub fn destroyProgram(program: c.bgfx_program_handle_t) void {

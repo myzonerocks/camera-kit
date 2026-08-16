@@ -184,10 +184,14 @@ pub const Session = struct {
     /// from_directory only - the bytes-based activate has no bundle path
     /// to read compiled shaders from), destroyed on deactivation.
     shader_programs: std.AutoHashMapUnmanaged(graph.NodeIndex, u16) = .empty,
-    /// shader_programs' keys, in the chain's real draw order - only the
-    /// nodes that actually got a program. Owned, rebuilt every
+    /// Every shader.pass and lut.pass node the active lens spliced, in
+    /// one real draw-order sequence (runtime.Lens.compositePassNodes) -
+    /// built once at directory-based activation regardless of whether
+    /// each entry's resource (a program, a texture) is ready yet, since
+    /// a lut.pass node's load can still be in flight the same frame its
+    /// chain position is already known. Owned, rebuilt every
     /// activation, freed on teardown.
-    shader_pass_order: []graph.NodeIndex = &.{},
+    chain_order: []runtime.CompositePass = &.{},
     /// One background loader per currently-spliced lut.pass node still
     /// waiting on its LUT image, keyed by graph index. Started at
     /// activation (directory-based only, same reason as shader_programs
@@ -244,15 +248,32 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
     e.chain_height = height;
 }
 
-/// Draws the active lens's full shader.pass chain: the camera preview
-/// captures into one ping-pong target (view 0), every pass reads the
-/// previous stage and writes the other target, and the last pass
-/// presents straight to the swap chain instead of an offscreen one.
-/// View ids increase monotonically (0 = capture, 1..N = passes) because
-/// bgfx orders view execution by id, not by submission order - that
-/// ordering is what makes this an actual chain rather than N passes
-/// racing each other.
-fn renderShaderPassChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
+/// Draws the active lens's full composite chain - shader.pass and
+/// lut.pass nodes mixed freely: the camera preview captures into one
+/// ping-pong target (view 0), every ready stage reads the previous
+/// stage and writes the other target, and whichever ready stage draws
+/// last presents straight to the swap chain instead of an offscreen
+/// one. View ids increase monotonically because bgfx orders view
+/// execution by id, not by submission order - that ordering is what
+/// makes this an actual chain rather than stages racing each other.
+/// A stage whose resource (a program, a texture) isn't ready yet -
+/// most often a lut.pass node whose background load hasn't landed -
+/// is skipped outright: the chain just has one fewer stage this frame,
+/// not a gap that draws nothing.
+fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
+    var ready_count: usize = 0;
+    for (s.chain_order) |entry| {
+        const ready = switch (entry.kind) {
+            .shader => s.shader_programs.contains(entry.graph_index),
+            .lut => s.lut_textures.contains(entry.graph_index),
+        };
+        if (ready) ready_count += 1;
+    }
+    if (ready_count == 0) {
+        r.submitPreview(0, current.preview, rotation * 90, mirror);
+        return;
+    }
+
     const width: u16 = @intCast(current.desc.width);
     const height: u16 = @intCast(current.desc.height);
     try ensureChainTargets(e, width, height);
@@ -262,15 +283,35 @@ fn renderShaderPassChain(e: *Engine, r: *render.Renderer, s: *Session, current: 
     r.submitPreview(0, current.preview, rotation * 90, mirror);
     var input_texture = targets[0].texture;
 
-    const passes = s.shader_pass_order;
-    for (passes, 0..) |graph_index, i| {
-        const program_idx = s.shader_programs.get(graph_index).?;
-        const view_id: u8 = @intCast(1 + i);
-        const is_last = i == passes.len - 1;
-        const output = if (is_last) null else targets[(i + 1) % 2];
-        render.Renderer.setViewTarget(view_id, output, width, height);
-        r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture);
-        if (output) |target| input_texture = target.texture;
+    var drawn: usize = 0;
+    var next_slot: usize = 1;
+    for (s.chain_order) |entry| {
+        switch (entry.kind) {
+            .shader => {
+                const program_idx = s.shader_programs.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id: u8 = @intCast(drawn);
+                const output = if (drawn == ready_count) null else targets[next_slot % 2];
+                render.Renderer.setViewTarget(view_id, output, width, height);
+                r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    next_slot += 1;
+                }
+            },
+            .lut => {
+                const lut_texture = s.lut_textures.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id: u8 = @intCast(drawn);
+                const output = if (drawn == ready_count) null else targets[next_slot % 2];
+                render.Renderer.setViewTarget(view_id, output, width, height);
+                r.submitLutPass(view_id, input_texture, lut_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    next_slot += 1;
+                }
+            },
+        }
     }
 }
 
@@ -300,6 +341,7 @@ pub fn destroySession(session: *Session) void {
     destroyLutState(session);
     session.lut_loaders.deinit(session.engine.gpa);
     session.lut_textures.deinit(session.engine.gpa);
+    destroyChainOrder(session);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
     session.lens_graph.deinit();
@@ -394,10 +436,10 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
-            if (s.shader_pass_order.len == 0) {
+            if (s.chain_order.len == 0) {
                 r.submitPreview(0, current.preview, rotation * 90, mirror);
             } else {
-                renderShaderPassChain(e, r, s, current, rotation, mirror) catch {
+                renderCompositeChain(e, r, s, current, rotation, mirror) catch {
                     // A chain target failed to (re)create - present the
                     // plain preview rather than nothing this frame.
                     r.submitPreview(0, current.preview, rotation * 90, mirror);
@@ -695,8 +737,11 @@ fn destroyShaderPrograms(session: *Session) void {
     var it = session.shader_programs.valueIterator();
     while (it.next()) |handle| render.Renderer.destroyProgram(.{ .idx = handle.* });
     session.shader_programs.clearRetainingCapacity();
-    session.engine.gpa.free(session.shader_pass_order);
-    session.shader_pass_order = &.{};
+}
+
+fn destroyChainOrder(session: *Session) void {
+    session.engine.gpa.free(session.chain_order);
+    session.chain_order = &.{};
 }
 
 /// Tears down every in-flight LUT load and every already-created LUT
@@ -737,6 +782,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
 
     destroyShaderPrograms(session);
     destroyLutState(session);
+    destroyChainOrder(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
     applyLensEffects(session, effects);
@@ -766,9 +812,6 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
     defer gpa.free(passes);
     if (passes.len == 0) return;
 
-    var order: std.ArrayList(graph.NodeIndex) = .empty;
-    errdefer order.deinit(gpa);
-
     const tag = render.Renderer.currentShaderProfileTag() catch return;
     const io = defaultIo();
     for (passes) |pass| {
@@ -779,15 +822,17 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         const program = render.Renderer.loadLensProgram(bytes) catch continue;
         session.shader_programs.put(gpa, pass.graph_index, program.idx) catch {
             render.Renderer.destroyProgram(program);
-            continue;
         };
-        // Best-effort like the load above: losing this alloc just drops
-        // the pass from the drawn chain, its program still gets torn
-        // down normally since destroyShaderPrograms walks the map, not
-        // this list.
-        order.append(gpa, pass.graph_index) catch {};
     }
-    session.shader_pass_order = try order.toOwnedSlice(gpa);
+}
+
+/// The active lens's real chain draw order, spanning both node kinds -
+/// built once here regardless of whether each entry's resource is
+/// ready yet, since a lut.pass node's load can still be in flight the
+/// same frame its position in the chain is already fixed.
+fn buildChainOrder(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    session.chain_order = try lens.compositePassNodes(gpa, &session.lens_graph);
 }
 
 /// Starts a background load for every spliced lut.pass node's LUT image
@@ -858,6 +903,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try activateLens(session, gpa, manifest_json);
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
+    try buildChainOrder(session, gpa);
 }
 
 pub export fn ck_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
@@ -876,6 +922,7 @@ pub export fn ck_session_deactivate_lens(session: ?*Session) void {
     const s = session orelse return;
     destroyShaderPrograms(s);
     destroyLutState(s);
+    destroyChainOrder(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
 }
@@ -1107,10 +1154,16 @@ test "activating a lens from a real bundle directory splices it, and a build wit
     // shader.pass node just has no program, exactly the degradation
     // ck_session_set_beauty already establishes for a missing engine.
     try t.expectEqual(@as(usize, 0), session.shader_programs.count());
+    // The chain's structure is still known even though nothing in it
+    // has a resource yet - that's what lets a lut.pass node's load
+    // land on some later frame without needing to reactivate.
+    try t.expectEqual(@as(usize, 1), session.chain_order.len);
+    try t.expectEqual(runtime.PassKind.shader, session.chain_order[0].kind);
 
     ck_session_deactivate_lens(session);
     try t.expect(session.active_lens == null);
     try t.expectEqual(@as(usize, 0), session.shader_programs.count());
+    try t.expectEqual(@as(usize, 0), session.chain_order.len);
 
     try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(null, bundle_path.ptr, bundle_path.len));
     try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(session, null, 0));
@@ -1153,6 +1206,8 @@ test "activating a lens with a lut.pass node loads its LUT image for real, off t
 
     try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
     try t.expectEqual(@as(usize, 1), session.lut_loaders.count());
+    try t.expectEqual(@as(usize, 1), session.chain_order.len);
+    try t.expectEqual(runtime.PassKind.lut, session.chain_order[0].kind);
 
     var loader_it = session.lut_loaders.valueIterator();
     const loader = loader_it.next().?.*;
