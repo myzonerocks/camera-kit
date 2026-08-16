@@ -368,6 +368,10 @@ pub fn build(b: *std.Build) void {
         break :blk null;
     };
     if (image_module) |im| {
+        lens_validator_module.addImport("image", im);
+        lens_validator_module.link_libc = true;
+    }
+    if (image_module) |im| {
         const asset_module = b.createModule(.{
             .root_source_file = b.path("adapters/asset/asset.zig"),
             .target = target,
@@ -438,6 +442,10 @@ pub fn build(b: *std.Build) void {
     lens_test_options.addOption([]const u8, "shader_include_dir", ".vendor/bgfx/src");
     lens_test_options.addOption([]const u8, "varyingdef_path", "lenses/shaders/varying.def.sc");
     lens_validator_test_module.addOptions("build_options", lens_test_options);
+    if (image_module) |im| {
+        lens_validator_test_module.addImport("image", im);
+        lens_validator_test_module.link_libc = true;
+    }
     const lens_validator_tests = b.addTest(.{ .root_module = lens_validator_test_module });
     test_step.dependOn(&b.addRunArtifact(lens_validator_tests).step);
 
