@@ -18,6 +18,8 @@ const face = @import("face");
 const beauty = @import("beauty");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
+const asset = @import("asset");
+const image = @import("image");
 
 // A directory-based lens activation needs to read files (manifest.json,
 // compiled shader bytecode) from within an exported ck_ function, which
@@ -186,6 +188,14 @@ pub const Session = struct {
     /// nodes that actually got a program. Owned, rebuilt every
     /// activation, freed on teardown.
     shader_pass_order: []graph.NodeIndex = &.{},
+    /// One background loader per currently-spliced lut.pass node still
+    /// waiting on its LUT image, keyed by graph index. Started at
+    /// activation (directory-based only, same reason as shader_programs
+    /// above), removed once ck_engine_render_frame's poll turns its
+    /// result into a real texture or observes it failed.
+    lut_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.Loader) = .empty,
+    /// One bgfx texture per lut.pass node whose asset finished loading.
+    lut_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -287,6 +297,9 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
 pub fn destroySession(session: *Session) void {
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
+    destroyLutState(session);
+    session.lut_loaders.deinit(session.engine.gpa);
+    session.lut_textures.deinit(session.engine.gpa);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
     session.lens_graph.deinit();
@@ -377,6 +390,7 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
     const e = engine orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
     if (session) |s| {
+        pollLutLoaders(s, r, s.engine.gpa);
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
@@ -685,6 +699,22 @@ fn destroyShaderPrograms(session: *Session) void {
     session.shader_pass_order = &.{};
 }
 
+/// Tears down every in-flight LUT load and every already-created LUT
+/// texture for the session's current lens - a load still running when
+/// its lens deactivates is not a leak, just a loader whose result
+/// nobody will ever collect.
+fn destroyLutState(session: *Session) void {
+    var loader_it = session.lut_loaders.valueIterator();
+    while (loader_it.next()) |loader| loader.*.deinit();
+    session.lut_loaders.clearRetainingCapacity();
+
+    if (session.engine.renderer) |*r| {
+        var texture_it = session.lut_textures.valueIterator();
+        while (texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.lut_textures.clearRetainingCapacity();
+}
+
 /// Replaces any currently active lens with the one manifest_json
 /// describes, splicing its nodes into the session's graph and applying
 /// its default effect values to the beauty chain if one is enabled. The
@@ -706,6 +736,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     defer gpa.free(effects);
 
     destroyShaderPrograms(session);
+    destroyLutState(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
     applyLensEffects(session, effects);
@@ -759,12 +790,60 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
     session.shader_pass_order = try order.toOwnedSlice(gpa);
 }
 
+/// Starts a background load for every spliced lut.pass node's LUT image
+/// (assets/<stem>.png). Best-effort per node like createShaderPrograms:
+/// a loader that fails to even start just leaves that node without a
+/// texture rather than failing the whole activation.
+fn createLutLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const luts = try lens.lutPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(luts);
+    for (luts) |lut| {
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, lut.lut_stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.Loader.start(gpa, path) catch continue;
+        session.lut_loaders.put(gpa, lut.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Turns every LUT load that finished (or failed) since the last frame
+/// into a real texture (or drops it) - runs every frame from
+/// ck_engine_render_frame since texture creation belongs on the render
+/// thread, but each loader is otherwise untouched here except the one
+/// frame its result actually lands on.
+fn pollLutLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.lut_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.lut_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.lut_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
 /// Activates the lens bundle at bundle_path (bundle_path/manifest.json),
-/// then creates a bgfx program for every shader.pass node it spliced.
+/// then creates a bgfx program for every shader.pass node it spliced
+/// and starts a background load for every lut.pass node's LUT image.
 /// Additive alongside ck_session_activate_lens rather than a new
 /// parameter on it: that function's signature is frozen the moment it
 /// shipped, and only a bundle directory - not raw manifest bytes - can
-/// name where a shader.pass node's compiled bytecode lives.
+/// name where a shader.pass node's compiled bytecode or a lut.pass
+/// node's image lives.
 // Explicit anyerror, not inferred: the has_file_io branch below prunes
 // away entirely on wasm, which would otherwise narrow the inferred
 // error set to just Unsupported there and break the OutOfMemory arm
@@ -778,6 +857,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     defer gpa.free(manifest_json);
     try activateLens(session, gpa, manifest_json);
     try createShaderPrograms(session, gpa, bundle_path);
+    try createLutLoaders(session, gpa, bundle_path);
 }
 
 pub export fn ck_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
@@ -795,6 +875,7 @@ pub export fn ck_session_activate_lens_from_directory(session: ?*Session, bundle
 pub export fn ck_session_deactivate_lens(session: ?*Session) void {
     const s = session orelse return;
     destroyShaderPrograms(s);
+    destroyLutState(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
 }
@@ -1034,4 +1115,63 @@ test "activating a lens from a real bundle directory splices it, and a build wit
     try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(null, bundle_path.ptr, bundle_path.len));
     try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(session, null, 0));
     try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(session, bundle_path.ptr, 0));
+}
+
+const lut_pass_bundle_manifest =
+    \\{"glf":"1.0","id":"com.example.lut","version":"1.0.0","display_name":"LUT",
+    \\ "engine_compat":">=0.5","capabilities":[],"parameters":[],
+    \\ "nodes":[{"id":"warm-lut","type":"lut.pass","inputs":{"frame":"camera"},"params":{}}],
+    \\ "triggers":[]}
+;
+
+// The same 8x8 checker PNG adapters/image and adapters/asset's own
+// tests decode - real bytes, so this proves the real background thread
+// and real lodepng decode, not a mock standing in for either.
+const lut_checker_png = [_]u8{
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x08, 0x08, 0x06, 0x00, 0x00, 0x00, 0xc4, 0x0f, 0xbe,
+    0x8b, 0x00, 0x00, 0x00, 0x19, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0xf8, 0x8f, 0x0e, 0x18,
+    0x18, 0x50, 0x30, 0x03, 0x3d, 0x14, 0xa0, 0x09, 0x60, 0xa8, 0xa7, 0xbd, 0x02, 0x00, 0xa3, 0xc6,
+    0xbf, 0x41, 0x50, 0xd7, 0xe9, 0x6c, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42,
+    0x60, 0x82,
+};
+
+test "activating a lens with a lut.pass node loads its LUT image for real, off the calling thread" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = lut_pass_bundle_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/warm-lut.png", .data = &lut_checker_png });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
+
+    try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(@as(usize, 1), session.lut_loaders.count());
+
+    var loader_it = session.lut_loaders.valueIterator();
+    const loader = loader_it.next().?.*;
+    var decoded: ?image.Image = null;
+    var spins: u32 = 0;
+    while (decoded == null and spins < 1_000_000) : (spins += 1) {
+        decoded = loader.take();
+        if (decoded == null) std.atomic.spinLoopHint();
+    }
+    const got = decoded orelse return error.TestUnexpectedResult;
+    defer t.allocator.free(got.rgba);
+    try t.expectEqual(@as(u32, 8), got.width);
+    try t.expectEqual(@as(u32, 8), got.height);
+    try t.expect(!loader.hasFailed());
+
+    // A load that finished but was never polled through
+    // ck_engine_render_frame (this build has no compiled render stack)
+    // is still cleaned up correctly on deactivation, not leaked or
+    // double-freed.
+    ck_session_deactivate_lens(session);
+    try t.expectEqual(@as(usize, 0), session.lut_loaders.count());
 }

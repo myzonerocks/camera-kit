@@ -343,6 +343,22 @@ pub fn main(init_args: std.process.Init) !u8 {
         std.debug.print("harness: FAIL shader-pass program invalid\n", .{});
         return 1;
     }
+
+    // A lut.pass node's asset loader hands the render thread decoded
+    // RGBA bytes (adapters/asset, off the calling thread) and this is
+    // the call that turns them into the real GPU texture
+    // ck_engine_render_frame's own poll makes: reusing the checker
+    // image already decoded above rather than a second asset, since
+    // the point here is proving createStaticTexture itself, not the
+    // decode path adapters/image already has its own tests for.
+    // Not explicitly destroyed, matching the checker texture above -
+    // bgfx_shutdown reclaims both when the harness exits.
+    const lut_texture = render.Renderer.createStaticTexture(@intCast(tex_w), @intCast(tex_h), decoded[0 .. @as(usize, tex_w) * tex_h * 4]);
+    if (lut_texture.idx == std.math.maxInt(u16)) {
+        std.debug.print("harness: FAIL static texture invalid\n", .{});
+        return 1;
+    }
+    std.debug.print("harness: PROOF static texture created from decoded bytes (idx {d})\n", .{lut_texture.idx});
     std.debug.print("harness: PROOF shader-pass program created from packaged bytecode (idx {d})\n", .{shader_program.idx});
 
     const chain_target = try render.Renderer.createOffscreenTarget(@intCast(width), @intCast(height));

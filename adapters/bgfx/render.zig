@@ -20,6 +20,12 @@ pub const c = @cImport({
 
 pub const invalid_handle: u16 = std.math.maxInt(u16);
 
+/// A named alias for bgfx's own texture handle, matching the stub
+/// module's TextureHandle - lets callers that need to name the type
+/// (a hashmap value type, say) write render.TextureHandle uniformly
+/// against whichever module is actually linked in.
+pub const TextureHandle = c.bgfx_texture_handle_t;
+
 /// The affine color conversion as one homogeneous matrix for the shader.
 pub fn yuvTransform(conversion: math.color.Conversion) math.Mat4 {
     return conversion.homogeneous();
@@ -73,9 +79,11 @@ pub const Renderer = struct {
     layout: c.bgfx_vertex_layout_t,
     rgba_program: c.bgfx_program_handle_t,
     nv12_program: c.bgfx_program_handle_t,
+    lut_program: c.bgfx_program_handle_t,
     tex_color: c.bgfx_uniform_handle_t,
     tex_y: c.bgfx_uniform_handle_t,
     tex_uv: c.bgfx_uniform_handle_t,
+    tex_lut: c.bgfx_uniform_handle_t,
     yuv_uniform: c.bgfx_uniform_handle_t,
     upload_cache: ?UploadCache = null,
 
@@ -131,6 +139,17 @@ pub const Renderer = struct {
             },
             else => return error.RendererUnsupported,
         };
+        // A lut.pass node's fragment shader is kit-authored, not lens-
+        // authored - unlike shader.pass, there is nothing to load per
+        // lens, so this compiles once here exactly like rgba/nv12
+        // above, sharing the same full-screen vertex contract every
+        // lens shader pass already compiles against.
+        const lut_program = switch (backend) {
+            c.BGFX_RENDERER_TYPE_METAL => try loadProgram(blobs.vs_lens_pass_metal, blobs.fs_lut_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => try loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_lut_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => try loadProgram(blobs.vs_lens_pass_essl, blobs.fs_lut_pass_essl),
+            else => return error.RendererUnsupported,
+        };
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
@@ -156,9 +175,11 @@ pub const Renderer = struct {
             .layout = layout,
             .rgba_program = rgba_program,
             .nv12_program = nv12_program,
+            .lut_program = lut_program,
             .tex_color = c.bgfx_create_uniform("s_texColor", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_y = c.bgfx_create_uniform("s_texY", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_uv = c.bgfx_create_uniform("s_texUV", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_lut = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
         };
     }
@@ -219,9 +240,11 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_color);
         c.bgfx_destroy_uniform(r.tex_y);
         c.bgfx_destroy_uniform(r.tex_uv);
+        c.bgfx_destroy_uniform(r.tex_lut);
         c.bgfx_destroy_uniform(r.yuv_uniform);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
+        c.bgfx_destroy_program(r.lut_program);
         c.bgfx_shutdown();
         if (is_android) {
             if (r.zero_copy) |*zc| {
@@ -253,6 +276,15 @@ pub const Renderer = struct {
     pub fn destroyTexture(r: *Renderer, handle: c.bgfx_texture_handle_t) void {
         _ = r;
         if (handle.idx != invalid_handle) c.bgfx_destroy_texture(handle);
+    }
+
+    /// Uploads a decoded, immutable image (a lens's LUT, say) as a real
+    /// GPU texture, copying rgba once at creation - unlike
+    /// wrapExternalTexture, there is no live external buffer behind
+    /// this one to keep alive frame over frame. No instance state to
+    /// touch, so this needs no receiver, the same as loadLensProgram.
+    pub fn createStaticTexture(width: u16, height: u16, rgba: []const u8) TextureHandle {
+        return c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP, c.bgfx_copy(rgba.ptr, @intCast(rgba.len)), 0);
     }
 
     /// Full-screen quad geometry and the view's transform, shared by
@@ -349,6 +381,18 @@ pub const Renderer = struct {
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lens lut.pass node as a full-screen pass into view_id:
+    /// the frame on unit 0, the lens's own LUT texture on unit 1, the
+    /// one fixed lut_program every lut.pass node shares (there is
+    /// nothing per-lens to compile here, unlike shader.pass).
+    pub fn submitLutPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, lut_texture: c.bgfx_texture_handle_t) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_lut, lut_texture, std.math.maxInt(u32));
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.lut_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// The stated CPU path: copies NV12 planes into two cached updatable

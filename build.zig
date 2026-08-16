@@ -347,39 +347,21 @@ pub fn build(b: *std.Build) void {
         b.build_root.handle.access(b.graph.io, ".vendor/bimg/3rdparty/lodepng/lodepng.cpp", .{}) catch break :blk false;
         break :blk true;
     };
-    const image_module: ?*std.Build.Module = if (have_lodepng) blk: {
-        const m = b.createModule(.{
-            .root_source_file = b.path("adapters/image/image.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        m.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
-        m.addCSourceFile(.{
-            .file = b.path("harness/lodepng_impl.c"),
-            .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
-        });
-        m.link_libc = true;
-        const image_tests = b.addTest(.{ .root_module = m });
-        test_step.dependOn(&b.addRunArtifact(image_tests).step);
-        break :blk m;
-    } else blk: {
+    const host_asset: ?AssetModules = if (have_lodepng) realAssetModules(b, target, optimize) else blk: {
         const missing = b.addFail("camera-kit: .vendor/bimg missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
         break :blk null;
     };
-    if (image_module) |im| {
-        lens_validator_module.addImport("image", im);
-        lens_validator_module.link_libc = true;
-    }
-    if (image_module) |im| {
-        const asset_module = b.createModule(.{
-            .root_source_file = b.path("adapters/asset/asset.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "image", .module = im }},
-        });
-        const asset_tests = b.addTest(.{ .root_module = asset_module });
+    if (host_asset) |am| {
+        const image_tests = b.addTest(.{ .root_module = am.image });
+        test_step.dependOn(&b.addRunArtifact(image_tests).step);
+        const asset_tests = b.addTest(.{ .root_module = am.asset });
         test_step.dependOn(&b.addRunArtifact(asset_tests).step);
+
+        lens_validator_module.addImport("image", am.image);
+        lens_validator_module.link_libc = true;
+        abi_module.addImport("image", am.image);
+        abi_module.addImport("asset", am.asset);
     }
 
     // The desktop harness draws through the real render stack. It exists
@@ -442,8 +424,8 @@ pub fn build(b: *std.Build) void {
     lens_test_options.addOption([]const u8, "shader_include_dir", ".vendor/bgfx/src");
     lens_test_options.addOption([]const u8, "varyingdef_path", "lenses/shaders/varying.def.sc");
     lens_validator_test_module.addOptions("build_options", lens_test_options);
-    if (image_module) |im| {
-        lens_validator_test_module.addImport("image", im);
+    if (host_asset) |am| {
+        lens_validator_test_module.addImport("image", am.image);
         lens_validator_test_module.link_libc = true;
     }
     const lens_validator_tests = b.addTest(.{ .root_module = lens_validator_test_module });
@@ -558,6 +540,10 @@ pub fn build(b: *std.Build) void {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
             abi_tracking_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
+        }
+        if (host_asset) |am| {
+            abi_tracking_module.addImport("image", am.image);
+            abi_tracking_module.addImport("asset", am.asset);
         }
         const tracking_module = b.createModule(.{
             .root_source_file = b.path("harness/tracking.zig"),
@@ -723,6 +709,14 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("manifest", lens_manifest_wasm);
         abi_wasm.addImport("trigger", lens_trigger_wasm);
         abi_wasm.addImport("runtime", lens_runtime_wasm);
+        // Neither libc nor real threads exist for wasm32-freestanding -
+        // the same reason directory-based lens activation already
+        // refuses there (defaultIo's std.Io.Threaded can't even be
+        // typed for this target). An asset loader needs both, so it
+        // gets the same stub treatment as tracking/beauty above.
+        const image_wasm = imageStubModule(b, wasm_target, .ReleaseSmall);
+        abi_wasm.addImport("image", image_wasm);
+        abi_wasm.addImport("asset", assetStubModule(b, wasm_target, .ReleaseSmall, image_wasm));
         const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
         camerakit_wasm.entry = .disabled;
         camerakit_wasm.rdynamic = true;
@@ -944,6 +938,9 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
+    const android_asset = realAssetModules(b, android_target, optimize);
+    abi_android.addImport("image", android_asset.image);
+    abi_android.addImport("asset", android_asset.asset);
     const jni_module = b.createModule(.{
         .root_source_file = b.path("adapters/android/jni.zig"),
         .target = android_target,
@@ -1046,6 +1043,52 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .face = face_module,
         .tracker = tracker_module,
     };
+}
+
+const AssetModules = struct {
+    image: *std.Build.Module,
+    asset: *std.Build.Module,
+};
+
+// A real PNG decoder plus the off-thread loader built on it, for one
+// target - each needs its own instance the same way the tracking core
+// does, since lodepng compiles as C linked against that target's libc.
+fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) AssetModules {
+    const image_module = b.createModule(.{
+        .root_source_file = b.path("adapters/image/image.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    image_module.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
+    image_module.addCSourceFile(.{
+        .file = b.path("harness/lodepng_impl.c"),
+        .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+    });
+    image_module.link_libc = true;
+    const asset_module = b.createModule(.{
+        .root_source_file = b.path("adapters/asset/asset.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "image", .module = image_module }},
+    });
+    return .{ .image = image_module, .asset = asset_module };
+}
+
+fn imageStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/image/image_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn assetStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, image_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/asset/asset_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "image", .module = image_module }},
+    });
 }
 
 fn beautyStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, face_module: *std.Build.Module) *std.Build.Module {
@@ -2283,6 +2326,9 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
+    const ios_asset = realAssetModules(b, ios_target, optimize);
+    abi_ios.addImport("image", ios_asset.image);
+    abi_ios.addImport("asset", ios_asset.asset);
     const camerakit_ios = b.addLibrary(.{
         .name = "camerakit",
         .linkage = .static,
@@ -2460,6 +2506,10 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // lenses/shaders/, not the engine's own preview shader
         // directory, since that's the contract lens authors read.
         .{ .name = "vs_lens_pass", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // lut.pass's own fixed fragment shader - kit-authored like the
+        // vertex contract above, not per-lens, so it compiles here once
+        // rather than through the validator's per-lens shader stage.
+        .{ .name = "fs_lut_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
         .{ .profile = "metal", .platform = "ios", .tag = "metal" },

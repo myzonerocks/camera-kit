@@ -34,7 +34,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -42,16 +42,18 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.lipstick")) return .beauty_lipstick;
     if (std.mem.eql(u8, type_str, "beauty.blusher")) return .beauty_blusher;
     if (std.mem.eql(u8, type_str, "shader.pass")) return .shader_pass;
+    if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
     return null;
 }
 
 const ParamSlot = struct { name: []const u8, effect: EffectSlot };
 
 /// The param names each node type accepts and which effect slot each one
-/// drives - the only place that mapping is declared. shader.pass has no
-/// effect-slot params of its own: which shader it runs is
-/// its id, resolved against shaders/<id>.glsl, the same way a node's id
-/// already resolves against other nodes for wiring.
+/// drives - the only place that mapping is declared. shader.pass and
+/// lut.pass have no effect-slot params of their own: each one's id
+/// names the asset it runs (a shader source file or a LUT image), the
+/// same way a node's id already resolves against other nodes for
+/// wiring.
 fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
     return switch (node_type) {
         .beauty_face => &.{
@@ -64,7 +66,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass => &.{},
+        .shader_pass, .lut_pass => &.{},
     };
 }
 
@@ -79,20 +81,28 @@ const LensNode = struct {
     graph_index: graph.NodeIndex,
     node_type: NodeType,
     bindings: [effect_slot_count]?ParamSource = @splat(null),
-    /// Set only for .shader_pass nodes: the node's own id, which is also
-    /// the shader's basename (shaders/<shader_stem>.glsl) - a slice into
-    /// the Lens's own retained manifest arena, not separately owned.
-    shader_stem: ?[]const u8 = null,
+    /// Set only for .shader_pass and .lut_pass nodes: the node's own id,
+    /// which also names the asset it runs (shaders/<id>.glsl for
+    /// shader.pass, assets/<id>.png for lut.pass) - a slice into the
+    /// Lens's own retained manifest arena, not separately owned.
+    asset_stem: ?[]const u8 = null,
 };
 
 /// One shader.pass node ready for the caller to load and draw - which
-/// graph node it is, and the shader (shaders/<shader_stem>.glsl, plus
-/// its packaged shaders/<shader_stem>.<profile>.bin variants) it names.
-/// This module has no bgfx dependency of its own; the caller resolves
-/// shader_stem into actual bytes and does the real rendering work.
+/// graph node it is, and the shader (shaders/<stem>.glsl, plus its
+/// packaged shaders/<stem>.<profile>.bin variants) it names. This
+/// module has no bgfx dependency of its own; the caller resolves the
+/// stem into actual bytes and does the real rendering work.
 pub const ShaderPassNode = struct {
     graph_index: graph.NodeIndex,
     shader_stem: []const u8,
+};
+
+/// One lut.pass node ready for the caller to load and draw - which
+/// graph node it is, and the LUT image (assets/<stem>.png) it names.
+pub const LutPassNode = struct {
+    graph_index: graph.NodeIndex,
+    lut_stem: []const u8,
 };
 
 pub const ActivateError = error{
@@ -148,7 +158,22 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .shader_pass) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.shader_stem.? });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.asset_stem.? });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every lut.pass node this lens spliced, in the graph's real
+    /// execution order - mirrors shaderPassNodes exactly, one node type
+    /// over.
+    pub fn lutPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]LutPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(LutPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .lut_pass) continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .lut_stem = node.asset_stem.? });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -234,7 +259,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         nodes[spliced_count] = .{
             .graph_index = graph_index,
             .node_type = node_type,
-            .shader_stem = if (node_type == .shader_pass) node.id else null,
+            .asset_stem = if (node_type == .shader_pass or node_type == .lut_pass) node.id else null,
         };
 
         for (node.inputs) |input| {
@@ -474,6 +499,81 @@ test "shaderPassNodes orders a multi-pass chain by real graph dependency, not de
     try t.expectEqualStrings("warm", passes[0].shader_stem);
     try t.expectEqualStrings("vignette", passes[1].shader_stem);
     try t.expectEqualStrings("grain", passes[2].shader_stem);
+}
+
+const lut_pass_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.lutpass", "version": "1.0.0", "display_name": "LUT Pass",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "warm-lut", "type": "lut.pass", "inputs": {"frame": "camera"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "a lut.pass node splices with no effect bindings and resolves its LUT by id" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, lut_pass_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    try t.expectEqual(@as(usize, 1), lens.nodes.len);
+    try t.expectEqual(NodeType.lut_pass, lens.nodes[0].node_type);
+
+    const effects = try lens.currentEffects(t.allocator);
+    defer t.allocator.free(effects);
+    try t.expectEqual(@as(usize, 0), effects.len);
+
+    const luts = try lens.lutPassNodes(t.allocator, &g);
+    defer t.allocator.free(luts);
+    try t.expectEqual(@as(usize, 1), luts.len);
+    try t.expectEqualStrings("warm-lut", luts[0].lut_stem);
+    try t.expectEqual(lens.nodes[0].graph_index, luts[0].graph_index);
+
+    // Neither accessor picks up the other node type's node.
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 0), passes.len);
+}
+
+const mixed_chain_manifest =
+    \\{
+    \\  "glf": "1.0", "id": "com.example.mixedchain", "version": "1.0.0", "display_name": "Mixed Chain",
+    \\  "engine_compat": ">=0.5", "capabilities": [],
+    \\  "parameters": [],
+    \\  "nodes": [
+    \\    {"id": "tint", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}},
+    \\    {"id": "warm-lut", "type": "lut.pass", "inputs": {"frame": "tint"}, "params": {}},
+    \\    {"id": "vignette", "type": "shader.pass", "inputs": {"frame": "warm-lut"}, "params": {}}
+    \\  ],
+    \\  "triggers": []
+    \\}
+;
+
+test "shader.pass and lut.pass nodes interleave in one chain, each accessor seeing only its own kind in order" {
+    var g = graph.Graph.init(t.allocator);
+    defer g.deinit();
+    const camera = try g.addNode(.{ .role = .source, .outputs = &.{.{ .kind = .texture }} });
+
+    const lens_manifest = try parseTestManifest(t.allocator, mixed_chain_manifest);
+    var lens = try activate(t.allocator, &g, camera, lens_manifest);
+    defer lens.deinit(&g);
+
+    const passes = try lens.shaderPassNodes(t.allocator, &g);
+    defer t.allocator.free(passes);
+    try t.expectEqual(@as(usize, 2), passes.len);
+    try t.expectEqualStrings("tint", passes[0].shader_stem);
+    try t.expectEqualStrings("vignette", passes[1].shader_stem);
+
+    const luts = try lens.lutPassNodes(t.allocator, &g);
+    defer t.allocator.free(luts);
+    try t.expectEqual(@as(usize, 1), luts.len);
+    try t.expectEqualStrings("warm-lut", luts[0].lut_stem);
 }
 
 test "a trigger firing on the rising edge starts a ramp that settles, does not refire while held, and rearms on the falling edge" {
