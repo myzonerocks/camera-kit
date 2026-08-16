@@ -186,6 +186,14 @@ async function run(): Promise<void> {
   (window as unknown as Record<string, unknown>).setWhiten = (value: number) => {
     preview.setWhiten(value);
   };
+  const smoothSlider = document.getElementById("smooth") as HTMLInputElement | null;
+  smoothSlider?.addEventListener("input", () => {
+    preview.setSmooth(Number(smoothSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setSmooth = (value: number) => {
+    preview.setSmooth(value);
+  };
+  (window as unknown as Record<string, unknown>).loadStillFrame = (url: string) => preview.loadStillFrame(url);
   (window as unknown as Record<string, unknown>).readCenterPixel = () => Array.from(preview.readCenterPixel());
   (window as unknown as Record<string, unknown>).readFrameSum = () => preview.readFrameSum();
   // Pausing the video element stops the per-frame texture re-upload,
