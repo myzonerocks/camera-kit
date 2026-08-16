@@ -257,6 +257,20 @@ pub fn build(b: *std.Build) void {
         lens_reference_step.dependOn(&run.step);
     }
 
+    // Packages every reference lens into .lens-packages/<name> (compiled
+    // shader bytecode alongside the source, SPEC.md section 7) - the
+    // tracking harness activates from there to prove shader.pass nodes
+    // against a real packaged bundle, not a hand-built one.
+    const lens_package_reference_step = b.step("lens-package-reference", "Package every bundle under lenses/reference/ into .lens-packages/");
+    for (listReferenceLenses(b)) |lens_dir| {
+        const run = b.addRunArtifact(lens_validator_exe);
+        run.setCwd(b.path("."));
+        run.addArg(lens_dir);
+        run.addArg("--package");
+        run.addArg(b.fmt(".lens-packages/{s}", .{std.fs.path.basename(lens_dir)}));
+        lens_package_reference_step.dependOn(&run.step);
+    }
+
     const gate_tests = b.addTest(.{ .root_module = gate_module });
     const bundle_tests = b.addTest(.{ .root_module = bundle_module });
     const detector_tests = b.addTest(.{ .root_module = detector_module });
@@ -672,6 +686,24 @@ pub fn build(b: *std.Build) void {
     if (have_render_stack and gltf_module != null and target.result.os.tag == .macos) {
         const bgfx_lib = buildBgfxLib(b, target, optimize);
         const glfw_lib = buildGlfwLib(b, target, optimize);
+        const shader_blobs_module = if (shaderc_exe) |tool| addShaderBlobs(b, tool, target, optimize) else null;
+
+        // core/lens/runtime.zig's shader.pass proof needs the real
+        // render.zig (loadLensProgram/currentShaderProfileTag), not
+        // desktop.zig's own lower-level direct bgfx cImport - a second
+        // module instance for the host target, sharing the same
+        // shader_blobs the harness module below already builds.
+        const render_module = b.createModule(.{
+            .root_source_file = b.path("adapters/bgfx/render.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "math", .module = math_module }},
+        });
+        render_module.addIncludePath(b.path(".vendor/bgfx/include"));
+        render_module.addIncludePath(b.path(".vendor/bx/include"));
+        render_module.link_libc = true;
+        if (shader_blobs_module) |sb| render_module.addImport("shader_blobs", sb);
+
         const harness_module = b.createModule(.{
             .root_source_file = b.path("harness/desktop.zig"),
             .target = target,
@@ -680,15 +712,14 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "graph", .module = graph_module },
                 .{ .name = "gltf", .module = gltf_module.? },
+                .{ .name = "render", .module = render_module },
             },
         });
         harness_module.addIncludePath(b.path(".vendor/bgfx/include"));
         harness_module.addIncludePath(b.path(".vendor/bx/include"));
         harness_module.addIncludePath(b.path(".vendor/glfw/include"));
         harness_module.link_libc = true;
-        if (shaderc_exe) |tool| {
-            harness_module.addImport("shader_blobs", addShaderBlobs(b, tool, target, optimize));
-        }
+        if (shader_blobs_module) |sb| harness_module.addImport("shader_blobs", sb);
         harness_module.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
         harness_module.addCSourceFile(.{
             .file = b.path("harness/lodepng_impl.c"),
@@ -706,6 +737,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(harness_exe);
         const run_harness = b.addRunArtifact(harness_exe);
         run_harness.setCwd(b.path("."));
+        run_harness.step.dependOn(lens_package_reference_step);
         if (b.args) |args| run_harness.addArgs(args);
         harness_step.dependOn(&run_harness.step);
     } else {

@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.shader-tint",
+  "version": "1.0.0",
+  "display_name": "Shader Tint",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "tint", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}}
+  ],
+  "triggers": []
+}

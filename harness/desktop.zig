@@ -8,6 +8,7 @@ const blobs = @import("shader_blobs");
 const graph = @import("graph");
 const math = @import("math");
 const gltf = @import("gltf");
+const render = @import("render");
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", "1");
@@ -368,10 +369,29 @@ pub fn main(init_args: std.process.Init) !u8 {
         (second_square[0] > 200 and second_square[1] > 200 and second_square[2] > 200);
     const red_ok = (first_square[0] > 200 and first_square[1] < 60 and first_square[2] < 60) or
         (second_square[0] > 200 and second_square[1] < 60 and second_square[2] < 60);
-    if (background_ok and white_ok and red_ok) {
-        std.debug.print("harness: PROOF textured gltf drawn through the graph and read back\n", .{});
-        return 0;
+    if (!(background_ok and white_ok and red_ok)) {
+        std.debug.print("harness: FAIL unexpected pixels\n", .{});
+        return 1;
     }
-    std.debug.print("harness: FAIL pixels do not show the textured quad\n", .{});
-    return 1;
+    std.debug.print("harness: PROOF textured gltf drawn through the graph and read back\n", .{});
+
+    // The shader-tint reference lens, packaged for real by lens_validator
+    // --package (zig build lens-package-reference, wired ahead of this
+    // harness) rather than a hand-built bundle - loading its compiled
+    // bytecode into a real bgfx program proves the packaging pipeline
+    // produces bytes this platform's backend actually accepts, on a real
+    // initialized renderer the headless tracking harness cannot provide.
+    const shader_tag = try render.Renderer.currentShaderProfileTag();
+    const shader_bin_path = try std.fmt.allocPrint(gpa, ".lens-packages/shader-tint/shaders/tint.{s}.bin", .{shader_tag});
+    defer gpa.free(shader_bin_path);
+    const shader_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, shader_bin_path, gpa, .limited(256 * 1024));
+    defer gpa.free(shader_bytes);
+    const shader_program = try render.Renderer.loadLensProgram(shader_bytes);
+    defer render.Renderer.destroyProgram(shader_program);
+    if (shader_program.idx == std.math.maxInt(u16)) {
+        std.debug.print("harness: FAIL shader-pass program invalid\n", .{});
+        return 1;
+    }
+    std.debug.print("harness: PROOF shader-pass program created from packaged bytecode (idx {d})\n", .{shader_program.idx});
+    return 0;
 }

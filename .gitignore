@@ -41,6 +41,11 @@ a.out
 # committed.
 .models/
 
+# Compiled shader bytecode packaged from lenses/reference/ by zig build
+# lens-package-reference (--package output), read by the tracking harness.
+# Build artifacts, rebuilt from tracked .glsl source every run.
+.lens-packages/
+
 # Shell build detritus.
 shells/swift/**/*.xcodeproj/
 shells/swift/demo/Sources/Info.plist

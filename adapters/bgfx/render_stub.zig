@@ -113,7 +113,22 @@ pub const Renderer = struct {
         _ = r;
         _ = path;
     }
+
+    pub fn currentShaderProfileTag() ![]const u8 {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadLensProgram(fs_bytes: []const u8) !ProgramHandle {
+        _ = fs_bytes;
+        return error.RendererUnavailable;
+    }
+
+    pub fn destroyProgram(program: ProgramHandle) void {
+        _ = program;
+    }
 };
+
+pub const ProgramHandle = struct { idx: u16 = invalid_handle };
 
 test "stub renderer refuses to initialize" {
     try std.testing.expectError(error.RendererUnavailable, Renderer.init(std.testing.allocator, .{

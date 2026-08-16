@@ -171,6 +171,38 @@ pub const Renderer = struct {
         return program;
     }
 
+    /// The compiled bytecode file suffix (SPEC.md 7) matching bgfx's
+    /// currently active backend - the one source of truth for which
+    /// packaged shader variant a lens shader pass needs, shared between
+    /// loadLensProgram below and whatever reads the bytes off disk.
+    pub fn currentShaderProfileTag() ![]const u8 {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => "metal",
+            c.BGFX_RENDERER_TYPE_VULKAN => "spirv",
+            c.BGFX_RENDERER_TYPE_OPENGLES => "essl",
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// Pairs a lens's compiled fragment shader with the one fixed vertex
+    /// shader every lens shader pass shares (lenses/shaders/vs_lens_pass.sc),
+    /// picking the vertex blob matching the same backend fs_bytes was
+    /// compiled for - the caller is responsible for having read the
+    /// right profile's .bin file (currentShaderProfileTag tells it which).
+    pub fn loadLensProgram(fs_bytes: []const u8) !c.bgfx_program_handle_t {
+        const vs_blob = switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => blobs.vs_lens_pass_metal,
+            c.BGFX_RENDERER_TYPE_VULKAN => blobs.vs_lens_pass_spirv,
+            c.BGFX_RENDERER_TYPE_OPENGLES => blobs.vs_lens_pass_essl,
+            else => return error.RendererUnsupported,
+        };
+        return loadProgram(vs_blob, fs_bytes);
+    }
+
+    pub fn destroyProgram(program: c.bgfx_program_handle_t) void {
+        c.bgfx_destroy_program(program);
+    }
+
     pub fn deinit(r: *Renderer) void {
         if (is_android) {
             if (r.zero_copy) |*zc| {
