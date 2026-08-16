@@ -190,10 +190,14 @@ struct BeautyContext {
 
 void ApplyLandmarks(BeautyContext* context, const float* landmarks106) {
   if (landmarks106 == nullptr) return;
-  std::vector<float> points(landmarks106, landmarks106 + 106 * 2);
-  context->reshape->SetFaceLandmarks(points);
-  context->lipstick->SetFaceLandmarks(points);
-  context->blusher->SetFaceLandmarks(points);
+  // reshape's shader declares facePoints[106 * 2]; lipstick/blusher's
+  // mesh indexes past that into the five derived hub points core/
+  // tracking/face106.zig appends after the raw 106.
+  std::vector<float> reshape_points(landmarks106, landmarks106 + 106 * 2);
+  context->reshape->SetFaceLandmarks(reshape_points);
+  std::vector<float> makeup_points(landmarks106, landmarks106 + 111 * 2);
+  context->lipstick->SetFaceLandmarks(makeup_points);
+  context->blusher->SetFaceLandmarks(makeup_points);
 }
 
 }  // namespace

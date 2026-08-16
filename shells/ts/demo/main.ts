@@ -229,6 +229,22 @@ async function run(): Promise<void> {
   (window as unknown as Record<string, unknown>).setBigEye = (value: number) => {
     preview.setBigEye(value);
   };
+  await preview.loadMakeupTextures(new URL("./res/", import.meta.url));
+  const lipstickSlider = document.getElementById("lipstick") as HTMLInputElement | null;
+  lipstickSlider?.addEventListener("input", () => {
+    preview.setLipstick(Number(lipstickSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setLipstick = (value: number) => {
+    preview.setLipstick(value);
+  };
+  const blushSlider = document.getElementById("blush") as HTMLInputElement | null;
+  blushSlider?.addEventListener("input", () => {
+    preview.setBlush(Number(blushSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setBlush = (value: number) => {
+    preview.setBlush(value);
+  };
+  (window as unknown as Record<string, unknown>).makeupTexturesReady = true;
   (window as unknown as Record<string, unknown>).loadStillFrame = (url: string) => preview.loadStillFrame(url);
   (window as unknown as Record<string, unknown>).readCenterPixel = () => Array.from(preview.readCenterPixel());
   (window as unknown as Record<string, unknown>).readFrameSum = () => preview.readFrameSum();

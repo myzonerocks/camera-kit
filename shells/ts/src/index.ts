@@ -4,6 +4,8 @@
 // through WebGL2. Session accounting, degradation, and color math all come
 // from the core.
 
+import { POINT_COUNT, TRIANGLE_INDICES, CANONICAL_UV, type FrameBounds } from "./face-mesh.ts";
+
 export const CK_OK = 0;
 
 export const enum DegradeLevel {
@@ -148,6 +150,22 @@ export class PreviewSession {
   private aspectRatioUniform: WebGLUniformLocation | null;
   private facePointsUniform: WebGLUniformLocation | null;
   private facePoints: Float32Array | null = null;
+  private lipstickAmount = 0;
+  private blushAmount = 0;
+  private lipstickTexture: WebGLTexture | null = null;
+  private blushTexture: WebGLTexture | null = null;
+  private blitProgram: WebGLProgram;
+  private blitSrcUniform: WebGLUniformLocation | null;
+  private compositedTexture: WebGLTexture;
+  private compositedFbo: WebGLFramebuffer;
+  private makeupProgram: WebGLProgram;
+  private makeupIntensityUniform: WebGLUniformLocation | null;
+  private makeupPositionAttrib = 0;
+  private makeupUvAttrib = 0;
+  private makeupIndexBuffer: WebGLBuffer;
+  private makeupPositionBuffer: WebGLBuffer;
+  private lipstickUvBuffer: WebGLBuffer;
+  private blushUvBuffer: WebGLBuffer;
   private raf = 0;
   private lastTick = 0;
   private fpsWindowStart = 0;
@@ -202,6 +220,59 @@ export class PreviewSession {
     const meanTarget = this.createRenderTarget();
     this.meanTexture = meanTarget.texture;
     this.meanFbo = meanTarget.fbo;
+
+    // The makeup mesh (lipstick, blush) draws on top of the already-
+    // composited frame and needs to sample it as a texture, which the
+    // canvas's own default framebuffer can't be while also being drawn
+    // to - so the composite pass now lands here instead, blitted to the
+    // canvas, with the makeup mesh free to draw over that same result.
+    this.blitProgram = this.buildBlitProgram();
+    this.blitSrcUniform = gl.getUniformLocation(this.blitProgram, "u_src");
+    const compositedTarget = this.createRenderTarget();
+    this.compositedTexture = compositedTarget.texture;
+    this.compositedFbo = compositedTarget.fbo;
+    gl.bindTexture(gl.TEXTURE_2D, this.compositedTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+    this.makeupProgram = this.buildMakeupProgram();
+    this.makeupIntensityUniform = gl.getUniformLocation(this.makeupProgram, "u_intensity");
+    this.makeupPositionAttrib = gl.getAttribLocation(this.makeupProgram, "a_position");
+    this.makeupUvAttrib = gl.getAttribLocation(this.makeupProgram, "a_makeupUv");
+    gl.useProgram(this.makeupProgram);
+    gl.uniform1i(gl.getUniformLocation(this.makeupProgram, "u_background"), 0);
+    gl.uniform1i(gl.getUniformLocation(this.makeupProgram, "u_makeup"), 1);
+
+    const indexBuffer = gl.createBuffer();
+    if (!indexBuffer) throw new Error("index buffer create failed");
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, TRIANGLE_INDICES, gl.STATIC_DRAW);
+    this.makeupIndexBuffer = indexBuffer;
+
+    const positionBuffer = gl.createBuffer();
+    if (!positionBuffer) throw new Error("position buffer create failed");
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, POINT_COUNT * 2 * Float32Array.BYTES_PER_ELEMENT, gl.DYNAMIC_DRAW);
+    this.makeupPositionBuffer = positionBuffer;
+
+    // Lipstick and blush share the same canonical face layout and mesh,
+    // just cropped from a different region of a shared virtual 1280x1280
+    // reference space - gpupixel's own FrameBounds per effect.
+    this.lipstickUvBuffer = this.buildMakeupUvBuffer({ x: 502.5, y: 710, width: 262.5, height: 167.5 });
+    this.blushUvBuffer = this.buildMakeupUvBuffer({ x: 395, y: 520, width: 489, height: 209 });
+  }
+
+  private buildMakeupUvBuffer(bounds: FrameBounds): WebGLBuffer {
+    const gl = this.gl;
+    const uv = new Float32Array(POINT_COUNT * 2);
+    for (let i = 0; i < POINT_COUNT; i += 1) {
+      uv[i * 2] = (CANONICAL_UV[i * 2]! * 1280 - bounds.x) / bounds.width;
+      uv[i * 2 + 1] = (CANONICAL_UV[i * 2 + 1]! * 1280 - bounds.y) / bounds.height;
+    }
+    const buffer = gl.createBuffer();
+    if (!buffer) throw new Error("uv buffer create failed");
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, uv, gl.STATIC_DRAW);
+    return buffer;
   }
 
   private setState(state: CaptureState): void {
@@ -229,12 +300,47 @@ export class PreviewSession {
     this.bigEyeAmount = amount;
   }
 
-  /// The 106-point contour (see face106.ts), already normalized 0..1 in
+  setLipstick(amount: number): void {
+    this.lipstickAmount = this.lipstickTexture ? amount : 0;
+  }
+
+  setBlush(amount: number): void {
+    this.blushAmount = this.blushTexture ? amount : 0;
+  }
+
+  /// The 111-point contour (see face106.ts), already normalized 0..1 in
   /// the same image-space sense the shader's own texture coordinates
   /// use. Null clears tracking - the shader's own `if (u_hasFace == 1)`
   /// skip degrades to a no-op rather than warping toward a stale face.
   setFaceLandmarks(points: Float32Array | null): void {
     this.facePoints = points;
+  }
+
+  /// Fetches mouth.png/blusher.png, relative to lutBaseUrl. Safe to call
+  /// once after construction; setLipstick/setBlush stay a no-op until
+  /// this resolves, matching setWhiten's own LUT-loading pattern.
+  async loadMakeupTextures(baseUrl: string | URL): Promise<void> {
+    const gl = this.gl;
+    const [mouth, blusher] = await Promise.all(
+      ["mouth.png", "blusher.png"].map((name) =>
+        fetch(new URL(name, baseUrl))
+          .then((r) => r.blob())
+          .then((b) => createImageBitmap(b)),
+      ),
+    );
+    const upload = (bitmap: ImageBitmap): WebGLTexture => {
+      const tex = gl.createTexture();
+      if (!tex) throw new Error("makeup texture create failed");
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+      return tex;
+    };
+    this.lipstickTexture = upload(mouth);
+    this.blushTexture = upload(blusher);
   }
 
   /// Fetches and decodes the four LUT textures the whiten pass samples,
@@ -481,6 +587,65 @@ export class PreviewSession {
     return this.linkProgram(vsSource, fsSource);
   }
 
+  private buildBlitProgram(): WebGLProgram {
+    const vsSource = `#version 300 es
+      const vec2 corners[4] = vec2[](vec2(-1.,-1.), vec2(1.,-1.), vec2(1.,1.), vec2(-1.,1.));
+      const vec2 uvs[4] = vec2[](vec2(0.,1.), vec2(1.,1.), vec2(1.,0.), vec2(0.,0.));
+      out vec2 v_uv;
+      void main() {
+        gl_Position = vec4(corners[gl_VertexID], 0., 1.);
+        v_uv = uvs[gl_VertexID];
+      }`;
+    const fsSource = `#version 300 es
+      precision highp float;
+      uniform sampler2D u_src;
+      in vec2 v_uv;
+      out vec4 fragColor;
+      void main() {
+        fragColor = texture(u_src, v_uv);
+      }`;
+    return this.linkProgram(vsSource, fsSource);
+  }
+
+  // A verbatim port of gpupixel's face-makeup blend (face_makeup_filter.cc,
+  // shared by lipstick and blush) - only the multiply branch, the only
+  // one gpupixel itself ever selects. a_position is the tracked landmark
+  // in the same 0..1 space v_backgroundUv already shares with the rest
+  // of this shell's shaders, doubling as both the mesh's clip-space
+  // position and the background sample point.
+  private buildMakeupProgram(): WebGLProgram {
+    const vsSource = `#version 300 es
+      in vec2 a_position;
+      in vec2 a_makeupUv;
+      out vec2 v_backgroundUv;
+      out vec2 v_makeupUv;
+      void main() {
+        vec2 ndc = vec2(a_position.x * 2.0 - 1.0, 1.0 - a_position.y * 2.0);
+        gl_Position = vec4(ndc, 0.0, 1.0);
+        v_backgroundUv = a_position;
+        v_makeupUv = a_makeupUv;
+      }`;
+    const fsSource = `#version 300 es
+      precision highp float;
+      uniform sampler2D u_background;
+      uniform sampler2D u_makeup;
+      uniform float u_intensity;
+      in vec2 v_backgroundUv;
+      in vec2 v_makeupUv;
+      out vec4 fragColor;
+      void main() {
+        vec4 fgColor = texture(u_makeup, v_makeupUv) * u_intensity;
+        vec4 bgColor = texture(u_background, v_backgroundUv);
+        if (fgColor.a == 0.0) {
+          fragColor = bgColor;
+          return;
+        }
+        vec3 blended = bgColor.rgb * clamp(fgColor.rgb / fgColor.a, 0.0, 1.0);
+        fragColor = vec4(bgColor.rgb * (1.0 - fgColor.a) + blended * fgColor.a, 1.0);
+      }`;
+    return this.linkProgram(vsSource, fsSource);
+  }
+
   private linkProgram(vsSource: string, fsSource: string): WebGLProgram {
     const gl = this.gl;
     const compile = (type: number, source: string): WebGLShader => {
@@ -560,6 +725,36 @@ export class PreviewSession {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
+  /// Draws lipstick and blush on top of the canvas's current content,
+  /// one drawElements call each over the same 111-point mesh and index
+  /// buffer, differing only in which UV buffer and texture they bind -
+  /// skipped entirely when both are off, the mesh's own no-op case.
+  private drawMakeup(points: Float32Array): void {
+    if (this.lipstickAmount <= 0 && this.blushAmount <= 0) return;
+    const gl = this.gl;
+    gl.useProgram(this.makeupProgram);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.makeupIndexBuffer);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.makeupPositionBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, points);
+    gl.enableVertexAttribArray(this.makeupPositionAttrib);
+    gl.vertexAttribPointer(this.makeupPositionAttrib, 2, gl.FLOAT, false, 0, 0);
+
+    const draw = (amount: number, uvBuffer: WebGLBuffer, texture: WebGLTexture | null) => {
+      if (amount <= 0 || !texture) return;
+      gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
+      gl.enableVertexAttribArray(this.makeupUvAttrib);
+      gl.vertexAttribPointer(this.makeupUvAttrib, 2, gl.FLOAT, false, 0, 0);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.compositedTexture);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1f(this.makeupIntensityUniform, amount);
+      gl.drawElements(gl.TRIANGLES, TRIANGLE_INDICES.length, gl.UNSIGNED_SHORT, 0);
+    };
+    draw(this.lipstickAmount, this.lipstickUvBuffer, this.lipstickTexture);
+    draw(this.blushAmount, this.blushUvBuffer, this.blushTexture);
+  }
+
   /// Uploads a still image directly into the frame texture the composite
   /// shader reads, bypassing the video element entirely. Skin-smoothing's
   /// blend factor is content-adaptive (it deliberately favors flat,
@@ -631,7 +826,12 @@ export class PreviewSession {
         this.computeMean(this.frameWidth, this.frameHeight);
       }
 
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // The main composite (reshape/smooth/whiten) renders into an
+      // offscreen texture rather than straight to the canvas, so the
+      // makeup pass below can sample the result - the canvas's own
+      // default framebuffer can't be read from while it's the one being
+      // drawn to.
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.compositedFbo);
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       gl.useProgram(this.program);
       gl.activeTexture(gl.TEXTURE0);
@@ -645,9 +845,24 @@ export class PreviewSession {
       gl.uniform1f(this.aspectRatioUniform, this.frameWidth / this.frameHeight);
       gl.uniform1i(this.hasFaceUniform, this.facePoints ? 1 : 0);
       if (this.facePoints) {
-        gl.uniform1fv(this.facePointsUniform, this.facePoints);
+        // reshape's shader declares facePoints[106 * 2]; facePoints
+        // itself carries 111 points (222 floats) for the makeup mesh
+        // below, so only the first 212 go to this uniform.
+        gl.uniform1fv(this.facePointsUniform, this.facePoints, 0, 106 * 2);
       }
       gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.useProgram(this.blitProgram);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.compositedTexture);
+      gl.uniform1i(this.blitSrcUniform, 0);
+      gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+
+      if (this.facePoints) {
+        this.drawMakeup(this.facePoints);
+      }
+
       this.renderedFrames += 1;
       this.fpsWindowFrames += 1;
     }
