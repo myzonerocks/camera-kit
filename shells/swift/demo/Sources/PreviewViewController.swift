@@ -70,11 +70,11 @@ final class PreviewViewController: UIViewController {
         setupBeautyControls()
     }
 
-    // Each slider reaches ck_session_set_beauty directly; the effect only
-    // shows up once something reads the RGBA back out through
-    // ck_session_beautify_frame, which the zero-copy Metal preview here
-    // does not do yet (that CPU round trip is the live-preview GPU
-    // integration work, still ahead of this row).
+    // Each slider reaches ck_session_set_beauty directly; the effect
+    // shows up in the live preview itself, composited on the render
+    // thread through the GPU bridge (Metal write, gpupixel GL read, back
+    // out through Metal) - no CPU round trip through
+    // ck_session_beautify_frame involved.
     private func setupBeautyControls() {
         beautyStack.axis = .vertical
         beautyStack.spacing = 4

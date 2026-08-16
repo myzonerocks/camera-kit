@@ -24,6 +24,7 @@ const abi_functions = [_][]const u8{
     "ck_status ck_engine_init_renderer(ck_engine *engine, const ck_renderer_desc *desc)",
     "void ck_engine_resize(ck_engine *engine, uint32_t width, uint32_t height)",
     "ck_status ck_engine_render_frame(ck_engine *engine, ck_session *session)",
+    "ck_status ck_engine_request_screenshot(ck_engine *engine, const uint8_t *path, size_t path_len)",
     "ck_status ck_session_submit_frame(ck_session *session, const ck_frame_desc *desc, const ck_frame_planes *planes)",
     "ck_status ck_session_submit_hardware_buffer(ck_session *session, const ck_frame_desc *desc, void *hardware_buffer)",
     "ck_status ck_session_submit_frame_copy(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",

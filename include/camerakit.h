@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define CK_ABI_MAJOR 0u
-#define CK_ABI_MINOR 7u
+#define CK_ABI_MINOR 8u
 #define CK_ABI_VERSION ((CK_ABI_MAJOR << 16) | CK_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against CK_ABI_MAJOR. */
@@ -207,6 +207,12 @@ void ck_engine_resize(ck_engine *engine, uint32_t width, uint32_t height);
 /* Graph thread. Draws the session's most recent frame to the surface and
  * presents. A null session presents the clear color. */
 ck_status ck_engine_render_frame(ck_engine *engine, ck_session *session);
+
+/* Graph thread. Requests a screenshot of the next presented frame,
+ * written as path (path_len bytes, not necessarily nul-terminated) plus
+ * a ".tga" suffix the renderer's own callback appends. Debug/test
+ * tooling only - conformance harnesses, never a user-facing control. */
+ck_status ck_engine_request_screenshot(ck_engine *engine, const uint8_t *path, size_t path_len);
 
 /* Graph thread. config may be null for defaults. */
 ck_status ck_session_create(ck_engine *engine, const ck_session_config *config, ck_session **out_session);
