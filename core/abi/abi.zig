@@ -264,30 +264,32 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
     e.chain_height = height;
 }
 
-/// Draws the active lens's full composite chain - shader.pass and
-/// lut.pass nodes mixed freely: the camera preview captures into one
-/// ping-pong target (view 0), every ready stage reads the previous
-/// stage and writes the other target, and whichever ready stage draws
-/// last presents straight to the swap chain instead of an offscreen
-/// one. View ids increase monotonically because bgfx orders view
-/// execution by id, not by submission order - that ordering is what
-/// makes this an actual chain rather than stages racing each other.
-/// A stage whose resource (a program, a texture) isn't ready yet -
-/// most often a lut.pass node whose background load hasn't landed -
-/// is skipped outright: the chain just has one fewer stage this frame,
-/// not a gap that draws nothing.
+/// Draws the active lens's full composite chain - shader.pass,
+/// lut.pass, and blend.pass nodes mixed freely: the camera preview
+/// captures into one ping-pong target (view 0), every ready stage reads
+/// the previous stage and writes the other target, and whichever ready
+/// stage draws last presents straight to the swap chain instead of an
+/// offscreen one. View ids increase monotonically because bgfx orders
+/// view execution by id, not by submission order - that ordering is
+/// what makes this an actual chain rather than stages racing each
+/// other. A stage whose resource (a program, a texture) isn't ready
+/// yet - most often a lut.pass or blend.pass node whose asset hasn't
+/// landed - is skipped outright: the chain just has one fewer stage
+/// this frame, not a gap that draws nothing. A blend.pass node whose
+/// background HAS landed but segmentation is unavailable still draws,
+/// against the renderer's always-foreground default mask.
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
     var ready_count: usize = 0;
     for (s.chain_order) |entry| {
         const ready = switch (entry.kind) {
             .shader => s.shader_programs.contains(entry.graph_index),
             .lut => s.lut_textures.contains(entry.graph_index),
-            // Background images load for real now (blend_textures),
-            // but there is no draw call yet to actually blend one using
-            // the mask - staying never-ready until that lands avoids
-            // desyncing ready_count from the draw loop below, which
-            // still skips every .blend entry outright.
-            .blend => false,
+            // Only the background image gates readiness - the mask
+            // degrades to the renderer's always-foreground default
+            // when segmentation is unavailable (SPEC's rule: a node
+            // consuming an unavailable capability's data holds its
+            // default state, not blocks the chain).
+            .blend => s.blend_textures.contains(entry.graph_index),
         };
         if (ready) ready_count += 1;
     }
@@ -333,7 +335,19 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     next_slot += 1;
                 }
             },
-            .blend => continue,
+            .blend => {
+                const background_texture = s.blend_textures.get(entry.graph_index) orelse continue;
+                const mask_texture = s.segmentation_texture orelse r.default_mask_texture;
+                drawn += 1;
+                const view_id: u8 = @intCast(drawn);
+                const output = if (drawn == ready_count) null else targets[next_slot % 2];
+                render.Renderer.setViewTarget(view_id, output, width, height);
+                r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    next_slot += 1;
+                }
+            },
         }
     }
 }

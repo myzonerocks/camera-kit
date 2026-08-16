@@ -24,10 +24,12 @@ const height: u32 = 600;
 const screenshot_path = "zig-out/harness-frame.ppm";
 const screenshot_path2 = "zig-out/harness-frame-chain.ppm";
 const screenshot_path3 = "zig-out/harness-frame-lut.ppm";
+const screenshot_path4 = "zig-out/harness-frame-blend.ppm";
 
 var screenshot_written: bool = false;
 var screenshot_written2: bool = false;
 var screenshot_written3: bool = false;
+var screenshot_written4: bool = false;
 var harness_io: std.Io = undefined;
 
 // The checkerboard texture embedded in the generated glTF: 8x8 RGBA PNG,
@@ -175,8 +177,10 @@ const Callbacks = struct {
             screenshot_written = true;
         } else if (std.mem.eql(u8, path_slice, screenshot_path2)) {
             screenshot_written2 = true;
-        } else {
+        } else if (std.mem.eql(u8, path_slice, screenshot_path3)) {
             screenshot_written3 = true;
+        } else {
+            screenshot_written4 = true;
         }
     }
 };
@@ -387,8 +391,25 @@ pub fn main(init_args: std.process.Init) !u8 {
     const lut_view: c.bgfx_view_id_t = 7;
     render.Renderer.setViewTarget(lut_view, null, @intCast(width), @intCast(height));
 
+    // The blend.pass proof: a solid-cyan background and an all-zero mask,
+    // so mix(background, frame, mask) collapses to exactly background
+    // regardless of the offscreen capture's real content - the same
+    // "isolate the binding, not the arithmetic" trick the LUT proof
+    // above uses, here proving submitBlendPass binds background on unit
+    // 1 and mask on unit 2 correctly (unit 0, the frame, is provably
+    // ignored since mask=0 everywhere).
+    const cyan = [_]u8{ 0, 255, 255, 255 } ** 4;
+    const blend_background_texture = render.Renderer.createStaticTexture(2, 2, &cyan);
+    const zero_mask = [_]u8{0} ** 4;
+    const blend_mask_texture = render.Renderer.createMaskTexture(2, 2, &zero_mask);
+    const blend_background_uniform = c.bgfx_create_uniform("s_texBackground", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
+    const blend_mask_uniform = c.bgfx_create_uniform("s_texMask", c.BGFX_UNIFORM_TYPE_SAMPLER, 1);
+    const blend_program = try render.Renderer.loadBlendProgram();
+    const blend_view: c.bgfx_view_id_t = 8;
+    render.Renderer.setViewTarget(blend_view, null, @intCast(width), @intCast(height));
+
     var frame: u32 = 0;
-    while (frame < 90 and c.glfwWindowShouldClose(window) == c.GLFW_FALSE) : (frame += 1) {
+    while (frame < 105 and c.glfwWindowShouldClose(window) == c.GLFW_FALSE) : (frame += 1) {
         c.glfwPollEvents();
         c.bgfx_touch(0);
         for (order) |node_index| {
@@ -496,10 +517,45 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (frame == 88) {
             c.bgfx_request_screen_shot(.{ .idx = std.math.maxInt(u16) }, screenshot_path3);
         }
+
+        // The blend.pass proof starts only once the LUT screenshot above
+        // is captured, same reasoning as every earlier proof phase: view
+        // 8 is another full-screen opaque draw over the same viewport.
+        if (frame > 88) {
+            var blend_tvb: c.bgfx_transient_vertex_buffer_t = undefined;
+            var blend_tib: c.bgfx_transient_index_buffer_t = undefined;
+            if (c.bgfx_get_avail_transient_vertex_buffer(4, &layout) >= 4 and c.bgfx_get_avail_transient_index_buffer(6, false) >= 6) {
+                c.bgfx_alloc_transient_vertex_buffer(&blend_tvb, 4, &layout);
+                c.bgfx_alloc_transient_index_buffer(&blend_tib, 6, false);
+                const blend_verts: [*][5]f32 = @ptrCast(@alignCast(blend_tvb.data));
+                blend_verts[0] = .{ -1.0, -1.0, 0.0, 0.0, 1.0 };
+                blend_verts[1] = .{ 1.0, -1.0, 0.0, 1.0, 1.0 };
+                blend_verts[2] = .{ 1.0, 1.0, 0.0, 1.0, 0.0 };
+                blend_verts[3] = .{ -1.0, 1.0, 0.0, 0.0, 0.0 };
+                const blend_idx: [*]u16 = @ptrCast(@alignCast(blend_tib.data));
+                for ([6]u16{ 0, 1, 2, 0, 2, 3 }, 0..) |v, vi| blend_idx[vi] = v;
+                c.bgfx_set_view_transform(blend_view, &ortho_view.cols, &ortho_proj.cols);
+                _ = c.bgfx_set_transform(&math.Mat4.identity.cols, 1);
+                c.bgfx_set_transient_vertex_buffer(0, &blend_tvb, 0, 4);
+                c.bgfx_set_transient_index_buffer(&blend_tib, 0, 6);
+                // Input on unit 0 (ignored, since mask=0), solid-cyan
+                // background on unit 1, all-zero mask on unit 2 -
+                // submitBlendPass's own binding layout.
+                c.bgfx_set_texture(0, scene.sampler_uniform, @bitCast(chain_target.texture), std.math.maxInt(u32));
+                c.bgfx_set_texture(1, blend_background_uniform, @bitCast(blend_background_texture), std.math.maxInt(u32));
+                c.bgfx_set_texture(2, blend_mask_uniform, @bitCast(blend_mask_texture), std.math.maxInt(u32));
+                c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+                c.bgfx_submit(blend_view, @bitCast(blend_program), 0, c.BGFX_DISCARD_ALL);
+            }
+        }
+
+        if (frame == 101) {
+            c.bgfx_request_screen_shot(.{ .idx = std.math.maxInt(u16) }, screenshot_path4);
+        }
         _ = c.bgfx_frame(0);
     }
 
-    if (!screenshot_written or !screenshot_written2 or !screenshot_written3) {
+    if (!screenshot_written or !screenshot_written2 or !screenshot_written3 or !screenshot_written4) {
         std.debug.print("harness: FAIL a screenshot was not produced\n", .{});
         return 1;
     }
@@ -592,5 +648,34 @@ pub fn main(init_args: std.process.Init) !u8 {
     }
     if (!lut_ok) return 1;
     std.debug.print("harness: PROOF lut-pass sampled the LUT texture on its own unit through the fixed program, landing on the swap chain\n", .{});
+
+    // The fourth capture: the same offscreen quad through submitBlendPass's
+    // own binding layout, background solid cyan and mask all zero - every
+    // sampled point must read back exactly cyan regardless of the frame
+    // underneath it, since mix(background, frame, 0.0) always yields
+    // background. Any other result means the pass sampled the wrong
+    // texture, the wrong unit, or ran the wrong program.
+    const blend_shot = try std.Io.Dir.cwd().readFileAlloc(harness_io, screenshot_path4, gpa, .limited(32 << 20));
+    defer gpa.free(blend_shot);
+    const blend_pixels = std.mem.indexOf(u8, blend_shot, "255\n").? + 4;
+
+    const is_cyan = struct {
+        fn matches(p: [3]u8) bool {
+            return p[0] < 20 and p[1] > 240 and p[2] > 240;
+        }
+    }.matches;
+
+    var blend_ok = true;
+    for ([3]u32{ 60, 220, 380 }) |y| {
+        for ([3]u32{ 60, 300, 500 }) |x| {
+            const px = sample.at(blend_shot, blend_pixels, x, y);
+            if (!is_cyan(px)) {
+                std.debug.print("harness: FAIL blend-pass pixel at ({d},{d}) was {any}, expected cyan\n", .{ x, y, px });
+                blend_ok = false;
+            }
+        }
+    }
+    if (!blend_ok) return 1;
+    std.debug.print("harness: PROOF blend-pass sampled the background and mask textures on their own units through the fixed program, landing on the swap chain\n", .{});
     return 0;
 }

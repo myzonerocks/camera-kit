@@ -80,10 +80,19 @@ pub const Renderer = struct {
     rgba_program: c.bgfx_program_handle_t,
     nv12_program: c.bgfx_program_handle_t,
     lut_program: c.bgfx_program_handle_t,
+    blend_program: c.bgfx_program_handle_t,
     tex_color: c.bgfx_uniform_handle_t,
     tex_y: c.bgfx_uniform_handle_t,
     tex_uv: c.bgfx_uniform_handle_t,
     tex_lut: c.bgfx_uniform_handle_t,
+    tex_background: c.bgfx_uniform_handle_t,
+    tex_mask: c.bgfx_uniform_handle_t,
+    /// Solid white 1x1: blend.pass's mask input when segmentation is
+    /// unavailable. A mask of 1.0 everywhere means "always foreground,"
+    /// so binding this reproduces the SPEC's degradation rule exactly -
+    /// the pass draws the frame through unblended rather than blocking
+    /// the chain or sampling an unbound texture.
+    default_mask_texture: c.bgfx_texture_handle_t,
     yuv_uniform: c.bgfx_uniform_handle_t,
     upload_cache: ?UploadCache = null,
 
@@ -140,6 +149,7 @@ pub const Renderer = struct {
             else => return error.RendererUnsupported,
         };
         const lut_program = try loadLutProgram();
+        const blend_program = try loadBlendProgram();
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
@@ -166,10 +176,14 @@ pub const Renderer = struct {
             .rgba_program = rgba_program,
             .nv12_program = nv12_program,
             .lut_program = lut_program,
+            .blend_program = blend_program,
             .tex_color = c.bgfx_create_uniform("s_texColor", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_y = c.bgfx_create_uniform("s_texY", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_uv = c.bgfx_create_uniform("s_texUV", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_lut = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_background = c.bgfx_create_uniform("s_texBackground", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_mask = c.bgfx_create_uniform("s_texMask", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .default_mask_texture = createMaskTexture(1, 1, &[_]u8{255}),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
         };
     }
@@ -225,6 +239,17 @@ pub const Renderer = struct {
         };
     }
 
+    /// The one fixed blend.pass program every lens shares - kit-authored
+    /// like lut_program, same reasoning.
+    pub fn loadBlendProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_blend_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_blend_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_blend_pass_essl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     pub fn destroyProgram(program: c.bgfx_program_handle_t) void {
         c.bgfx_destroy_program(program);
     }
@@ -242,14 +267,18 @@ pub const Renderer = struct {
             c.bgfx_destroy_texture(cache.y);
             c.bgfx_destroy_texture(cache.uv);
         }
+        c.bgfx_destroy_texture(r.default_mask_texture);
         c.bgfx_destroy_uniform(r.tex_color);
         c.bgfx_destroy_uniform(r.tex_y);
         c.bgfx_destroy_uniform(r.tex_uv);
         c.bgfx_destroy_uniform(r.tex_lut);
+        c.bgfx_destroy_uniform(r.tex_background);
+        c.bgfx_destroy_uniform(r.tex_mask);
         c.bgfx_destroy_uniform(r.yuv_uniform);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
         c.bgfx_destroy_program(r.lut_program);
+        c.bgfx_destroy_program(r.blend_program);
         c.bgfx_shutdown();
         if (is_android) {
             if (r.zero_copy) |*zc| {
@@ -406,6 +435,19 @@ pub const Renderer = struct {
         c.bgfx_set_texture(1, r.tex_lut, lut_texture, std.math.maxInt(u32));
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.lut_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lens blend.pass node as a full-screen pass into
+    /// view_id: the frame on unit 0, the lens's own background image on
+    /// unit 1, the session's current segmentation mask on unit 2, the
+    /// one fixed blend_program every blend.pass node shares.
+    pub fn submitBlendPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, background_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.blend_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// The stated CPU path: copies NV12 planes into two cached updatable

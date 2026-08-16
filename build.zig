@@ -2625,6 +2625,9 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // vertex contract above, not per-lens, so it compiles here once
         // rather than through the validator's per-lens shader stage.
         .{ .name = "fs_lut_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // blend.pass's own fixed fragment shader, same reasoning as
+        // fs_lut_pass above.
+        .{ .name = "fs_blend_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
         .{ .profile = "metal", .platform = "ios", .tag = "metal" },
