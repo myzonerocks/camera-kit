@@ -451,27 +451,37 @@ pub fn main(init_args: std.process.Init) !u8 {
 
             if (segment_engine.inputCount() != 1 or segment_engine.outputCount() != 1) return 1;
 
-            // A real frame would need real preprocessing; this proof only
-            // needs the custom op to actually run end to end and produce a
-            // plausible mask, so a flat mid-gray frame is enough - it
-            // exercises the exact same Prepare/Invoke path a real frame
-            // would.
+            // The same corpus portrait the face pipeline already proved
+            // itself against, cropped and resized the same way face
+            // detection samples its own first pass (the whole frame,
+            // letterboxed to square) - real preprocessing, not a synthetic
+            // frame, so a layout bug in the crop or the custom op's
+            // upsample would show up as a degenerate (near-uniform) mask
+            // rather than passing on arbitrary input.
             var segment_input: [256 * 256 * 3]f32 = undefined;
-            @memset(&segment_input, 0.5);
+            sampler.sampleRegion(corpus.frame, sampler.frameSquare(corpus.frame.width, corpus.frame.height), .unit, 256, &segment_input);
             try segment_engine.writeInput(0, std.mem.sliceAsBytes(&segment_input));
             try segment_engine.invoke();
 
             const mask = try segment_engine.outputFloats(0);
             if (mask.len != 256 * 256) return 1;
+            var mask_min: f32 = 1.0;
+            var mask_max: f32 = 0.0;
             for (mask) |value| {
                 // The model's last op is a sigmoid (LOGISTIC) - every value
                 // in range proves the custom op hasn't silently truncated
                 // the upsample or lost the bias, since garbage here is what
                 // an offset/layout bug in the transpose-conv would produce.
                 if (value < 0.0 or value > 1.0) return 1;
+                mask_min = @min(mask_min, value);
+                mask_max = @max(mask_max, value);
             }
-            try out.print("segmentation: mask {d} values, all in [0,1]\n", .{mask.len});
+            try out.print("segmentation: mask {d} values, range [{d:.3}, {d:.3}]\n", .{ mask.len, mask_min, mask_max });
             try out.flush();
+            // A portrait must separate subject from background; a mask
+            // that reads back near-flat means the crop or the upsample
+            // lost the input's real structure somewhere.
+            if (mask_max - mask_min < 0.05) return 1;
         }
 
         // Beauty through the same public surface, fed by the session's own
