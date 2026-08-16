@@ -39,6 +39,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         self.engineSession = engineSession
         enableFaceTracking()
         enableBeauty()
+        activateLens()
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -88,6 +89,22 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         }
         let status = ck_session_enable_beauty(engineSession, resourceRoot)
         log.info("beauty enable status \(status.rawValue)")
+    }
+
+    // The reference lens ships as a bundled folder (project.yml) keeping
+    // its own name, so its manifest sits at <bundle>/beauty-baseline/manifest.json.
+    private func activateLens() {
+        guard let engineSession,
+              let url = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "beauty-baseline"),
+              let manifestData = try? Data(contentsOf: url)
+        else {
+            log.info("reference lens not present")
+            return
+        }
+        let status = manifestData.withUnsafeBytes { raw in
+            ck_session_activate_lens(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+        }
+        log.info("lens activate status \(status.rawValue)")
     }
 
     private func transition(to newState: State) {

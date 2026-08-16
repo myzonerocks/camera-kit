@@ -52,6 +52,9 @@ object CameraKit {
     external fun nativeDisableBeauty(session: Long)
     external fun nativeSetBeauty(session: Long, effect: Int, value: Float): Int
     external fun nativeBeautifyFrame(session: Long, rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Int
+    external fun nativeActivateLens(session: Long, manifestBuffer: ByteBuffer, manifestLen: Int): Int
+    external fun nativeDeactivateLens(session: Long)
+    external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
     external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -68,6 +71,7 @@ object CameraKit {
     const val FACE_LANDMARK_COUNT = 478
     const val FACE_BLENDSHAPE_COUNT = 52
     const val FACE_RESULT_BYTES = 5968
+    const val LENS_SIGNALS_BYTES = 232
     const val STATUS_AGAIN = 7
 
     fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int {
@@ -124,6 +128,33 @@ class FaceResult {
         buffer.asFloatBuffer().let { floats ->
             floats.get(landmarks)
             floats.get(blendshapes)
+        }
+    }
+}
+
+/** The live signals one tick evaluates a lens's compiled triggers
+ * against. The buffer mirrors the frozen ck_lens_signals layout
+ * (booleans and a reserved byte, then the padding to the first double
+ * at offset 8, then blendshapes at offset 24) - absolute puts, not
+ * relative, so this doesn't depend on writing the padding by hand. */
+class LensSignals {
+    internal val buffer: ByteBuffer =
+        ByteBuffer.allocateDirect(CameraKit.LENS_SIGNALS_BYTES).order(java.nio.ByteOrder.nativeOrder())
+
+    /** blendshapes may be shorter than FACE_BLENDSHAPE_COUNT; the rest
+     * reads as zero. Pass hasFace = false when no face is tracked -
+     * every face-driven signal then reads false regardless of what
+     * blendshapes holds. */
+    fun set(hasFace: Boolean, handsPresent: Boolean, tap: Boolean, worldTrackingState: Double, audioLevel: Double, blendshapes: FloatArray) {
+        buffer.put(0, if (hasFace) 1 else 0)
+        buffer.put(1, if (handsPresent) 1 else 0)
+        buffer.put(2, if (tap) 1 else 0)
+        buffer.put(3, 0)
+        buffer.putDouble(8, worldTrackingState)
+        buffer.putDouble(16, audioLevel)
+        val floats = buffer.duplicate().order(buffer.order()).asFloatBuffer()
+        for (i in 0 until CameraKit.FACE_BLENDSHAPE_COUNT) {
+            floats.put(6 + i, if (i < blendshapes.size) blendshapes[i] else 0f)
         }
     }
 }
@@ -202,6 +233,23 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         result.parse()
         return true
     }
+
+    /** Replaces any currently active lens with the one manifestJson
+     * describes, splicing its nodes into the session graph. */
+    fun activateLens(manifestJson: ByteArray): Boolean {
+        val buffer = ByteBuffer.allocateDirect(manifestJson.size)
+        buffer.put(manifestJson)
+        buffer.rewind()
+        return CameraKit.nativeActivateLens(handle, buffer, manifestJson.size) == 0
+    }
+
+    fun deactivateLens() = CameraKit.nativeDeactivateLens(handle)
+
+    /** Advances the active lens by [dtUs] of real time and applies
+     * whatever effect values its triggers/ramps changed to the beauty
+     * chain, if one is enabled. False with no active lens. */
+    fun tickLens(dtUs: Int, signals: LensSignals): Boolean =
+        CameraKit.nativeTickLens(handle, dtUs, signals.buffer) == 0
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,

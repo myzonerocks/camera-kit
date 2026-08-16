@@ -15,6 +15,10 @@ targets:
         type: folder
         buildPhase: resources
         optional: true
+      - path: ../../../lenses/reference/beauty-baseline
+        type: folder
+        buildPhase: resources
+        optional: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: kit.camera.demo

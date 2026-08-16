@@ -16,6 +16,11 @@ class FaceOverlayView(context: Context) : View(context) {
     private var hasResult = false
     private var lastSerial = 0L
 
+    /** The latest polled result and whether one has ever arrived - read
+     * by MainActivity to drive the active lens's face-present signal. */
+    val latestFaceResult: FaceResult get() = result
+    val hasFaceResult: Boolean get() = hasResult
+
     private var frameWidth = 0
     private var frameHeight = 0
     private var rotationDegrees = 0

@@ -748,6 +748,37 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
 
     const tracking_cores_android = trackingCoreModules(b, android_target, optimize, math_android);
     abi_android.addImport("face", tracking_cores_android.face);
+    const lens_manifest_android = b.createModule(.{
+        .root_source_file = b.path("core/lens/manifest.zig"),
+        .target = android_target,
+        .optimize = optimize,
+    });
+    const lens_trigger_android = b.createModule(.{
+        .root_source_file = b.path("core/lens/trigger.zig"),
+        .target = android_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "face", .module = tracking_cores_android.face }},
+    });
+    const lens_animation_android = b.createModule(.{
+        .root_source_file = b.path("core/lens/animation.zig"),
+        .target = android_target,
+        .optimize = optimize,
+    });
+    const lens_runtime_android = b.createModule(.{
+        .root_source_file = b.path("core/lens/runtime.zig"),
+        .target = android_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "graph", .module = graph_android },
+            .{ .name = "manifest", .module = lens_manifest_android },
+            .{ .name = "trigger", .module = lens_trigger_android },
+            .{ .name = "animation", .module = lens_animation_android },
+            .{ .name = "face", .module = tracking_cores_android.face },
+        },
+    });
+    abi_android.addImport("manifest", lens_manifest_android);
+    abi_android.addImport("trigger", lens_trigger_android);
+    abi_android.addImport("runtime", lens_runtime_android);
     const have_inference_stack = blk: {
         for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
             b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
@@ -2041,6 +2072,37 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
     });
     const tracking_cores_ios = trackingCoreModules(b, ios_target, optimize, math_ios);
     abi_ios.addImport("face", tracking_cores_ios.face);
+    const lens_manifest_ios = b.createModule(.{
+        .root_source_file = b.path("core/lens/manifest.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+    });
+    const lens_trigger_ios = b.createModule(.{
+        .root_source_file = b.path("core/lens/trigger.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "face", .module = tracking_cores_ios.face }},
+    });
+    const lens_animation_ios = b.createModule(.{
+        .root_source_file = b.path("core/lens/animation.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+    });
+    const lens_runtime_ios = b.createModule(.{
+        .root_source_file = b.path("core/lens/runtime.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "graph", .module = graph_ios },
+            .{ .name = "manifest", .module = lens_manifest_ios },
+            .{ .name = "trigger", .module = lens_trigger_ios },
+            .{ .name = "animation", .module = lens_animation_ios },
+            .{ .name = "face", .module = tracking_cores_ios.face },
+        },
+    });
+    abi_ios.addImport("manifest", lens_manifest_ios);
+    abi_ios.addImport("trigger", lens_trigger_ios);
+    abi_ios.addImport("runtime", lens_runtime_ios);
     const have_inference_stack = blk: {
         for ([_][]const u8{ ".vendor/litert/tflite/CMakeLists.txt", ".vendor/xnnpack/CMakeLists.txt", ".vendor/fft2d/fftsg2d.c" }) |probe| {
             b.build_root.handle.access(b.graph.io, probe, .{}) catch break :blk false;
