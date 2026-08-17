@@ -101,7 +101,13 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     const analysisHeight = Math.round((analysisWidth * video.videoHeight) / video.videoWidth);
     scratch.width = analysisWidth;
     scratch.height = analysisHeight;
-    ctx.drawImage(video, 0, 0, analysisWidth, analysisHeight);
+    if (preview.isVideoFlipped()) {
+      ctx.setTransform(1, 0, 0, -1, 0, analysisHeight);
+      ctx.drawImage(video, 0, 0, analysisWidth, analysisHeight);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    } else {
+      ctx.drawImage(video, 0, 0, analysisWidth, analysisHeight);
+    }
     const pixels = ctx.getImageData(0, 0, analysisWidth, analysisHeight);
     void link.send(pixels.data, analysisWidth, analysisHeight, Math.round(performance.now() * 1000)).then((reply) => {
       drawOverlay(reply, analysisWidth, analysisHeight);
@@ -195,6 +201,18 @@ async function run(): Promise<void> {
     },
   });
   await preview.start();
+  // Persisted across reloads: a camera that hands the browser
+  // pre-rotated frames does so every time, not just this once.
+  const flipCameraCheckbox = document.getElementById("flip-camera") as HTMLInputElement | null;
+  const flipStored = localStorage.getItem("ckweb-flip-camera") === "1";
+  if (flipCameraCheckbox) {
+    flipCameraCheckbox.checked = flipStored;
+    preview.setVideoFlip(flipStored);
+    flipCameraCheckbox.addEventListener("change", () => {
+      preview.setVideoFlip(flipCameraCheckbox.checked);
+      localStorage.setItem("ckweb-flip-camera", flipCameraCheckbox.checked ? "1" : "0");
+    });
+  }
   startTracking(preview).catch((err) => {
     (window as unknown as Record<string, unknown>).trackingError = String(err);
     console.log(`tracking unavailable: ${String(err)}`);

@@ -183,6 +183,13 @@ export class PreviewSession {
   private renderedFrames = 0;
   private cameraFrames = 0;
   private lastVideoTime = -1;
+  /// Some cameras (seen with certain external/virtual devices on macOS)
+  /// hand the browser frames pre-rotated 180 degrees - the raw decoded
+  /// video is upside down before any of this shell's own code touches
+  /// it, so no shader or texture-decode fix reaches it. This corrects
+  /// the video upload specifically, leaving every other texture (still
+  /// photos, makeup meshes, LUTs) alone.
+  private videoFlipped = false;
   state: CaptureState = "idle";
 
   constructor(
@@ -300,6 +307,17 @@ export class PreviewSession {
 
   setSmooth(amount: number): void {
     this.smoothAmount = amount;
+  }
+
+  setVideoFlip(enabled: boolean): void {
+    this.videoFlipped = enabled;
+  }
+
+  /// Tracking samples the video element directly through its own 2D
+  /// canvas, outside this class - it needs to know whether to flip too,
+  /// so landmarks come back in the same corrected space as the display.
+  isVideoFlipped(): boolean {
+    return this.videoFlipped;
   }
 
   setThinFace(amount: number): void {
@@ -826,7 +844,9 @@ export class PreviewSession {
         this.lastVideoTime = this.video.currentTime;
         this.cameraFrames += 1;
         gl.bindTexture(gl.TEXTURE_2D, this.texture);
+        if (this.videoFlipped) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.video);
+        if (this.videoFlipped) gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
         this.frameWidth = this.video.videoWidth;
         this.frameHeight = this.video.videoHeight;
       }
