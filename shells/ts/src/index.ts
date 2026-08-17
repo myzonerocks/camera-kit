@@ -450,7 +450,11 @@ export class PreviewSession {
       this.scratchCanvas.height = height;
       this.scratchCtx.drawImage(this.video, 0, 0, width, height);
       const pixels = this.scratchCtx.getImageData(0, 0, width, height);
-      this.submitRgbaFrame(pixels.data, width, height, true);
+      // Not mirrored here - the demo page's own CSS mirrors the canvas
+      // for display, so the engine keeps working in the camera's real,
+      // unmirrored coordinate space (matching tracking, which analyzes
+      // this same unmirrored buffer).
+      this.submitRgbaFrame(pixels.data, width, height, false);
     }
 
     const status = this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
