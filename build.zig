@@ -778,6 +778,121 @@ pub fn build(b: *std.Build) void {
         wasm_step.dependOn(&b.addInstallArtifact(camerakit_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
     }
 
+    // The render-capable half of the web core, real bgfx underneath
+    // instead of render_stub.zig - separate from wasm_step above (which
+    // stays as-is until the TS shell actually points at this one)
+    // rather than replacing it outright. tracking/segmentation/beauty/
+    // image/asset stay the same stubs wasm_step already uses - gpupixel
+    // still isn't ported to web, and the effects this step renders
+    // (beauty.face, beauty.reshape) need none of them.
+    const wasm_emscripten_step = b.step("wasm-emscripten", "Build the camerakit core for the web with a real bgfx renderer (needs emscripten vendors synced)");
+    {
+        const em = emscriptenToolchain(b);
+        if (em == null) {
+            wasm_emscripten_step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        } else if (shaderc_exe == null) {
+            wasm_emscripten_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        } else {
+            const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
+            const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const graph_em = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, .ReleaseSmall);
+            const render_em = b.createModule(.{
+                .root_source_file = b.path("adapters/bgfx/render.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{
+                    .{ .name = "math", .module = math_em },
+                    .{ .name = "shader_blobs", .module = shader_blobs_em },
+                },
+            });
+            render_em.addIncludePath(b.path(".vendor/bgfx/include"));
+            render_em.addIncludePath(b.path(".vendor/bx/include"));
+            render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+
+            const abi_em = b.createModule(.{
+                .root_source_file = b.path("core/abi/abi.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{
+                    .{ .name = "graph", .module = graph_em },
+                    .{ .name = "math", .module = math_em },
+                    .{ .name = "render", .module = render_em },
+                },
+            });
+            const tracking_cores_em = trackingCoreModules(b, em_target, .ReleaseSmall, math_em);
+            abi_em.addImport("face", tracking_cores_em.face);
+            abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, math_em));
+            abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
+            abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
+            const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const lens_trigger_em = b.createModule(.{
+                .root_source_file = b.path("core/lens/trigger.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
+            });
+            const lens_animation_em = b.createModule(.{ .root_source_file = b.path("core/lens/animation.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const lens_runtime_em = b.createModule(.{
+                .root_source_file = b.path("core/lens/runtime.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{
+                    .{ .name = "graph", .module = graph_em },
+                    .{ .name = "manifest", .module = lens_manifest_em },
+                    .{ .name = "trigger", .module = lens_trigger_em },
+                    .{ .name = "animation", .module = lens_animation_em },
+                    .{ .name = "face", .module = tracking_cores_em.face },
+                },
+            });
+            abi_em.addImport("manifest", lens_manifest_em);
+            abi_em.addImport("trigger", lens_trigger_em);
+            abi_em.addImport("runtime", lens_runtime_em);
+            const image_em = imageStubModule(b, em_target, .ReleaseSmall);
+            abi_em.addImport("image", image_em);
+            abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em));
+
+            const camerakit_em_obj = b.addObject(.{ .name = "camerakit_web", .root_module = abi_em });
+            const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{});
+            const link = b.addSystemCommand(&.{em.?.em_plus_plus});
+            setEmEnv(link, em.?);
+            link.addFileArg(camerakit_em_obj.getEmittedBin());
+            for (bgfx_objects.items) |obj| link.addFileArg(obj);
+            link.addArgs(&.{
+                "-sUSE_WEBGL2=1",
+                "-sMIN_WEBGL_VERSION=2",
+                "-sMAX_WEBGL_VERSION=2",
+                "-sFULL_ES3=1",
+                "-sALLOW_MEMORY_GROWTH=1",
+                // Every ck_* entry point is a real call site the TS
+                // shell reaches dynamically (no single header enumerates
+                // them the way a hand-written EXPORTED_FUNCTIONS list
+                // would need re-syncing against every time one is
+                // added) - EXPORT_ALL keeps them all reachable, the same
+                // bulk-export spirit rdynamic already gives the
+                // wasm32-freestanding build above.
+                // EXPORT_ALL alone isn't enough to actually keep these
+                // symbols in the link (verified: without LINKABLE too,
+                // every ck_* export comes back undefined) - LINKABLE is
+                // deprecated upstream but still the real requirement as
+                // of this emscripten pin.
+                "-sEXPORT_ALL=1",
+                "-sLINKABLE=1",
+                "-sMODULARIZE=1",
+                "-sEXPORT_NAME=CameraKitWebModule",
+            });
+            link.addArg("-o");
+            const js_out = link.addOutputFileArg("camerakit_web.js");
+
+            const install = b.addInstallDirectory(.{
+                .source_dir = js_out.dirname(),
+                .install_dir = .{ .custom = "wasm-emscripten" },
+                .install_subdir = "",
+            });
+            wasm_emscripten_step.dependOn(&install.step);
+        }
+    }
+
     const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
     const conformance_step = b.step("conformance", "Run a reference lens through the real ABI twice and prove bit-stable output");
     if (have_render_stack and gltf_module != null and target.result.os.tag == .macos) {
