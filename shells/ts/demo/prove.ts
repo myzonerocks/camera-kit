@@ -206,6 +206,45 @@ let makeup = "";
   await evaluate("window.resumeCamera()");
 }
 
+// Lens activation is the real conformance bar: a lens is a manifest, not a
+// param setter, so this proves the bytes-based ck_session_activate_lens
+// path end to end (parse, node graph, default params) and checks the same
+// harness/conformance.zig bar the native engine already holds itself to -
+// the same fixed input rendered twice after activation must be
+// byte-identical. beauty-baseline is the only reference lens usable here:
+// its one node type is beauty.face, which has no file-I/O dependency, so
+// it survives the has_file_io comptime gate that blocks directory-based
+// activation (and therefore any shader.pass/lut.pass node) on wasm.
+let lens = "";
+{
+  const evaluate = async (expression: string) =>
+    (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })) as {
+      result?: { value?: unknown };
+    };
+  await evaluate("window.freezeCamera()");
+  await evaluate("window.loadStillFrame('./face_frontal_b.jpg')");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const before = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  const activateOutcome = (
+    await evaluate(
+      "window.activateLens('./beauty-baseline.manifest.json').then(() => 'ok').catch((e) => 'ERR:' + e)",
+    )
+  ).result?.value as string | undefined;
+  await evaluate("window.tickLens(16000)");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const after1 = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  const after2 = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  const delta = before !== undefined && after1 !== undefined ? Math.abs(after1 - before) : -1;
+  const deterministic = after1 !== undefined && after1 === after2;
+  if (activateOutcome === "ok" && delta > 0 && deterministic) {
+    lens = `CKWEB lens: activate ${activateOutcome}, frame sum ${before} -> ${after1}, delta ${delta}, deterministic ${deterministic}`;
+  } else {
+    lens = `FAIL lens: activate ${activateOutcome}, before ${JSON.stringify(before)} after1 ${JSON.stringify(after1)} after2 ${JSON.stringify(after2)} deterministic ${deterministic}`;
+  }
+  await evaluate("window.deactivateLens()");
+  await evaluate("window.resumeCamera()");
+}
+
 // The tracking pass: wait for the worker, then one corpus portrait must
 // track and the control frame must not.
 let tracking = "";
@@ -272,6 +311,8 @@ if (
   !reshape.startsWith("FAIL") &&
   makeup &&
   !makeup.startsWith("FAIL") &&
+  lens &&
+  !lens.startsWith("FAIL") &&
   tracking &&
   !tracking.startsWith("FAIL")
 ) {
@@ -280,6 +321,7 @@ if (
   console.log(smooth);
   console.log(reshape);
   console.log(makeup);
+  console.log(lens);
   console.log(tracking);
   console.log(`status: ${statusResult.result?.value}`);
   process.exit(0);
@@ -295,6 +337,9 @@ if (reshape) {
 }
 if (makeup) {
   console.log(makeup);
+}
+if (lens) {
+  console.log(lens);
 }
 if (tracking) {
   console.log(tracking);

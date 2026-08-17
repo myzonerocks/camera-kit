@@ -211,6 +211,41 @@ export class PreviewSession {
     this.mod.ccall("ck_session_set_beauty", "number", ["number", "number", "number"], [this.session, effect, amount]);
   }
 
+  /// Activates a lens from its manifest JSON directly (ck_session_
+  /// activate_lens, not the directory-based variant) - the only
+  /// activation path this build actually supports: has_file_io is
+  /// comptime-false for every wasm target, so ck_session_activate_lens_
+  /// from_directory always reports unsupported here, and shader.pass/
+  /// lut.pass/blend.pass nodes need compiled resources a bundle
+  /// directory would provide that this shell has no way to supply yet.
+  /// A lens built entirely from beauty.* nodes (beauty-baseline, say)
+  /// activates and runs for real regardless, since those go through
+  /// applyWebBeautyChain's own embedded shaders, not a per-lens one.
+  activateLens(manifestJson: string): void {
+    const bytes = new TextEncoder().encode(manifestJson);
+    const ptr = this.mod.ccall("ck_alloc", "number", ["number"], [bytes.length]);
+    this.mod.HEAPU8.set(bytes, ptr);
+    this.mod.ccall("ck_session_activate_lens", "number", ["number", "number", "number"], [this.session, ptr, bytes.length]);
+    this.mod.ccall("ck_free", null, ["number", "number"], [ptr, bytes.length]);
+  }
+
+  deactivateLens(): void {
+    this.mod.ccall("ck_session_deactivate_lens", null, ["number"], [this.session]);
+  }
+
+  /// Advances the active lens's triggers/param ramps by dtUs. No face/
+  /// hands/tap/world/audio signal is live here - every signal reads as
+  /// false/zero, so only triggers with no `when` gate (or ones already
+  /// satisfied by a default) actually fire. Real signal wiring is
+  /// future work; this is enough to prove a lens activates and ticks
+  /// deterministically at all.
+  tickLens(dtUs: number): void {
+    const signalsPtr = this.mod.ccall("ck_alloc", "number", ["number"], [232]);
+    this.mod.HEAPU8.fill(0, signalsPtr, signalsPtr + 232);
+    this.mod.ccall("ck_session_tick_lens", "number", ["number", "number", "number"], [this.session, dtUs, signalsPtr]);
+    this.mod.ccall("ck_free", null, ["number", "number"], [signalsPtr, 232]);
+  }
+
   setVideoFlip(enabled: boolean): void {
     this.videoFlipped = enabled;
   }
