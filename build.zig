@@ -698,6 +698,15 @@ pub fn build(b: *std.Build) void {
     const wasm_bgfx_smoke_step = b.step("wasm-bgfx-smoke", "Compile+link bgfx's real GL backend for wasm32-emscripten (needs emscripten vendors synced)");
     addWasmBgfxSmokeStep(b, wasm_bgfx_smoke_step);
 
+    // Separate again from wasm-bgfx-smoke: a real, but still separate,
+    // renderer backend (BGFX_CONFIG_RENDERER_WEBGPU), spiked and proven
+    // real 2026-08-17 (DECISIONS.md's own dated addendum) - kept off
+    // addBgfxWasmObjects's shared cxx_flags/link args so the GLES-based
+    // production wasm-emscripten step below can't regress if this one's
+    // own recipe ever needs to change.
+    const wasm_webgpu_smoke_step = b.step("wasm-webgpu-smoke", "Compile+link bgfx's real WebGPU backend for wasm32-emscripten (needs emscripten vendors synced)");
+    addWasmWebgpuSmokeStep(b, wasm_webgpu_smoke_step);
+
     const wasm_emscripten_core_smoke_step = b.step("wasm-emscripten-core-smoke", "Compile+link render.zig itself for wasm32-emscripten against real bgfx (needs emscripten vendors synced)");
     addWasmEmscriptenCoreSmokeStep(b, wasm_emscripten_core_smoke_step, shaderc_exe);
 
@@ -871,7 +880,7 @@ pub fn build(b: *std.Build) void {
             abi_em.addImport("gltf", gltf_stub_em);
 
             const camerakit_em_obj = b.addObject(.{ .name = "camerakit_web", .root_module = abi_em });
-            const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{});
+            const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{}, false);
             const link = b.addSystemCommand(&.{em.?.em_plus_plus});
             setEmEnv(link, em.?);
             link.addFileArg(camerakit_em_obj.getEmittedBin());
@@ -3092,9 +3101,16 @@ fn addEmPlusPlusCompile(b: *std.Build, em: EmToolchain, src: []const u8, cxx_fla
 // bgfx, bx, bimg, and astc-encoder for wasm32-emscripten, plus whatever
 // extra_sources the caller needs compiled alongside them - every caller
 // wants the same real GL backend under it, just a different driver on
-// top.
-fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []const u8) std.ArrayList(std.Build.LazyPath) {
-    const cxx_flags = [_][]const u8{
+// top. webgpu additionally compiles in BGFX_CONFIG_RENDERER_WEBGPU
+// (real, proven 2026-08-17, DECISIONS.md's own dated addendum) - kept
+// as an explicit per-caller opt-in, not folded into the shared flags
+// unconditionally, since the matching --use-port=emdawnwebgpu link flag
+// is only added by whichever caller actually wants this backend; the
+// GLES-only production wasm-emscripten step must never regress if this
+// one caller's own needs change.
+fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []const u8, webgpu: bool) std.ArrayList(std.Build.LazyPath) {
+    var cxx_flags: std.ArrayList([]const u8) = .empty;
+    cxx_flags.appendSlice(b.allocator, &.{
         "-std=c++20",
         "-fno-strict-aliasing",
         "-fno-exceptions",
@@ -3105,7 +3121,8 @@ fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []c
         "-DBIMG_CONFIG_PARSE_HEIF=0",
         "-DBIMG_CONFIG_PARSE_EXR=0",
         "-DBX_CONFIG_DEBUG=0",
-    };
+    }) catch @panic("oom");
+    if (webgpu) cxx_flags.append(b.allocator, "-DBGFX_CONFIG_RENDERER_WEBGPU=1") catch @panic("oom");
     const include_dirs = [_][]const u8{
         ".vendor/bx/include",
         ".vendor/bx/3rdparty",
@@ -3133,7 +3150,7 @@ fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []c
 
     var objects: std.ArrayList(std.Build.LazyPath) = .empty;
     for (sources.items) |src| {
-        objects.append(b.allocator, addEmPlusPlusCompile(b, em, src, &cxx_flags, &include_dirs)) catch @panic("oom");
+        objects.append(b.allocator, addEmPlusPlusCompile(b, em, src, cxx_flags.items, &include_dirs)) catch @panic("oom");
     }
     return objects;
 }
@@ -3147,7 +3164,7 @@ fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
         step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
         return;
     };
-    const objects = addBgfxWasmObjects(b, em, &.{"adapters/bgfx/wasm_bgfx_smoke_driver.cpp"});
+    const objects = addBgfxWasmObjects(b, em, &.{"adapters/bgfx/wasm_bgfx_smoke_driver.cpp"}, false);
 
     const link = b.addSystemCommand(&.{em.em_plus_plus});
     setEmEnv(link, em);
@@ -3159,6 +3176,37 @@ fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
     const install = b.addInstallDirectory(.{
         .source_dir = js_out.dirname(),
         .install_dir = .{ .custom = "wasm-bgfx-smoke" },
+        .install_subdir = "",
+    });
+    step.dependOn(&install.step);
+}
+
+// Compiles bgfx with BGFX_CONFIG_RENDERER_WEBGPU=1 and links
+// wasm_webgpu_smoke_driver.cpp against it via em++'s emdawnwebgpu port -
+// real, proven 2026-08-17 (DECISIONS.md's own dated addendum): upstream
+// bgfx leaves Emscripten out of this define's default-enabled platforms,
+// and this project's pinned Emscripten dropped -sUSE_WEBGPU=1 entirely
+// in favor of this port. Kept fully separate from
+// addWasmBgfxSmokeStep's own GLES recipe - two different bgfx renderer
+// backends, two different drivers, sharing only addBgfxWasmObjects's
+// compile machinery.
+fn addWasmWebgpuSmokeStep(b: *std.Build, step: *std.Build.Step) void {
+    const em = emscriptenToolchain(b) orelse {
+        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        return;
+    };
+    const objects = addBgfxWasmObjects(b, em, &.{"adapters/bgfx/wasm_webgpu_smoke_driver.cpp"}, true);
+
+    const link = b.addSystemCommand(&.{em.em_plus_plus});
+    setEmEnv(link, em);
+    for (objects.items) |obj| link.addFileArg(obj);
+    link.addArgs(&.{ "-sALLOW_MEMORY_GROWTH=1", "--use-port=emdawnwebgpu" });
+    link.addArg("-o");
+    const js_out = link.addOutputFileArg("wasm_webgpu_smoke.js");
+
+    const install = b.addInstallDirectory(.{
+        .source_dir = js_out.dirname(),
+        .install_dir = .{ .custom = "wasm-webgpu-smoke" },
         .install_subdir = "",
     });
     step.dependOn(&install.step);
@@ -3213,7 +3261,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     driver_em.link_libc = true;
     const zig_obj = b.addObject(.{ .name = "wasm_emscripten_core_smoke", .root_module = driver_em });
 
-    const objects = addBgfxWasmObjects(b, em, &.{});
+    const objects = addBgfxWasmObjects(b, em, &.{}, false);
     const link = b.addSystemCommand(&.{em.em_plus_plus});
     setEmEnv(link, em);
     link.addFileArg(zig_obj.getEmittedBin());
