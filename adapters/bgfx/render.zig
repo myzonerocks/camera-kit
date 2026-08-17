@@ -58,6 +58,13 @@ const UploadCache = struct {
     height: u16,
 };
 
+const RgbaUploadCache = struct {
+    texture: c.bgfx_texture_handle_t,
+    width: u16,
+    height: u16,
+    format: u32,
+};
+
 pub const PreviewFrame = union(enum) {
     bgra: struct {
         texture: c.bgfx_texture_handle_t,
@@ -131,6 +138,7 @@ pub const Renderer = struct {
     default_mask_texture: c.bgfx_texture_handle_t,
     yuv_uniform: c.bgfx_uniform_handle_t,
     upload_cache: ?UploadCache = null,
+    rgba_upload_cache: ?RgbaUploadCache = null,
 
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         var bgfx_init: c.bgfx_init_t = undefined;
@@ -400,6 +408,9 @@ pub const Renderer = struct {
         if (r.upload_cache) |cache| {
             c.bgfx_destroy_texture(cache.y);
             c.bgfx_destroy_texture(cache.uv);
+        }
+        if (r.rgba_upload_cache) |cache| {
+            c.bgfx_destroy_texture(cache.texture);
         }
         c.bgfx_destroy_texture(r.default_mask_texture);
         c.bgfx_destroy_uniform(r.tex_color);
@@ -789,6 +800,41 @@ pub const Renderer = struct {
         c.bgfx_update_texture_2d(cache.uv, 0, 0, 0, 0, width / 2, height / 2, uv_mem, std.math.maxInt(u16));
 
         return .{ .y = cache.y, .uv = cache.uv };
+    }
+
+    /// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a
+    /// browser's own canvas/video frame byte buffer, say, with no
+    /// native GPU handle behind it for wrapExternalTexture's zero-copy
+    /// path to use. Same cached-and-updated shape as uploadNv12 above,
+    /// not createStaticTexture's one-shot immutable upload - a live
+    /// camera frame changes every call, the same texture reused rather
+    /// than recreated each time.
+    pub fn uploadRgba(r: *Renderer, width: u16, height: u16, format: u32, rgba: [*]const u8, stride: u32) !c.bgfx_texture_handle_t {
+        if (r.rgba_upload_cache) |cache| {
+            if (cache.width != width or cache.height != height or cache.format != format) {
+                c.bgfx_destroy_texture(cache.texture);
+                r.rgba_upload_cache = null;
+            }
+        }
+        if (r.rgba_upload_cache == null) {
+            const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+            r.rgba_upload_cache = .{
+                .texture = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0),
+                .width = width,
+                .height = height,
+                .format = format,
+            };
+        }
+        const cache = r.rgba_upload_cache.?;
+
+        const mem = c.bgfx_alloc(@as(u32, width) * height * 4) orelse return error.OutOfMemory;
+        const dst: [*]u8 = mem.*.data;
+        for (0..height) |row| {
+            @memcpy(dst[row * width * 4 ..][0 .. width * 4], rgba[row * stride ..][0 .. width * 4]);
+        }
+        c.bgfx_update_texture_2d(cache.texture, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
+
+        return cache.texture;
     }
 
     /// Zero-copy submission of a camera hardware buffer: the adapter

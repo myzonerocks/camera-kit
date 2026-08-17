@@ -1044,6 +1044,26 @@ pub export fn ck_session_submit_frame_copy(session: ?*Session, desc: ?*const Fra
     return .ok;
 }
 
+/// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a canvas or
+/// video element's own byte buffer, most likely, with no native GPU
+/// handle behind it the way ck_session_submit_frame's zero-copy path
+/// needs. Same shape as ck_session_submit_frame_copy above, just a
+/// single interleaved plane instead of NV12's two.
+pub export fn ck_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const rgba_ptr = rgba orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+
+    releaseCurrentFrame(s);
+    const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
+    const texture = r.uploadRgba(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride) catch return .out_of_memory;
+    s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .bgra = .{ .texture = texture } } };
+    s.copied_frames += 1;
+    return .ok;
+}
+
 /// Zero-copy camera submission for platforms delivering hardware buffers.
 /// The render adapter converts on the gpu; a status other than ok means the
 /// caller falls back to the declared copy path for this stream.

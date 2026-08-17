@@ -150,6 +150,16 @@ pub const Renderer = struct {
         return error.RendererUnavailable;
     }
 
+    pub fn uploadRgba(r: *Renderer, width: u16, height: u16, format: u32, rgba: [*]const u8, stride: u32) !TextureHandle {
+        _ = r;
+        _ = width;
+        _ = height;
+        _ = format;
+        _ = rgba;
+        _ = stride;
+        return error.RendererUnavailable;
+    }
+
     pub fn submitHardwareBuffer(r: *Renderer, hardware_buffer: *anyopaque, width: u32, height: u32, conversion: math.color.Conversion) !TextureHandle {
         _ = r;
         _ = hardware_buffer;
