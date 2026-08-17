@@ -120,6 +120,16 @@ export interface SessionEvents {
 // wasm GL context to WebGPU/WebGL2 the way native platforms can.
 const WHITEN_LUT_NAMES = ["lookup_gray", "lookup_origin", "lookup_skin", "lookup_light"] as const;
 
+/// Decodes a fetched blob for texImage2D. Only <video> elements get
+/// auto-flipped to visual top-down on upload here (confirmed by direct
+/// render capture: <img> and a 2D-canvas-drawn copy both came out
+/// upside down against this shell's own top=0 v_uv convention, exactly
+/// like createImageBitmap's default) - flipY makes createImageBitmap
+/// match what <video> already does.
+async function loadImageElement(blob: Blob): Promise<ImageBitmap> {
+  return createImageBitmap(blob, { imageOrientation: "flipY" });
+}
+
 export class PreviewSession {
   private stream: MediaStream | null = null;
   /// The camera element frames render from; analysis passes sample it too.
@@ -325,10 +335,10 @@ export class PreviewSession {
       ["mouth.png", "blusher.png"].map((name) =>
         fetch(new URL(name, baseUrl))
           .then((r) => r.blob())
-          .then((b) => createImageBitmap(b, { imageOrientation: "flipY" })),
+          .then((b) => loadImageElement(b)),
       ),
     );
-    const upload = (bitmap: ImageBitmap): WebGLTexture => {
+    const upload = (image: ImageBitmap): WebGLTexture => {
       const tex = gl.createTexture();
       if (!tex) throw new Error("makeup texture create failed");
       gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -336,7 +346,7 @@ export class PreviewSession {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
       return tex;
     };
     this.lipstickTexture = upload(mouth);
@@ -349,14 +359,14 @@ export class PreviewSession {
   /// resolves.
   async loadWhitenLuts(lutBaseUrl: string | URL): Promise<void> {
     const gl = this.gl;
-    const bitmaps = await Promise.all(
+    const images = await Promise.all(
       WHITEN_LUT_NAMES.map((name) =>
         fetch(new URL(`${name}.png`, lutBaseUrl))
           .then((r) => r.blob())
-          .then((b) => createImageBitmap(b, { imageOrientation: "flipY" })),
+          .then((b) => loadImageElement(b)),
       ),
     );
-    this.whitenLuts = bitmaps.map((bitmap) => {
+    this.whitenLuts = images.map((image) => {
       const tex = gl.createTexture();
       if (!tex) throw new Error("lut texture create failed");
       gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -364,7 +374,7 @@ export class PreviewSession {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
       return tex;
     });
 
@@ -763,12 +773,12 @@ export class PreviewSession {
   /// pattern; freezeCamera() first stops tick() from re-uploading over it
   /// on the next frame.
   async loadStillFrame(url: string): Promise<void> {
-    const bitmap = await createImageBitmap(await (await fetch(url)).blob(), { imageOrientation: "flipY" });
+    const image = await loadImageElement(await (await fetch(url)).blob());
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
-    this.frameWidth = bitmap.width;
-    this.frameHeight = bitmap.height;
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    this.frameWidth = image.width;
+    this.frameHeight = image.height;
   }
 
   async start(): Promise<void> {
