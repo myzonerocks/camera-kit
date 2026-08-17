@@ -9,6 +9,11 @@ const math = @import("math");
 pub const invalid_handle: u16 = std.math.maxInt(u16);
 
 pub const TextureHandle = struct { idx: u16 = invalid_handle };
+pub const VertexBufferHandle = struct { idx: u16 = invalid_handle };
+
+/// fs_beauty_reshape.sc's own u_facePoints packing - mirrored here so
+/// abi.zig's contour slicing compiles identically against the stub.
+pub const face_point_vec4_count = 53;
 
 // Format constants mirrored so the export layer compiles identically
 // against the stub and the real binding.
@@ -139,6 +144,60 @@ pub const Renderer = struct {
         _ = mask_texture;
     }
 
+    pub fn submitBlurPass(r: *Renderer, view_id: u8, input_texture: TextureHandle, step: [2]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = step;
+    }
+
+    pub fn submitBeautyFace(r: *Renderer, view_id: u8, input_texture: TextureHandle, mean_texture: TextureHandle, lookup_gray: TextureHandle, lookup_origin: TextureHandle, lookup_skin: TextureHandle, lookup_custom: TextureHandle, smooth_amount: f32, whiten_amount: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = mean_texture;
+        _ = lookup_gray;
+        _ = lookup_origin;
+        _ = lookup_skin;
+        _ = lookup_custom;
+        _ = smooth_amount;
+        _ = whiten_amount;
+    }
+
+    pub fn submitBeautyReshape(r: *Renderer, view_id: u8, input_texture: TextureHandle, face_points: *const [face_point_vec4_count * 4]f32, aspect_ratio: f32, thin_face_amount: f32, big_eye_amount: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = face_points;
+        _ = aspect_ratio;
+        _ = thin_face_amount;
+        _ = big_eye_amount;
+    }
+
+    // 111 tracked points, two floats each - face_mesh.canonical_uv.len
+    // in the real module, mirrored as a literal here rather than
+    // importing face_mesh into a stub that otherwise has zero
+    // dependencies of its own.
+    pub fn submitMakeup(r: *Renderer, view_id: u8, background_texture: TextureHandle, makeup_texture: TextureHandle, uv_buffer: VertexBufferHandle, positions: *const [222]f32, intensity: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = background_texture;
+        _ = makeup_texture;
+        _ = uv_buffer;
+        _ = positions;
+        _ = intensity;
+    }
+
+    pub fn makeupLipstickUvBuffer(r: *const Renderer) VertexBufferHandle {
+        _ = r;
+        return .{};
+    }
+
+    pub fn makeupBlushUvBuffer(r: *const Renderer) VertexBufferHandle {
+        _ = r;
+        return .{};
+    }
+
     pub fn uploadNv12(r: *Renderer, width: u16, height: u16, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) !Nv12Textures {
         _ = r;
         _ = width;
@@ -197,6 +256,22 @@ pub const Renderer = struct {
     }
 
     pub fn loadBlendProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadBlurProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadBeautyFaceProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadBeautyReshapeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadMakeupProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 
