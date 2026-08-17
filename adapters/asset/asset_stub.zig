@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const image = @import("image");
+const gltf = @import("gltf");
 
 pub const CreateError = error{Unsupported};
 
@@ -36,7 +37,10 @@ fn StubLoader(comptime Result: type) type {
 }
 
 pub const ImageLoader = StubLoader(image.Image);
-/// A .glb model, refused for the same reason as ImageLoader above - no
-/// gltf dependency needed here at all, since every entry point returns
-/// error.Unsupported before ever touching Result's actual shape.
-pub const ModelLoader = StubLoader(struct {});
+/// A .glb model, refused for the same reason as ImageLoader above -
+/// still needs the real Result shape (gltf.DecodedModel, the same stub
+/// type the real asset.zig's own ModelLoader uses) even though take()
+/// never actually returns one: callers that pattern-match a successful
+/// take() (pollModelLoaders in core/abi/abi.zig) still type-check that
+/// branch's body against Result's real fields.
+pub const ModelLoader = StubLoader(gltf.DecodedModel);
