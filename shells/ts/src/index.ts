@@ -60,15 +60,34 @@ type EngineModuleFactory = (overrides?: Record<string, unknown>) => Promise<Engi
 /// involved at all - just plain bytes handed to the engine's own
 /// texture upload, which owns its own orientation convention entirely
 /// separately from WebGL's.
-async function decodeImageRgba(blob: Blob): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
+/// fit, when given, downscales (never upscales) so the decoded frame
+/// fits within maxWidth/maxHeight - LUT and makeup textures pass
+/// nothing and decode at native resolution; loadStillFrame passes the
+/// canvas's own size, since a corpus photo can be far larger than a
+/// real camera frame ever would be. The composite chain sizes every
+/// offscreen target and the final swap-chain view rect off the
+/// submitted frame's own dimensions, so a frame wider or taller than
+/// the actual WebGL drawing buffer gets silently clipped by the GPU to
+/// whatever corner overlaps it - real, found via a still photo (2400x
+/// 3000) submitted straight through to a 1280x720 canvas, where only
+/// the top-left ~13% ended up visible and every landmark-driven effect
+/// (thin-face, big-eye, lipstick, blush) happened to warp a region
+/// entirely outside that sliver, reading back as no change at all.
+async function decodeImageRgba(
+  blob: Blob,
+  fit?: { maxWidth: number; maxHeight: number },
+): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
   const bitmap = await createImageBitmap(blob);
+  const scale = fit ? Math.min(1, fit.maxWidth / bitmap.width, fit.maxHeight / bitmap.height) : 1;
+  const width = Math.round(bitmap.width * scale);
+  const height = Math.round(bitmap.height * scale);
   const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext("2d")!;
-  ctx.drawImage(bitmap, 0, 0);
-  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  return { data: image.data, width: canvas.width, height: canvas.height };
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  const image = ctx.getImageData(0, 0, width, height);
+  return { data: image.data, width, height };
 }
 
 export class PreviewSession {
@@ -338,7 +357,10 @@ export class PreviewSession {
   /// tooling only (skin-smoothing's content-adaptive blend needs a real
   /// face to prove, not Chrome's fake capture device's own pattern).
   async loadStillFrame(url: string): Promise<void> {
-    const image = await decodeImageRgba(await (await fetch(url)).blob());
+    const image = await decodeImageRgba(await (await fetch(url)).blob(), {
+      maxWidth: this.canvas.width,
+      maxHeight: this.canvas.height,
+    });
     // Not mirrored: a loaded test photo isn't a front camera, and
     // setLandmarksFromStill tracks this same unmirrored image - mirroring
     // only the background here would leave the tracked landmarks
