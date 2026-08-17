@@ -698,17 +698,21 @@ pub fn build(b: *std.Build) void {
     const wasm_bgfx_smoke_step = b.step("wasm-bgfx-smoke", "Compile+link bgfx's real GL backend for wasm32-emscripten (needs emscripten vendors synced)");
     addWasmBgfxSmokeStep(b, wasm_bgfx_smoke_step);
 
-    // Separate again from wasm-bgfx-smoke: a real, but still separate,
-    // renderer backend (BGFX_CONFIG_RENDERER_WEBGPU), spiked and proven
-    // real 2026-08-17 (DECISIONS.md's own dated addendum) - kept off
-    // addBgfxWasmObjects's shared cxx_flags/link args so the GLES-based
-    // production wasm-emscripten step below can't regress if this one's
-    // own recipe ever needs to change.
+    // Separate again from wasm-bgfx-smoke: a separate renderer backend
+    // (BGFX_CONFIG_RENDERER_WEBGPU), kept off addBgfxWasmObjects's
+    // shared cxx_flags/link args so the GLES-based production
+    // wasm-emscripten step below can't regress if this one's own
+    // recipe ever needs to change.
     const wasm_webgpu_smoke_step = b.step("wasm-webgpu-smoke", "Compile+link bgfx's real WebGPU backend for wasm32-emscripten (needs emscripten vendors synced)");
     addWasmWebgpuSmokeStep(b, wasm_webgpu_smoke_step);
 
     const wasm_emscripten_core_smoke_step = b.step("wasm-emscripten-core-smoke", "Compile+link render.zig itself for wasm32-emscripten against real bgfx (needs emscripten vendors synced)");
-    addWasmEmscriptenCoreSmokeStep(b, wasm_emscripten_core_smoke_step, shaderc_exe);
+    addWasmEmscriptenCoreSmokeStep(b, wasm_emscripten_core_smoke_step, shaderc_exe, false);
+    // The decisive end-to-end WGSL/WebGPU proof target: same render.zig,
+    // same shader toolchain, bgfx compiled with WebGPU + Asyncify - real
+    // composited draw through ck_core_smoke_render_frame, not just init.
+    const wasm_emscripten_core_smoke_webgpu_step = b.step("wasm-emscripten-core-smoke-webgpu", "Compile+link render.zig for wasm32-emscripten against real bgfx WebGPU, render one real composited frame (needs emscripten vendors synced)");
+    addWasmEmscriptenCoreSmokeStep(b, wasm_emscripten_core_smoke_webgpu_step, shaderc_exe, true);
 
     // The web core: the same export layer compiled to wasm32 with every ck_
     // symbol visible to the embedder.
@@ -792,155 +796,18 @@ pub fn build(b: *std.Build) void {
     // image/asset stay the same stubs wasm_step already uses - gpupixel
     // still isn't ported to web, and the effects this step renders
     // (beauty.face, beauty.reshape) need none of them.
+    //
+    // Two separate artifacts, not one build with a runtime toggle:
+    // -sASYNCIFY=1 (required for WebGPU's async adapter/device request)
+    // instruments the whole per-frame render/submit path, not just
+    // init, so a WebGL2-only user shouldn't pay for it. wasm-emscripten
+    // below is unchanged; wasm-emscripten-webgpu is the new artifact
+    // the TS shell fetches only after confirming a
+    // real WebGPU adapter.
     const wasm_emscripten_step = b.step("wasm-emscripten", "Build the camerakit core for the web with a real bgfx renderer (needs emscripten vendors synced)");
-    {
-        const em = emscriptenToolchain(b);
-        if (em == null) {
-            wasm_emscripten_step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
-        } else if (shaderc_exe == null) {
-            wasm_emscripten_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
-        } else {
-            const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
-            const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
-            const graph_em = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = em_target, .optimize = .ReleaseSmall });
-            const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, .ReleaseSmall);
-            const face_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
-            const render_em = b.createModule(.{
-                .root_source_file = b.path("adapters/bgfx/render.zig"),
-                .target = em_target,
-                .optimize = .ReleaseSmall,
-                .imports = &.{
-                    .{ .name = "math", .module = math_em },
-                    .{ .name = "shader_blobs", .module = shader_blobs_em },
-                    .{ .name = "face_mesh", .module = face_mesh_em },
-                },
-            });
-            render_em.addIncludePath(b.path(".vendor/bgfx/include"));
-            render_em.addIncludePath(b.path(".vendor/bx/include"));
-            render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
-
-            const abi_em = b.createModule(.{
-                .root_source_file = b.path("core/abi/abi.zig"),
-                .target = em_target,
-                .optimize = .ReleaseSmall,
-                .imports = &.{
-                    .{ .name = "graph", .module = graph_em },
-                    .{ .name = "math", .module = math_em },
-                    .{ .name = "render", .module = render_em },
-                },
-            });
-            // abiAllocator()'s std.heap.c_allocator branch on web needs
-            // real libc linkage - symbol resolution happens later at
-            // the em++ link step regardless, same as render_em's own
-            // sysroot include path below.
-            abi_em.link_libc = true;
-            const tracking_cores_em = trackingCoreModules(b, em_target, .ReleaseSmall, math_em);
-            abi_em.addImport("face", tracking_cores_em.face);
-            abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, math_em));
-            abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
-            abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
-            // Web's own beauty.reshape dispatch needs the 106-point
-            // contour directly (no gpupixel bridge to hand raw
-            // landmarks to on this target) - the same module the real
-            // beauty adapter already reduces tracked landmarks through.
-            const face106_em = b.createModule(.{
-                .root_source_file = b.path("core/tracking/face106.zig"),
-                .target = em_target,
-                .optimize = .ReleaseSmall,
-                .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
-            });
-            abi_em.addImport("face106", face106_em);
-            const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = .ReleaseSmall });
-            const lens_trigger_em = b.createModule(.{
-                .root_source_file = b.path("core/lens/trigger.zig"),
-                .target = em_target,
-                .optimize = .ReleaseSmall,
-                .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
-            });
-            const lens_animation_em = b.createModule(.{ .root_source_file = b.path("core/lens/animation.zig"), .target = em_target, .optimize = .ReleaseSmall });
-            const lens_runtime_em = b.createModule(.{
-                .root_source_file = b.path("core/lens/runtime.zig"),
-                .target = em_target,
-                .optimize = .ReleaseSmall,
-                .imports = &.{
-                    .{ .name = "graph", .module = graph_em },
-                    .{ .name = "manifest", .module = lens_manifest_em },
-                    .{ .name = "trigger", .module = lens_trigger_em },
-                    .{ .name = "animation", .module = lens_animation_em },
-                    .{ .name = "face", .module = tracking_cores_em.face },
-                },
-            });
-            abi_em.addImport("manifest", lens_manifest_em);
-            abi_em.addImport("trigger", lens_trigger_em);
-            abi_em.addImport("runtime", lens_runtime_em);
-            const image_em = imageStubModule(b, em_target, .ReleaseSmall);
-            abi_em.addImport("image", image_em);
-            const gltf_stub_em = gltfStubModule(b, em_target, .ReleaseSmall, math_em);
-            abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
-            abi_em.addImport("gltf", gltf_stub_em);
-
-            const camerakit_em_obj = b.addObject(.{ .name = "camerakit_web", .root_module = abi_em });
-            const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{}, false);
-            const link = b.addSystemCommand(&.{em.?.em_plus_plus});
-            setEmEnv(link, em.?);
-            link.addFileArg(camerakit_em_obj.getEmittedBin());
-            for (bgfx_objects.items) |obj| link.addFileArg(obj);
-            link.addArgs(&.{
-                "-sUSE_WEBGL2=1",
-                "-sMIN_WEBGL_VERSION=2",
-                "-sMAX_WEBGL_VERSION=2",
-                "-sFULL_ES3=1",
-                "-sALLOW_MEMORY_GROWTH=1",
-                // 256MB up front. 64MB (comfortably past what session/
-                // engine creation and a frame or two of textures need)
-                // was enough until the ts shell started submitting real
-                // RGBA frames through ck_session_submit_frame_rgba_copy
-                // - a single still test photo at 2400x3000 is 28.8MB by
-                // itself, on top of live 1280x720 camera frames, LUT/
-                // makeup textures, and bgfx's own state. Raised as a
-                // precaution while chasing a real readback bug that
-                // turned out to be unrelated (a stale bgfx view-target
-                // binding, fixed at its actual source in abi.zig) -
-                // kept anyway since a still-photo-sized upload genuinely
-                // is close enough to the old budget to be worth the
-                // headroom.
-                "-sINITIAL_MEMORY=268435456",
-                // Every ck_* entry point is a real call site the TS
-                // shell reaches dynamically (no single header enumerates
-                // them the way a hand-written EXPORTED_FUNCTIONS list
-                // would need re-syncing against every time one is
-                // added) - EXPORT_ALL keeps them all reachable, the same
-                // bulk-export spirit rdynamic already gives the
-                // wasm32-freestanding build above.
-                // EXPORT_ALL alone isn't enough to actually keep these
-                // symbols in the link (verified: without LINKABLE too,
-                // every ck_* export comes back undefined) - LINKABLE is
-                // deprecated upstream but still the real requirement as
-                // of this emscripten pin.
-                "-sEXPORT_ALL=1",
-                "-sLINKABLE=1",
-                "-sMODULARIZE=1",
-                "-sEXPORT_NAME=CameraKitWebModule",
-                "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,stringToNewUTF8,UTF8ToString,getValue,setValue",
-                // A real ES module (import CameraKitWebModule from
-                // "./camerakit_web.js") rather than a plain-global
-                // factory function a <script> tag would have to expose -
-                // the ts shell's whole build (bun, ESM throughout)
-                // already assumes every dependency is import-able.
-                "-sEXPORT_ES6=1",
-                "-sUSE_ES6_IMPORT_META=1",
-            });
-            link.addArg("-o");
-            const js_out = link.addOutputFileArg("camerakit_web.js");
-
-            const install = b.addInstallDirectory(.{
-                .source_dir = js_out.dirname(),
-                .install_dir = .{ .custom = "wasm-emscripten" },
-                .install_subdir = "",
-            });
-            wasm_emscripten_step.dependOn(&install.step);
-        }
-    }
+    addWasmEmscriptenStep(b, wasm_emscripten_step, shaderc_exe, false);
+    const wasm_emscripten_webgpu_step = b.step("wasm-emscripten-webgpu", "Build the camerakit core for the web with bgfx's real WebGPU renderer + Asyncify (needs emscripten vendors synced)");
+    addWasmEmscriptenStep(b, wasm_emscripten_webgpu_step, shaderc_exe, true);
 
     const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
     const conformance_step = b.step("conformance", "Run a reference lens through the real ABI twice and prove bit-stable output");
@@ -2954,6 +2821,51 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     }
     const spirv_cross_lib = b.addLibrary(.{ .name = "spirv-cross", .linkage = .static, .root_module = spirv_cross_module });
 
+    // Google's Tint (SPIR-V -> WGSL only; every other reader/writer this
+    // library can do is off). shaderc.h's own SHADERC_CONFIG_HAS_TINT
+    // guard auto-detects <tint/api/tint.h> on the include path, so
+    // linking this in is the only integration work needed. Source is
+    // already vendored under bgfx's own 3rdparty/dawn (file globs and
+    // defines mirror bgfx's own shaderc.lua); protobuf/abseil-cpp,
+    // which that script lists as include dirs, aren't vendored here and
+    // aren't referenced by the utils/lang-core/lang-spirv/lang-wgsl/api
+    // subset this build actually compiles. spirv-tools' own
+    // include/generated (core_tables_header.inc and friends) is added
+    // here too - already vendored, just not on bgfx's own tint include
+    // list.
+    const tint_dir = bgfx_dir ++ "/3rdparty/dawn";
+    const tint_module = b.createModule(.{ .target = target, .optimize = opt });
+    tint_module.link_libcpp = true;
+    for ([_][]const u8{ tint_dir, tint_dir ++ "/src/tint", spirv_tools, spirv_tools ++ "/include", spirv_tools ++ "/include/generated", spirv_headers ++ "/include" }) |dir| {
+        tint_module.addIncludePath(b.path(dir));
+    }
+    tint_module.addCMacro("TINT_BUILD_GLSL_WRITER", "0");
+    tint_module.addCMacro("TINT_BUILD_HLSL_WRITER", "0");
+    tint_module.addCMacro("TINT_BUILD_MSL_WRITER", "0");
+    tint_module.addCMacro("TINT_BUILD_NULL_WRITER", "0");
+    tint_module.addCMacro("TINT_BUILD_SPV_READER", "1");
+    tint_module.addCMacro("TINT_BUILD_SPV_WRITER", "0");
+    tint_module.addCMacro("TINT_BUILD_WGSL_READER", "0");
+    tint_module.addCMacro("TINT_BUILD_WGSL_WRITER", "1");
+    tint_module.addCMacro("TINT_BUILD_IS_LINUX", if (target.result.os.tag == .linux) "1" else "0");
+    tint_module.addCMacro("TINT_BUILD_IS_MAC", if (target.result.os.tag == .macos) "1" else "0");
+    tint_module.addCMacro("TINT_BUILD_IS_WIN", if (target.result.os.tag == .windows) "1" else "0");
+    tint_module.addCMacro("TINT_ENABLE_IR_VALIDATION", "0");
+    var tint_sources: std.ArrayList([]const u8) = .empty;
+    const tint_excludes = [_][]const u8{ "_test.cc", "_bench.cc", "fuzz" };
+    for ([_][]const u8{ "src/tint/utils", "src/tint/lang/core", "src/tint/lang/spirv", "src/tint/lang/wgsl", "src/tint/api" }) |sub| {
+        listFilesRecursive(b, b.fmt("{s}/{s}", .{ tint_dir, sub }), ".cc", &tint_excludes, &tint_sources);
+    }
+    std.mem.sort([]const u8, tint_sources.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    for (tint_sources.items) |file| {
+        tint_module.addCSourceFile(.{ .file = b.path(file), .flags = &cxx17 });
+    }
+    const tint_lib = b.addLibrary(.{ .name = "tint", .linkage = .static, .root_module = tint_module });
+
     const glslang_module = b.createModule(.{ .target = target, .optimize = opt });
     glslang_module.link_libcpp = true;
     glslang_module.addCMacro("ENABLE_OPT", "1");
@@ -3006,6 +2918,12 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
         spirv_cross,
         spirv_cross ++ "/include",
         spirv_headers ++ "/include",
+        tint_dir,
+        // shaderc_wgsl.cpp includes the public <tint/api/tint.h>, which
+        // resolves against src/ (tint/api/tint.h = src/tint/api/tint.h)
+        // - different from Tint's own internal files, which use paths
+        // relative to src/tint/ (the tint_module build above).
+        tint_dir ++ "/src",
     }) |dir| {
         shaderc_module.addIncludePath(b.path(dir));
     }
@@ -3040,6 +2958,7 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     shaderc_module.linkLibrary(glslopt_lib);
     shaderc_module.linkLibrary(spirv_opt_lib);
     shaderc_module.linkLibrary(spirv_cross_lib);
+    shaderc_module.linkLibrary(tint_lib);
     step.dependOn(&b.addInstallArtifact(shaderc_exe, .{}).step);
     return shaderc_exe;
 }
@@ -3101,13 +3020,11 @@ fn addEmPlusPlusCompile(b: *std.Build, em: EmToolchain, src: []const u8, cxx_fla
 // bgfx, bx, bimg, and astc-encoder for wasm32-emscripten, plus whatever
 // extra_sources the caller needs compiled alongside them - every caller
 // wants the same real GL backend under it, just a different driver on
-// top. webgpu additionally compiles in BGFX_CONFIG_RENDERER_WEBGPU
-// (real, proven 2026-08-17, DECISIONS.md's own dated addendum) - kept
-// as an explicit per-caller opt-in, not folded into the shared flags
-// unconditionally, since the matching --use-port=emdawnwebgpu link flag
-// is only added by whichever caller actually wants this backend; the
-// GLES-only production wasm-emscripten step must never regress if this
-// one caller's own needs change.
+// top. webgpu additionally compiles in BGFX_CONFIG_RENDERER_WEBGPU, an
+// explicit per-caller opt-in rather than a shared default, since the
+// matching --use-port=emdawnwebgpu link flag is only added by whichever
+// caller wants this backend; the GLES-only production wasm-emscripten
+// step must never regress if this one caller's own needs change.
 fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []const u8, webgpu: bool) std.ArrayList(std.Build.LazyPath) {
     var cxx_flags: std.ArrayList([]const u8) = .empty;
     cxx_flags.appendSlice(b.allocator, &.{
@@ -3155,6 +3072,164 @@ fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []c
     return objects;
 }
 
+// The real web core (abi.zig + render.zig, real bgfx underneath, not
+// render_stub.zig), built and linked into one wasm-emscripten module.
+// Shared by both the WebGL2 (wasm-emscripten) and WebGPU
+// (wasm-emscripten-webgpu) artifacts - identical Zig module graph and
+// shader toolchain either way, differing only in which bgfx renderer
+// backend gets compiled into the C++ objects (addBgfxWasmObjects's own
+// `webgpu` flag) and the final em++ link flags. See the dual-artifact
+// rationale at this function's call site in the top-level build graph.
+fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*std.Build.Step.Compile, webgpu: bool) void {
+    const em = emscriptenToolchain(b);
+    if (em == null) {
+        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        return;
+    }
+    if (shaderc_exe == null) {
+        step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        return;
+    }
+    const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
+    const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const graph_em = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, .ReleaseSmall);
+    const face_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const render_em = b.createModule(.{
+        .root_source_file = b.path("adapters/bgfx/render.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "math", .module = math_em },
+            .{ .name = "shader_blobs", .module = shader_blobs_em },
+            .{ .name = "face_mesh", .module = face_mesh_em },
+        },
+    });
+    render_em.addIncludePath(b.path(".vendor/bgfx/include"));
+    render_em.addIncludePath(b.path(".vendor/bx/include"));
+    render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+
+    const abi_em = b.createModule(.{
+        .root_source_file = b.path("core/abi/abi.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "graph", .module = graph_em },
+            .{ .name = "math", .module = math_em },
+            .{ .name = "render", .module = render_em },
+        },
+    });
+    // abiAllocator()'s std.heap.c_allocator branch on web needs
+    // real libc linkage - symbol resolution happens later at
+    // the em++ link step regardless, same as render_em's own
+    // sysroot include path below.
+    abi_em.link_libc = true;
+    const tracking_cores_em = trackingCoreModules(b, em_target, .ReleaseSmall, math_em);
+    abi_em.addImport("face", tracking_cores_em.face);
+    abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, math_em));
+    abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
+    abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
+    // Web's own beauty.reshape dispatch needs the 106-point
+    // contour directly (no gpupixel bridge to hand raw
+    // landmarks to on this target) - the same module the real
+    // beauty adapter already reduces tracked landmarks through.
+    const face106_em = b.createModule(.{
+        .root_source_file = b.path("core/tracking/face106.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
+    });
+    abi_em.addImport("face106", face106_em);
+    const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const lens_trigger_em = b.createModule(.{
+        .root_source_file = b.path("core/lens/trigger.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
+    });
+    const lens_animation_em = b.createModule(.{ .root_source_file = b.path("core/lens/animation.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const lens_runtime_em = b.createModule(.{
+        .root_source_file = b.path("core/lens/runtime.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "graph", .module = graph_em },
+            .{ .name = "manifest", .module = lens_manifest_em },
+            .{ .name = "trigger", .module = lens_trigger_em },
+            .{ .name = "animation", .module = lens_animation_em },
+            .{ .name = "face", .module = tracking_cores_em.face },
+        },
+    });
+    abi_em.addImport("manifest", lens_manifest_em);
+    abi_em.addImport("trigger", lens_trigger_em);
+    abi_em.addImport("runtime", lens_runtime_em);
+    const image_em = imageStubModule(b, em_target, .ReleaseSmall);
+    abi_em.addImport("image", image_em);
+    const gltf_stub_em = gltfStubModule(b, em_target, .ReleaseSmall, math_em);
+    abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
+    abi_em.addImport("gltf", gltf_stub_em);
+
+    const camerakit_em_obj = b.addObject(.{ .name = "camerakit_web", .root_module = abi_em });
+    const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{}, webgpu);
+    const link = b.addSystemCommand(&.{em.?.em_plus_plus});
+    setEmEnv(link, em.?);
+    link.addFileArg(camerakit_em_obj.getEmittedBin());
+    for (bgfx_objects.items) |obj| link.addFileArg(obj);
+    if (webgpu) {
+        // emdawnwebgpu is this pinned Emscripten's WebGPU port
+        // (-sUSE_WEBGPU=1 is gone); ASYNCIFY lets bgfx_init block on
+        // Dawn's async adapter/device request. No WebGL2 flags - this
+        // artifact only ships after the TS shell confirms an adapter.
+        link.addArgs(&.{ "--use-port=emdawnwebgpu", "-sASYNCIFY=1" });
+    } else {
+        link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1" });
+    }
+    link.addArgs(&.{
+        "-sALLOW_MEMORY_GROWTH=1",
+        // 256MB up front. 64MB (comfortably past what session/
+        // engine creation and a frame or two of textures need)
+        // was enough until the ts shell started submitting real
+        // RGBA frames through ck_session_submit_frame_rgba_copy
+        // - a single still test photo at 2400x3000 is 28.8MB by
+        // itself, on top of live 1280x720 camera frames, LUT/
+        // makeup textures, and bgfx's own state. Raised as a
+        // precaution while chasing a real readback bug that
+        // turned out to be unrelated (a stale bgfx view-target
+        // binding, fixed at its actual source in abi.zig) -
+        // kept anyway since a still-photo-sized upload genuinely
+        // is close enough to the old budget to be worth the
+        // headroom.
+        "-sINITIAL_MEMORY=268435456",
+        // Every ck_* entry point is a real call site the TS
+        // shell reaches dynamically, so EXPORT_ALL keeps them all
+        // reachable rather than hand-listing EXPORTED_FUNCTIONS.
+        // LINKABLE is also required, or every ck_* export comes
+        // back undefined - deprecated upstream but still needed as
+        // of this emscripten pin.
+        "-sEXPORT_ALL=1",
+        "-sLINKABLE=1",
+        "-sMODULARIZE=1",
+        "-sEXPORT_NAME=CameraKitWebModule",
+        "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,stringToNewUTF8,UTF8ToString,getValue,setValue",
+        // A real ES module (import CameraKitWebModule from
+        // "./camerakit_web.js") rather than a plain-global
+        // factory function a <script> tag would have to expose -
+        // the ts shell's whole build (bun, ESM throughout)
+        // already assumes every dependency is import-able.
+        "-sEXPORT_ES6=1",
+        "-sUSE_ES6_IMPORT_META=1",
+    });
+    link.addArg("-o");
+    const js_out = link.addOutputFileArg("camerakit_web.js");
+
+    const install = b.addInstallDirectory(.{
+        .source_dir = js_out.dirname(),
+        .install_dir = .{ .custom = if (webgpu) "wasm-emscripten-webgpu" else "wasm-emscripten" },
+        .install_subdir = "",
+    });
+    step.dependOn(&install.step);
+}
+
 // Compiles bgfx, bx, bimg, and astc-encoder for wasm32-emscripten and
 // links wasm_bgfx_smoke_driver.cpp against them, through the vendored
 // em++ alone - `zig cc`'s own bundled headers shadow libc++'s here and
@@ -3182,11 +3257,10 @@ fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
 }
 
 // Compiles bgfx with BGFX_CONFIG_RENDERER_WEBGPU=1 and links
-// wasm_webgpu_smoke_driver.cpp against it via em++'s emdawnwebgpu port -
-// real, proven 2026-08-17 (DECISIONS.md's own dated addendum): upstream
-// bgfx leaves Emscripten out of this define's default-enabled platforms,
-// and this project's pinned Emscripten dropped -sUSE_WEBGPU=1 entirely
-// in favor of this port. Kept fully separate from
+// wasm_webgpu_smoke_driver.cpp against it via em++'s emdawnwebgpu port.
+// Upstream bgfx leaves Emscripten out of this define's default-enabled
+// platforms, and this project's pinned Emscripten dropped -sUSE_WEBGPU=1
+// entirely in favor of this port. Kept fully separate from
 // addWasmBgfxSmokeStep's own GLES recipe - two different bgfx renderer
 // backends, two different drivers, sharing only addBgfxWasmObjects's
 // compile machinery.
@@ -3219,7 +3293,7 @@ fn addWasmWebgpuSmokeStep(b: *std.Build, step: *std.Build.Step) void {
 // function. Proves the whole mechanism the real web core needs: a Zig
 // object and bgfx's C++ objects, from two different compilers, linked
 // into one wasm module by em++ alone.
-fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*std.Build.Step.Compile) void {
+fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*std.Build.Step.Compile, webgpu: bool) void {
     const em = emscriptenToolchain(b) orelse {
         step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
         return;
@@ -3261,19 +3335,20 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     driver_em.link_libc = true;
     const zig_obj = b.addObject(.{ .name = "wasm_emscripten_core_smoke", .root_module = driver_em });
 
-    const objects = addBgfxWasmObjects(b, em, &.{}, false);
+    const objects = addBgfxWasmObjects(b, em, &.{}, webgpu);
     const link = b.addSystemCommand(&.{em.em_plus_plus});
     setEmEnv(link, em);
     link.addFileArg(zig_obj.getEmittedBin());
     for (objects.items) |obj| link.addFileArg(obj);
+    if (webgpu) {
+        link.addArgs(&.{ "--use-port=emdawnwebgpu", "-sASYNCIFY=1" });
+    } else {
+        link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1" });
+    }
     link.addArgs(&.{
-        "-sUSE_WEBGL2=1",
-        "-sMIN_WEBGL_VERSION=2",
-        "-sMAX_WEBGL_VERSION=2",
-        "-sFULL_ES3=1",
         "-sALLOW_MEMORY_GROWTH=1",
-        "-sEXPORTED_FUNCTIONS=_ck_core_smoke_probe",
-        "-sEXPORTED_RUNTIME_METHODS=ccall",
+        "-sEXPORTED_FUNCTIONS=_ck_core_smoke_probe,_ck_core_smoke_render_frame,_malloc,_free",
+        "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,UTF8ToString",
         "-sMODULARIZE=1",
         "-sEXPORT_NAME=CoreSmokeModule",
     });
@@ -3282,7 +3357,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
 
     const install = b.addInstallDirectory(.{
         .source_dir = js_out.dirname(),
-        .install_dir = .{ .custom = "wasm-emscripten-core-smoke" },
+        .install_dir = .{ .custom = if (webgpu) "wasm-emscripten-core-smoke-webgpu" else "wasm-emscripten-core-smoke" },
         .install_subdir = "",
     });
     step.dependOn(&install.step);
@@ -3346,6 +3421,11 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // than android, its own tag since shaderc's platform argument
         // can affect the preprocessor defines it injects.
         .{ .profile = "300_es", .platform = "asm.js", .tag = "essl_web" },
+        // shaderc.cpp reads WGSL output via SPIR-V through
+        // tint::SpirvToWgsl, so this routes through the same SPIR-V
+        // front end every other profile here does, just a different
+        // back end.
+        .{ .profile = "wgsl", .platform = "asm.js", .tag = "wgsl" },
     };
     const computes = [_][]const u8{"cs_nv12_to_rgba"};
     for (computes) |compute_name| {

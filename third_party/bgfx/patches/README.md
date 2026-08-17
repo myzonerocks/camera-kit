@@ -28,5 +28,25 @@ vestigial in the pinned commit, independent of this patch. Skipping the
 write changes no value any caller can observe; this project does not
 consume bgfx's GPU timer stats.
 
-Filed upstream: https://github.com/bkaradzic/bgfx (link the real issue
-once opened).
+Filed upstream: https://github.com/bkaradzic/bgfx/issues/3902
+
+0002-shaderc-asmjs-wgsl-language-define.patch
+Real, verified finding (2026-08-17): tools/shaderc/shaderc.cpp picks the
+BGFX_SHADER_LANGUAGE_* preprocessor define per (platform, profile) pair.
+Every platform branch (android, linux, windows, the default/else case)
+has a ShadingLang::WGSL arm that sets BGFX_SHADER_LANGUAGE_WGSL=1; the
+"asm.js" platform branch (the one this project's web build uses) does
+not - it unconditionally sets the GLSL/ESSL defines instead, regardless
+of profile. With BGFX_SHADER_LANGUAGE_WGSL left at its default-0, none
+of bgfx_shader.sh's WGSL-target translations apply (bvec2 -> bool2, and
+friends), so the raw GLSL-style source is handed to glslang's HLSL
+front end unmodified and fails to parse. Confirmed directly: before
+this patch, `shaderc -p wgsl --platform asm.js` failed with HLSL parse
+errors on bgfx_shader.sh's own header content; after it, compilation
+proceeds into Tint's SPIR-V-to-WGSL path. This is a host build tool
+only (shaderc runs at build time to generate shader blobs) - it does
+not touch the runtime bgfx library, so the blast radius is the shader
+compiler's own source translation, nothing more.
+
+Not yet filed upstream - same bkaradzic/bgfx repo as 0001 above, once
+confirmed.

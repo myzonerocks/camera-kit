@@ -1,0 +1,20 @@
+--- a/tools/shaderc/shaderc.cpp
++++ b/tools/shaderc/shaderc.cpp
+@@ -1402,8 +1402,15 @@
+ 		else if (0 == bx::strCmpI(platform, "asm.js") )
+ 		{
+ 			preprocessor.setDefine("BX_PLATFORM_EMSCRIPTEN=1");
+-			preprocessor.setDefine(glslDefine);
+-			preprocessor.setDefine(esslDefine);
++			if (profile->lang == ShadingLang::WGSL)
++			{
++				preprocessor.setDefine("BGFX_SHADER_LANGUAGE_WGSL=1");
++			}
++			else
++			{
++				preprocessor.setDefine(glslDefine);
++				preprocessor.setDefine(esslDefine);
++			}
+ 		}
+ 		else if (0 == bx::strCmpI(platform, "linux") )
+ 		{

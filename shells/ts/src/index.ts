@@ -90,6 +90,23 @@ async function decodeImageRgba(
   return { data: image.data, width, height };
 }
 
+/// Chooses which camerakit_web.js build to load: the WebGPU one (bgfx's
+/// WebGPU backend, Asyncify linked in) or the WebGL2 one (no Asyncify).
+/// Two separate artifacts rather than a runtime toggle, since Asyncify
+/// taxes the whole per-frame path, not just init. Checks for a real
+/// working adapter, not just navigator.gpu's presence, which can exist
+/// with no adapter behind it.
+export async function pickEngineUrl(webgpuUrl: string | URL, webgl2Url: string | URL): Promise<string | URL> {
+  const gpu = (navigator as unknown as { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
+  if (!gpu) return webgl2Url;
+  try {
+    const adapter = await gpu.requestAdapter();
+    return adapter ? webgpuUrl : webgl2Url;
+  } catch {
+    return webgl2Url;
+  }
+}
+
 export class PreviewSession {
   readonly video = document.createElement("video");
   state: CaptureState = "idle";
