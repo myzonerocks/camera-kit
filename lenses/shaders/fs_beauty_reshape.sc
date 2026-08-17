@@ -14,12 +14,6 @@ uniform vec4 u_facePoints[53]; // 106 tracked points, two per vec4 (xy, zw)
 // distance so the warp fades out away from the point pair it's
 // anchored to.
 
-vec2 facePoint(int index)
-{
-	vec4 pointPair = u_facePoints[index / 2];
-	return (index / 2) * 2 == index ? pointPair.xy : pointPair.zw;
-}
-
 vec2 curveWarp(vec2 textureCoord, vec2 originPosition, vec2 targetPosition, float delta, float aspectRatio)
 {
 	vec2 direction = (targetPosition - originPosition) * delta;
@@ -37,31 +31,42 @@ vec2 enlargeEye(vec2 textureCoord, vec2 originPosition, float radius, float delt
 	return originPosition + (textureCoord - originPosition) * weight;
 }
 
+// Each origin/target pair below is the same contour-point indexing
+// facePoint(int) used to do at runtime (u_facePoints[index / 2].xy or
+// .zw, picked by whether index is even or odd), unrolled here as
+// literal, compile-time-constant array indices instead. GLSL ES 3.00
+// restricts dynamic (non-constant, non-loop-index) indexing of a
+// uniform array more than desktop GL does on some drivers; this shader
+// compiled clean under shaderc for every platform/profile including
+// essl_web, but that doesn't rule out a runtime-only restriction this
+// project has no GPU-side capture tooling to check directly. Real,
+// testable experiment either way - proves or disproves this specific
+// theory rather than guessing at it.
 vec2 thinFace(vec2 coord, float amount, float aspectRatio)
 {
-	int origins[9];
-	origins[0] = 3; origins[1] = 29; origins[2] = 7; origins[3] = 25; origins[4] = 10;
-	origins[5] = 22; origins[6] = 14; origins[7] = 18; origins[8] = 16;
-	int targets[9];
-	targets[0] = 44; targets[1] = 44; targets[2] = 45; targets[3] = 45; targets[4] = 46;
-	targets[5] = 46; targets[6] = 49; targets[7] = 49; targets[8] = 49;
-	for (int i = 0; i < 9; i++)
-	{
-		coord = curveWarp(coord, facePoint(origins[i]), facePoint(targets[i]), amount, aspectRatio);
-	}
+	coord = curveWarp(coord, u_facePoints[1].zw, u_facePoints[22].xy, amount, aspectRatio);
+	coord = curveWarp(coord, u_facePoints[14].zw, u_facePoints[22].xy, amount, aspectRatio);
+	coord = curveWarp(coord, u_facePoints[3].zw, u_facePoints[22].zw, amount, aspectRatio);
+	coord = curveWarp(coord, u_facePoints[12].zw, u_facePoints[22].zw, amount, aspectRatio);
+	coord = curveWarp(coord, u_facePoints[5].xy, u_facePoints[23].xy, amount, aspectRatio);
+	coord = curveWarp(coord, u_facePoints[11].xy, u_facePoints[23].xy, amount, aspectRatio);
+	coord = curveWarp(coord, u_facePoints[7].xy, u_facePoints[24].zw, amount, aspectRatio);
+	coord = curveWarp(coord, u_facePoints[9].xy, u_facePoints[24].zw, amount, aspectRatio);
+	coord = curveWarp(coord, u_facePoints[8].xy, u_facePoints[24].zw, amount, aspectRatio);
 	return coord;
 }
 
 vec2 bigEye(vec2 coord, float amount, float aspectRatio)
 {
-	int origins[2];
-	origins[0] = 74; origins[1] = 77;
-	int targets[2];
-	targets[0] = 72; targets[1] = 75;
-	for (int i = 0; i < 2; i++)
 	{
-		vec2 originPoint = facePoint(origins[i]);
-		vec2 targetPoint = facePoint(targets[i]);
+		vec2 originPoint = u_facePoints[37].xy;
+		vec2 targetPoint = u_facePoints[36].xy;
+		float radius = distance(vec2(targetPoint.x, targetPoint.y / aspectRatio), vec2(originPoint.x, originPoint.y / aspectRatio)) * 5.0;
+		coord = enlargeEye(coord, originPoint, radius, amount, aspectRatio);
+	}
+	{
+		vec2 originPoint = u_facePoints[38].zw;
+		vec2 targetPoint = u_facePoints[37].zw;
 		float radius = distance(vec2(targetPoint.x, targetPoint.y / aspectRatio), vec2(originPoint.x, originPoint.y / aspectRatio)) * 5.0;
 		coord = enlargeEye(coord, originPoint, radius, amount, aspectRatio);
 	}
