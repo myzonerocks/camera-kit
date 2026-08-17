@@ -767,8 +767,9 @@ pub fn build(b: *std.Build) void {
         // gets the same stub treatment as tracking/beauty above.
         const image_wasm = imageStubModule(b, wasm_target, .ReleaseSmall);
         abi_wasm.addImport("image", image_wasm);
-        abi_wasm.addImport("asset", assetStubModule(b, wasm_target, .ReleaseSmall, image_wasm));
-        abi_wasm.addImport("gltf", gltfStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
+        const gltf_stub_wasm = gltfStubModule(b, wasm_target, .ReleaseSmall, math_wasm);
+        abi_wasm.addImport("asset", assetStubModule(b, wasm_target, .ReleaseSmall, image_wasm, gltf_stub_wasm));
+        abi_wasm.addImport("gltf", gltf_stub_wasm);
         const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
         camerakit_wasm.entry = .disabled;
         camerakit_wasm.rdynamic = true;
@@ -865,8 +866,9 @@ pub fn build(b: *std.Build) void {
             abi_em.addImport("runtime", lens_runtime_em);
             const image_em = imageStubModule(b, em_target, .ReleaseSmall);
             abi_em.addImport("image", image_em);
-            abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em));
-            abi_em.addImport("gltf", gltfStubModule(b, em_target, .ReleaseSmall, math_em));
+            const gltf_stub_em = gltfStubModule(b, em_target, .ReleaseSmall, math_em);
+            abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
+            abi_em.addImport("gltf", gltf_stub_em);
 
             const camerakit_em_obj = b.addObject(.{ .name = "camerakit_web", .root_module = abi_em });
             const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{});
@@ -1511,12 +1513,15 @@ fn imageStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     });
 }
 
-fn assetStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, image_module: *std.Build.Module) *std.Build.Module {
+fn assetStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, image_module: *std.Build.Module, gltf_module: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("adapters/asset/asset_stub.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "image", .module = image_module }},
+        .imports = &.{
+            .{ .name = "image", .module = image_module },
+            .{ .name = "gltf", .module = gltf_module },
+        },
     });
 }
 
