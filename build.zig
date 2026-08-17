@@ -36,6 +36,10 @@ pub fn build(b: *std.Build) void {
         ci_log.setCwd(b.path("."));
         ci_log.addArgs(&.{ "--log", "origin/main..HEAD" });
         ci_step.dependOn(&ci_log.step);
+        const ci_diff = b.addRunArtifact(gate_exe);
+        ci_diff.setCwd(b.path("."));
+        ci_diff.addArgs(&.{ "--diff", "origin/main...HEAD" });
+        ci_step.dependOn(&ci_diff.step);
     }
 
 
