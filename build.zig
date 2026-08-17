@@ -698,6 +698,10 @@ pub fn build(b: *std.Build) void {
     addIosSimulatorStep(b, optimize, shaderc_exe, flatc_exe);
     addAndroidStep(b, optimize, shaderc_exe, flatc_exe);
 
+    // Separate from wasm_step: needs the opt-in emscripten vendors most builds never touch.
+    const wasm_bgfx_smoke_step = b.step("wasm-bgfx-smoke", "Compile+link bgfx's real GL backend for wasm32-emscripten (needs emscripten vendors synced)");
+    addWasmBgfxSmokeStep(b, wasm_bgfx_smoke_step);
+
     // The web core: the same export layer compiled to wasm32 with every ck_
     // symbol visible to the embedder.
     const wasm_step = b.step("wasm", "Build the camerakit core for the web");
@@ -2805,6 +2809,109 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     shaderc_module.linkLibrary(spirv_cross_lib);
     step.dependOn(&b.addInstallArtifact(shaderc_exe, .{}).step);
     return shaderc_exe;
+}
+
+// Compiles bgfx, bx, bimg, and astc-encoder for wasm32-emscripten and
+// links wasm_bgfx_smoke_driver.cpp against them, through the vendored
+// em++ alone - `zig cc`'s own bundled headers shadow libc++'s here and
+// break the build.
+fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
+    const emscripten_present = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/emscripten/emscripten/em++", .{}) catch break :blk false;
+        b.build_root.handle.access(b.graph.io, ".vendor/emscripten-python/bin/python3", .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (!emscripten_present) {
+        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        return;
+    }
+    const node_exe = b.findProgram(&.{"node"}, &.{}) catch {
+        step.dependOn(&b.addFail("camera-kit: node not found on PATH").step);
+        return;
+    };
+
+    const em_root = b.pathFromRoot(".vendor/emscripten");
+    const em_plus_plus = b.pathFromRoot(".vendor/emscripten/emscripten/em++");
+    const em_python = b.pathFromRoot(".vendor/emscripten-python/bin/python3");
+    const em_llvm_root = b.pathFromRoot(".vendor/emscripten/bin");
+    const em_config = b.pathFromRoot("adapters/bgfx/em_config_empty");
+
+    const cxx_flags = [_][]const u8{
+        "-std=c++20",
+        "-fno-strict-aliasing",
+        "-fno-exceptions",
+        "-fno-rtti",
+        "-Wno-date-time",
+        "-D__STDC_FORMAT_MACROS",
+        "-DBIMG_CONFIG_PARSE_AVIF=0",
+        "-DBIMG_CONFIG_PARSE_HEIF=0",
+        "-DBIMG_CONFIG_PARSE_EXR=0",
+        "-DBX_CONFIG_DEBUG=0",
+    };
+    const include_dirs = [_][]const u8{
+        ".vendor/bx/include",
+        ".vendor/bx/3rdparty",
+        ".vendor/bimg/include",
+        ".vendor/bimg/3rdparty",
+        ".vendor/bimg/3rdparty/astc-encoder/include",
+        ".vendor/bimg/3rdparty/iqa/include",
+        ".vendor/bimg/3rdparty/tinyexr/deps",
+        ".vendor/bgfx/include",
+        ".vendor/bgfx/3rdparty",
+        ".vendor/bgfx/3rdparty/khronos",
+        ".vendor/bgfx/src",
+    };
+
+    var sources: std.ArrayList([]const u8) = .empty;
+    sources.append(b.allocator, ".vendor/bgfx/src/amalgamated.cpp") catch @panic("oom");
+    sources.append(b.allocator, ".vendor/bx/src/amalgamated.cpp") catch @panic("oom");
+    for ([_][]const u8{ "image", "image_cubemap_filter", "image_decode", "image_encode" }) |name| {
+        sources.append(b.allocator, b.fmt(".vendor/bimg/src/{s}.cpp", .{name})) catch @panic("oom");
+    }
+    if (listFiles(b, ".vendor/bimg/3rdparty/astc-encoder/source", ".cpp")) |astc_sources| {
+        sources.appendSlice(b.allocator, astc_sources) catch @panic("oom");
+    }
+    sources.append(b.allocator, "adapters/bgfx/wasm_bgfx_smoke_driver.cpp") catch @panic("oom");
+
+    const setEmEnv = struct {
+        fn call(run: *std.Build.Step.Run, python: []const u8, config: []const u8, node: []const u8, root: []const u8, llvm: []const u8) void {
+            run.setEnvironmentVariable("EMSDK_PYTHON", python);
+            run.setEnvironmentVariable("EM_CONFIG", config);
+            run.setEnvironmentVariable("EM_NODE_JS", node);
+            run.setEnvironmentVariable("EM_BINARYEN_ROOT", root);
+            run.setEnvironmentVariable("EM_LLVM_ROOT", llvm);
+        }
+    }.call;
+
+    var objects: std.ArrayList(std.Build.LazyPath) = .empty;
+    for (sources.items) |src| {
+        const run = b.addSystemCommand(&.{em_plus_plus});
+        setEmEnv(run, em_python, em_config, node_exe, em_root, em_llvm_root);
+        run.addArgs(&cxx_flags);
+        for (include_dirs) |dir| {
+            run.addArg("-I");
+            run.addDirectoryArg(b.path(dir));
+        }
+        run.addArg("-c");
+        run.addFileArg(b.path(src));
+        run.addArg("-o");
+        const obj_name = b.fmt("{s}.o", .{std.fs.path.stem(src)});
+        objects.append(b.allocator, run.addOutputFileArg(obj_name)) catch @panic("oom");
+    }
+
+    const link = b.addSystemCommand(&.{em_plus_plus});
+    setEmEnv(link, em_python, em_config, node_exe, em_root, em_llvm_root);
+    for (objects.items) |obj| link.addFileArg(obj);
+    link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1", "-sALLOW_MEMORY_GROWTH=1" });
+    link.addArg("-o");
+    const js_out = link.addOutputFileArg("wasm_bgfx_smoke.js");
+
+    const install = b.addInstallDirectory(.{
+        .source_dir = js_out.dirname(),
+        .install_dir = .{ .custom = "wasm-bgfx-smoke" },
+        .install_subdir = "",
+    });
+    step.dependOn(&install.step);
 }
 
 // Compiles the kit's shaders with the vendored compiler at build time and
