@@ -822,6 +822,11 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "render", .module = render_em },
                 },
             });
+            // abiAllocator()'s std.heap.c_allocator branch on web needs
+            // real libc linkage - symbol resolution happens later at
+            // the em++ link step regardless, same as render_em's own
+            // sysroot include path below.
+            abi_em.link_libc = true;
             const tracking_cores_em = trackingCoreModules(b, em_target, .ReleaseSmall, math_em);
             abi_em.addImport("face", tracking_cores_em.face);
             abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, math_em));
@@ -877,6 +882,10 @@ pub fn build(b: *std.Build) void {
                 "-sMAX_WEBGL_VERSION=2",
                 "-sFULL_ES3=1",
                 "-sALLOW_MEMORY_GROWTH=1",
+                // 64MB up front - comfortably past what session/engine
+                // creation and a frame or two of textures need, so
+                // normal startup doesn't grow memory at all.
+                "-sINITIAL_MEMORY=67108864",
                 // Every ck_* entry point is a real call site the TS
                 // shell reaches dynamically (no single header enumerates
                 // them the way a hand-written EXPORTED_FUNCTIONS list
@@ -3134,6 +3143,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
         .optimize = .ReleaseSmall,
         .imports = &.{.{ .name = "render", .module = render_em }},
     });
+    driver_em.link_libc = true;
     const zig_obj = b.addObject(.{ .name = "wasm_emscripten_core_smoke", .root_module = driver_em });
 
     const objects = addBgfxWasmObjects(b, em, &.{});
