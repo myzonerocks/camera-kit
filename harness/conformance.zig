@@ -24,7 +24,7 @@ extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 
 const width: u32 = 400;
 const height: u32 = 300;
-const reference_lenses = [_][]const u8{ "shader-tint", "beauty-baseline", "background-swap" };
+const reference_lenses = [_][]const u8{ "shader-tint", "beauty-baseline", "background-swap", "trigger-anim" };
 const baseline_path = "lenses/conformance-baseline.txt";
 const corpus_path = ".models/corpus/face_frontal_b.jpg";
 const face_bundle_path = ".models/face_landmarker.task";
@@ -265,6 +265,92 @@ fn checkDeterminism(gpa: std.mem.Allocator, engine: *abi.Engine, lens_name: []co
     return hash;
 }
 
+/// Proves play_animation actually fires and changes the rendered
+/// output, not just that it compiles - the bit-stability loop above
+/// only ever exercises the reference lenses' default, never-triggered
+/// state, since it never calls ck_session_tick_lens at all. Activates
+/// the real packaged trigger-anim bundle, screenshots its rest pose,
+/// ticks it in dt_us steps past its own manifest's 2-second timer
+/// threshold, screenshots again, and asserts the two differ.
+fn proveTriggerAnimFires(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const bundle_path = ".lens-packages/trigger-anim";
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    const activated = abi.ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    if (activated != .ok) {
+        std.debug.print("conformance: trigger-anim proof: activate: {s}\n", .{@tagName(activated)});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.ck_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+
+    // Let the model.gltf node's async .glb load land before either
+    // screenshot - both must show a real drawn mesh, only the pose
+    // should differ.
+    for (0..5) |_| {
+        _ = abi.ck_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const before_path: [:0]const u8 = "zig-out/conformance-trigger-anim-before";
+    engine.renderer.?.requestScreenshot(before_path.ptr);
+    for (0..5) |_| {
+        _ = abi.ck_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    var signals = std.mem.zeroes(abi.LensSignals);
+    var elapsed_us: u64 = 0;
+    const dt_us: u32 = 16_666;
+    while (elapsed_us < 2_100_000) : (elapsed_us += dt_us) {
+        if (abi.ck_session_tick_lens(session, dt_us, &signals) != .ok) {
+            std.debug.print("conformance: trigger-anim proof: tick refused\n", .{});
+            return false;
+        }
+    }
+
+    for (0..5) |_| {
+        _ = abi.ck_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    const after_path: [:0]const u8 = "zig-out/conformance-trigger-anim-after";
+    engine.renderer.?.requestScreenshot(after_path.ptr);
+    for (0..5) |_| {
+        _ = abi.ck_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    settle(engine);
+
+    const before = try std.Io.Dir.cwd().readFileAlloc(harness_io, before_path ++ ".tga", gpa, .limited(8 << 20));
+    defer gpa.free(before);
+    const after = try std.Io.Dir.cwd().readFileAlloc(harness_io, after_path ++ ".tga", gpa, .limited(8 << 20));
+    defer gpa.free(after);
+
+    if (std.mem.eql(u8, before, after)) {
+        std.debug.print("conformance: FAIL trigger-anim: play_animation firing after {d}us produced no visible change\n", .{elapsed_us});
+        return false;
+    }
+    std.debug.print("conformance: PROOF trigger-anim's play_animation trigger fires after {d}us and visibly changes the rendered mesh pose\n", .{elapsed_us});
+    return true;
+}
+
 pub fn main(init_args: std.process.Init) !u8 {
     const gpa = init_args.gpa;
     harness_io = init_args.io;
@@ -317,5 +403,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         return 1;
     }
     std.debug.print("conformance: PROOF all reference lenses match the pinned baseline\n", .{});
+
+    if (!try proveTriggerAnimFires(gpa, engine)) return 1;
     return 0;
 }

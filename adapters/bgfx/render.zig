@@ -99,6 +99,7 @@ pub const Renderer = struct {
     beauty_face_program: c.bgfx_program_handle_t,
     beauty_reshape_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
+    model_program: c.bgfx_program_handle_t,
     /// The 176-triangle face-makeup mesh's fixed index buffer -
     /// face_mesh.triangle_indices, uploaded once, never changes.
     makeup_index_buffer: c.bgfx_index_buffer_handle_t,
@@ -130,6 +131,7 @@ pub const Renderer = struct {
     /// 106 tracked face points, two per vec4 (xy, zw) - matching
     /// fs_beauty_reshape.sc's own u_facePoints packing.
     face_points_uniform: c.bgfx_uniform_handle_t,
+    model_color_uniform: c.bgfx_uniform_handle_t,
     /// Solid white 1x1: blend.pass's mask input when segmentation is
     /// unavailable. A mask of 1.0 everywhere means "always foreground,"
     /// so binding this reproduces the SPEC's degradation rule exactly -
@@ -210,6 +212,7 @@ pub const Renderer = struct {
         const beauty_face_program = try loadBeautyFaceProgram();
         const beauty_reshape_program = try loadBeautyReshapeProgram();
         const makeup_program = try loadMakeupProgram();
+        const model_program = try loadModelProgram();
 
         var makeup_position_layout: c.bgfx_vertex_layout_t = undefined;
         _ = c.bgfx_vertex_layout_begin(&makeup_position_layout, c.BGFX_RENDERER_TYPE_NOOP);
@@ -259,6 +262,7 @@ pub const Renderer = struct {
             .beauty_face_program = beauty_face_program,
             .beauty_reshape_program = beauty_reshape_program,
             .makeup_program = makeup_program,
+            .model_program = model_program,
             .makeup_index_buffer = makeup_index_buffer,
             .makeup_position_buffer = makeup_position_buffer,
             .makeup_lipstick_uv_buffer = makeup_lipstick_uv_buffer,
@@ -280,6 +284,7 @@ pub const Renderer = struct {
             .reshape_params_uniform = c.bgfx_create_uniform("u_reshapeParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
+            .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .default_mask_texture = createMaskTexture(1, 1, &[_]u8{255}),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
         };
@@ -392,6 +397,21 @@ pub const Renderer = struct {
         };
     }
 
+    /// The one fixed model.gltf program every lens shares - reuses
+    /// vs_lens_pass.sc (the mesh's vertex data is padded with a dummy
+    /// texcoord so it fits the same interleaved POSITION+TEXCOORD0
+    /// layout every full-screen-quad pass already uses), pairs it with
+    /// its own fragment shader that outputs one flat uniform-driven
+    /// color rather than sampling a texture.
+    pub fn loadModelProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_model_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_model_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_model_essl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     pub fn destroyProgram(program: c.bgfx_program_handle_t) void {
         c.bgfx_destroy_program(program);
     }
@@ -430,6 +450,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.reshape_params_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
+        c.bgfx_destroy_uniform(r.model_color_uniform);
         c.bgfx_destroy_uniform(r.yuv_uniform);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
@@ -439,6 +460,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.beauty_face_program);
         c.bgfx_destroy_program(r.beauty_reshape_program);
         c.bgfx_destroy_program(r.makeup_program);
+        c.bgfx_destroy_program(r.model_program);
         c.bgfx_destroy_index_buffer(r.makeup_index_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.makeup_position_buffer);
         c.bgfx_destroy_vertex_buffer(r.makeup_lipstick_uv_buffer);
@@ -758,6 +780,66 @@ pub const Renderer = struct {
 
     pub fn makeupBlushUvBuffer(r: *const Renderer) c.bgfx_vertex_buffer_handle_t {
         return r.makeup_blush_uv_buffer;
+    }
+
+    /// A model.gltf node's geometry, uploaded once at load time - fixed
+    /// topology, unlike the makeup mesh's per-frame-updated positions,
+    /// so both buffers are static (not dynamic).
+    pub const ModelMesh = struct {
+        vertex_buffer: c.bgfx_vertex_buffer_handle_t,
+        index_buffer: c.bgfx_index_buffer_handle_t,
+        index_count: u32,
+    };
+
+    /// Builds a static mesh from positions and indices: real gpu-side
+    /// geometry, uploaded once. Vertex data is interleaved into the
+    /// same POSITION+TEXCOORD0 layout every full-screen-quad pass uses
+    /// (r.layout), texcoord padded to zero since the model shader never
+    /// samples one - this lets model draws reuse vs_lens_pass.sc rather
+    /// than needing their own vertex stage.
+    pub fn createModelMesh(r: *Renderer, positions: []const [3]f32, indices: []const u32) !ModelMesh {
+        const interleaved = try r.gpa.alloc(f32, positions.len * 5);
+        defer r.gpa.free(interleaved);
+        for (positions, 0..) |p, i| {
+            interleaved[i * 5 ..][0..5].* = .{ p[0], p[1], p[2], 0.0, 0.0 };
+        }
+        const vertex_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))), &r.layout, 0);
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.ptr, @intCast(indices.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        return .{ .vertex_buffer = vertex_buffer, .index_buffer = index_buffer, .index_count = @intCast(indices.len) };
+    }
+
+    pub fn destroyModelMesh(mesh: ModelMesh) void {
+        c.bgfx_destroy_vertex_buffer(mesh.vertex_buffer);
+        c.bgfx_destroy_index_buffer(mesh.index_buffer);
+    }
+
+    /// Draws one model.gltf node: blit_view first blits the current
+    /// frame into the shared target so the mesh's own triangles are
+    /// the only pixels this draw changes (same reasoning submitMakeup's
+    /// own blit step already documents, here as a separate bgfx view
+    /// rather than a second draw in the same one, since the mesh needs
+    /// its own real 3D view/projection - bgfx's view transform is a
+    /// per-view, not per-draw, state, and the blit needs the flat
+    /// ortho every other pass shares). mesh_view runs after blit_view
+    /// (bgfx executes views in ascending id order) into the same
+    /// target, so the mesh composites on top with no blend state
+    /// needed. No depth test: a single flat mesh has nothing to
+    /// self-occlude against; a lens with multiple overlapping model
+    /// nodes would need the offscreen target to grow a depth
+    /// attachment, real future work this lens does not need.
+    pub fn submitModel(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture);
+
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one);
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        _ = c.bgfx_set_transform(&model_matrix.cols, 1);
+        c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// The stated CPU path: copies NV12 planes into two cached updatable

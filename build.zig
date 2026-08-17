@@ -325,27 +325,17 @@ pub fn build(b: *std.Build) void {
         b.build_root.handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
         break :blk true;
     };
-    const gltf_module: ?*std.Build.Module = if (have_cgltf) blk: {
-        const m = b.createModule(.{
-            .root_source_file = b.path("adapters/gltf/gltf.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "math", .module = math_module }},
-        });
-        m.addIncludePath(b.path(".vendor/cgltf"));
-        m.addCSourceFile(.{
-            .file = b.path("adapters/gltf/cgltf_impl.c"),
-            .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
-        });
-        m.link_libc = true;
-        const gltf_tests = b.addTest(.{ .root_module = m });
-        test_step.dependOn(&b.addRunArtifact(gltf_tests).step);
-        break :blk m;
-    } else blk: {
+    const gltf_module: ?*std.Build.Module = if (have_cgltf)
+        gltfModule(b, target, optimize, math_module)
+    else blk: {
         const missing = b.addFail("camera-kit: .vendor/cgltf missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
         break :blk null;
     };
+    if (gltf_module) |m| {
+        const gltf_tests = b.addTest(.{ .root_module = m });
+        test_step.dependOn(&b.addRunArtifact(gltf_tests).step);
+    }
 
     // lodepng lives inside bimg's vendored tree (bgfx's own image
     // dependency); a lens asset decoder wants only this one file out of
@@ -355,7 +345,7 @@ pub fn build(b: *std.Build) void {
         b.build_root.handle.access(b.graph.io, ".vendor/bimg/3rdparty/lodepng/lodepng.cpp", .{}) catch break :blk false;
         break :blk true;
     };
-    const host_asset: ?AssetModules = if (have_lodepng) realAssetModules(b, target, optimize) else blk: {
+    const host_asset: ?AssetModules = if (have_lodepng) realAssetModules(b, target, optimize, gltf_module) else blk: {
         const missing = b.addFail("camera-kit: .vendor/bimg missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
         break :blk null;
@@ -370,6 +360,10 @@ pub fn build(b: *std.Build) void {
         lens_validator_module.link_libc = true;
         abi_module.addImport("image", am.image);
         abi_module.addImport("asset", am.asset);
+        if (gltf_module) |gm| {
+            lens_validator_module.addImport("gltf", gm);
+            abi_module.addImport("gltf", gm);
+        }
     }
 
     // The desktop harness draws through the real render stack. It exists
@@ -435,6 +429,7 @@ pub fn build(b: *std.Build) void {
     if (host_asset) |am| {
         lens_validator_test_module.addImport("image", am.image);
         lens_validator_test_module.link_libc = true;
+        if (gltf_module) |gm| lens_validator_test_module.addImport("gltf", gm);
     }
     const lens_validator_tests = b.addTest(.{ .root_module = lens_validator_test_module });
     test_step.dependOn(&b.addRunArtifact(lens_validator_tests).step);
@@ -589,6 +584,7 @@ pub fn build(b: *std.Build) void {
         if (host_asset) |am| {
             abi_tracking_module.addImport("image", am.image);
             abi_tracking_module.addImport("asset", am.asset);
+            if (gltf_module) |gm| abi_tracking_module.addImport("gltf", gm);
         }
         const tracking_module = b.createModule(.{
             .root_source_file = b.path("harness/tracking.zig"),
@@ -772,6 +768,7 @@ pub fn build(b: *std.Build) void {
         const image_wasm = imageStubModule(b, wasm_target, .ReleaseSmall);
         abi_wasm.addImport("image", image_wasm);
         abi_wasm.addImport("asset", assetStubModule(b, wasm_target, .ReleaseSmall, image_wasm));
+        abi_wasm.addImport("gltf", gltfStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
         camerakit_wasm.entry = .disabled;
         camerakit_wasm.rdynamic = true;
@@ -869,6 +866,7 @@ pub fn build(b: *std.Build) void {
             const image_em = imageStubModule(b, em_target, .ReleaseSmall);
             abi_em.addImport("image", image_em);
             abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em));
+            abi_em.addImport("gltf", gltfStubModule(b, em_target, .ReleaseSmall, math_em));
 
             const camerakit_em_obj = b.addObject(.{ .name = "camerakit_web", .root_module = abi_em });
             const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{});
@@ -1021,6 +1019,7 @@ pub fn build(b: *std.Build) void {
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
+            if (gltf_module) |gm| abi_conformance_module.addImport("gltf", gm);
         }
         // Real tracking/segmentation/beauty for this consumer specifically
         // - a conformance proof against a stub capability only ever
@@ -1336,9 +1335,15 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
-    const android_asset = realAssetModules(b, android_target, optimize);
+    const have_cgltf_android = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
+        break :blk true;
+    };
+    const gltf_android = if (have_cgltf_android) gltfModule(b, android_target, optimize, math_android) else null;
+    const android_asset = realAssetModules(b, android_target, optimize, gltf_android);
     abi_android.addImport("image", android_asset.image);
     abi_android.addImport("asset", android_asset.asset);
+    if (gltf_android) |gm| abi_android.addImport("gltf", gm);
     const jni_module = b.createModule(.{
         .root_source_file = b.path("adapters/android/jni.zig"),
         .target = android_target,
@@ -1448,10 +1453,34 @@ const AssetModules = struct {
     asset: *std.Build.Module,
 };
 
+// cgltf compiles as C linked against a target's libc, the same reason
+// lodepng below needs its own per-target instance rather than one
+// shared module - math has no C dependency so the one shared
+// math_module is fine to reuse across every target.
+fn gltfModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_module: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{
+        .root_source_file = b.path("adapters/gltf/gltf.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_module }},
+    });
+    m.addIncludePath(b.path(".vendor/cgltf"));
+    m.addCSourceFile(.{
+        .file = b.path("adapters/gltf/cgltf_impl.c"),
+        .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
+    });
+    m.link_libc = true;
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, m);
+    return m;
+}
+
 // A real PNG decoder plus the off-thread loader built on it, for one
 // target - each needs its own instance the same way the tracking core
-// does, since lodepng compiles as C linked against that target's libc.
-fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) AssetModules {
+// does, since lodepng (and, for the model loader, cgltf) compiles as C
+// linked against that target's libc. gltf_module is optional only
+// because a caller might not have vendor-synced cgltf yet; every real
+// target passes one.
+fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, gltf_module: ?*std.Build.Module) AssetModules {
     const image_module = b.createModule(.{
         .root_source_file = b.path("adapters/image/image.zig"),
         .target = target,
@@ -1470,6 +1499,7 @@ fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .optimize = optimize,
         .imports = &.{.{ .name = "image", .module = image_module }},
     });
+    if (gltf_module) |gm| asset_module.addImport("gltf", gm);
     return .{ .image = image_module, .asset = asset_module };
 }
 
@@ -1487,6 +1517,15 @@ fn assetStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "image", .module = image_module }},
+    });
+}
+
+fn gltfStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_module: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("adapters/gltf/gltf_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_module }},
     });
 }
 
@@ -2824,9 +2863,15 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
-    const ios_asset = realAssetModules(b, ios_target, optimize);
+    const have_cgltf_ios = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/cgltf/cgltf.h", .{}) catch break :blk false;
+        break :blk true;
+    };
+    const gltf_ios = if (have_cgltf_ios) gltfModule(b, ios_target, optimize, math_ios) else null;
+    const ios_asset = realAssetModules(b, ios_target, optimize, gltf_ios);
     abi_ios.addImport("image", ios_asset.image);
     abi_ios.addImport("asset", ios_asset.asset);
+    if (gltf_ios) |gm| abi_ios.addImport("gltf", gm);
     const camerakit_ios = b.addLibrary(.{
         .name = "camerakit",
         .linkage = .static,
@@ -3234,6 +3279,10 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // beauty.lipstick/beauty.blusher's own fixed fragment shader,
         // same reasoning as fs_lut_pass above.
         .{ .name = "fs_makeup", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
+        // model.gltf's own fixed fragment shader: a flat material-tint
+        // fill, same reasoning as fs_lut_pass above - pairs with the
+        // shared vs_lens_pass.sc vertex contract, not its own stage.
+        .{ .name = "fs_model", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
         .{ .profile = "metal", .platform = "ios", .tag = "metal" },

@@ -10,10 +10,12 @@
 //! one that knows how to hand them to the engine.
 //!
 //! Node types are the closed, kit-versioned vocabulary a lens manifest
-//! can name: the beauty family, shader passes, LUT passes, and mask-
-//! driven blend passes are all wired here. glTF draws are real
-//! remaining work, deliberately not stubbed in ahead of their own
-//! execution landing.
+//! can name: the beauty family, shader passes, LUT passes, mask-driven
+//! blend passes, and model.gltf are all wired here. This module has no
+//! knowledge of a glTF asset's actual bytes - loading a .glb and
+//! sampling its animation at a given elapsed time are the caller's job
+//! (core/abi and the renderer); what this module owns is only whether
+//! a model node is playing and for how long.
 
 const std = @import("std");
 const graph = @import("graph");
@@ -34,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, model_gltf };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -44,6 +46,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "shader.pass")) return .shader_pass;
     if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
     if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
+    if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
     return null;
 }
 
@@ -51,11 +54,10 @@ const ParamSlot = struct { name: []const u8, effect: EffectSlot };
 
 /// The param names each node type accepts and which effect slot each one
 /// drives - the only place that mapping is declared. shader.pass,
-/// lut.pass, and blend.pass have no effect-slot params of their own:
-/// each one's id names the asset it runs (a shader source file, a LUT
-/// image, or - for blend.pass - the background image it swaps in), the
-/// same way a node's id already resolves against other nodes for
-/// wiring.
+/// lut.pass, blend.pass, and model.gltf have no effect-slot params of
+/// their own: each one's id names the asset it runs (a shader source
+/// file, a LUT image, a background image, or a .glb model), the same
+/// way a node's id already resolves against other nodes for wiring.
 fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
     return switch (node_type) {
         .beauty_face => &.{
@@ -68,7 +70,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .model_gltf => &.{},
     };
 }
 
@@ -83,12 +85,17 @@ const LensNode = struct {
     graph_index: graph.NodeIndex,
     node_type: NodeType,
     bindings: [effect_slot_count]?ParamSource = @splat(null),
-    /// Set only for .shader_pass, .lut_pass, and .blend_pass nodes: the
-    /// node's own id, which also names the asset it runs
-    /// (shaders/<id>.glsl for shader.pass, assets/<id>.png for lut.pass
-    /// and for blend.pass's background image) - a slice into the Lens's
-    /// own retained manifest arena, not separately owned.
+    /// Set only for .shader_pass, .lut_pass, .blend_pass, and
+    /// .model_gltf nodes: the node's own id, which also names the asset
+    /// it runs (shaders/<id>.glsl for shader.pass, assets/<id>.png for
+    /// lut.pass and for blend.pass's background image, assets/<id>.glb
+    /// for model.gltf) - a slice into the Lens's own retained manifest
+    /// arena, not separately owned.
     asset_stem: ?[]const u8 = null,
+    /// .model_gltf only: microseconds since play_animation last fired
+    /// for this node, null if it never has. Advances every tick() the
+    /// same way a ramp does - once a trigger starts it, not before.
+    model_elapsed_us: ?u64 = null,
 };
 
 /// One shader.pass node ready for the caller to load and draw - which
@@ -116,12 +123,19 @@ pub const BlendPassNode = struct {
     background_stem: []const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend };
+/// One model.gltf node ready for the caller to load and draw - which
+/// graph node it is, and the .glb (assets/<stem>.glb) it names.
+pub const ModelNode = struct {
+    graph_index: graph.NodeIndex,
+    model_stem: []const u8,
+};
 
-/// One shader.pass, lut.pass, or blend.pass node, tagged with which -
-/// the caller's real draw order for a chain that may mix all three
-/// kinds, since the graph itself makes no distinction between them
-/// beyond node_type.
+pub const PassKind = enum { shader, lut, blend, model };
+
+/// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
+/// with which - the caller's real draw order for a chain that may mix
+/// any of the four, since the graph itself makes no distinction
+/// between them beyond node_type.
 pub const CompositePass = struct {
     graph_index: graph.NodeIndex,
     kind: PassKind,
@@ -145,6 +159,15 @@ pub const Lens = struct {
     param_values: []f32,
     ramps: []?animation.Ramp,
     nodes: []LensNode,
+    /// Every distinct timer('name') this lens's triggers reference,
+    /// each name individually owned (not a slice into a compiled
+    /// trigger's own arena, so freeing timer_names never depends on
+    /// compiled_triggers' own deinit order). timer_elapsed_us is a
+    /// parallel array: microseconds since lens activation, running
+    /// continuously (not trigger-gated - a timer is a clock a trigger
+    /// reads, not a value a trigger's action starts).
+    timer_names: [][]u8,
+    timer_elapsed_us: []u64,
 
     pub fn deinit(self: *Lens, g: *graph.Graph) void {
         for (self.nodes) |n| g.removeNode(n.graph_index);
@@ -154,6 +177,9 @@ pub const Lens = struct {
         self.gpa.free(self.param_values);
         self.gpa.free(self.ramps);
         self.gpa.free(self.nodes);
+        for (self.timer_names) |name| self.gpa.free(name);
+        self.gpa.free(self.timer_names);
+        self.gpa.free(self.timer_elapsed_us);
         self.manifest.deinit();
         self.* = undefined;
     }
@@ -215,11 +241,26 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
-    /// Every shader.pass, lut.pass, and blend.pass node this lens
-    /// spliced, in one real execution-order sequence - the actual draw
-    /// order for a chain that mixes any of the three kinds, which
-    /// shaderPassNodes/lutPassNodes/blendPassNodes alone cannot express
-    /// since each only ever sees its own kind.
+    /// Every model.gltf node this lens spliced, in the graph's real
+    /// execution order - mirrors shaderPassNodes/lutPassNodes/
+    /// blendPassNodes exactly, one more node type over.
+    pub fn modelNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]ModelNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(ModelNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .model_gltf) continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.? });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
+    /// Every shader.pass, lut.pass, blend.pass, and model.gltf node
+    /// this lens spliced, in one real execution-order sequence - the
+    /// actual draw order for a chain that mixes any of the four kinds,
+    /// which the per-kind accessors alone cannot express since each
+    /// only ever sees its own kind.
     pub fn compositePassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]CompositePass {
         const order = try g.executionOrder();
         var out: std.ArrayList(CompositePass) = .empty;
@@ -230,11 +271,21 @@ pub const Lens = struct {
                 .shader_pass => .shader,
                 .lut_pass => .lut,
                 .blend_pass => .blend,
+                .model_gltf => .model,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
         }
         return out.toOwnedSlice(gpa);
+    }
+
+    /// Current playback position for a model.gltf node, microseconds
+    /// since its play_animation trigger last fired - null if it never
+    /// has. The caller samples the loaded animation clip at this time;
+    /// this module holds no clip data of its own.
+    pub fn modelElapsedUs(self: *const Lens, graph_index: graph.NodeIndex) ?u64 {
+        const node = self.findNode(graph_index) orelse return null;
+        return node.model_elapsed_us;
     }
 
     /// Whether this lens spliced any beauty.* node - what gates whether
@@ -335,7 +386,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .graph_index = graph_index,
             .node_type = node_type,
             .asset_stem = switch (node_type) {
-                .shader_pass, .lut_pass, .blend_pass => node.id,
+                .shader_pass, .lut_pass, .blend_pass, .model_gltf => node.id,
                 else => null,
             },
         };
@@ -370,6 +421,16 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         spliced_count += 1;
     }
 
+    var timer_names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (timer_names.items) |name| gpa.free(name);
+        timer_names.deinit(gpa);
+    }
+    for (compiled_triggers) |*expr| try collectTimerNames(gpa, expr.root, &timer_names);
+    const timer_elapsed_us = try gpa.alloc(u64, timer_names.items.len);
+    errdefer gpa.free(timer_elapsed_us);
+    @memset(timer_elapsed_us, 0);
+
     return .{
         .gpa = gpa,
         .manifest = lens_manifest,
@@ -378,12 +439,43 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .param_values = param_values,
         .ramps = ramps,
         .nodes = nodes,
+        .timer_names = try timer_names.toOwnedSlice(gpa),
+        .timer_elapsed_us = timer_elapsed_us,
     };
+}
+
+/// Collects every distinct timer('name') a compiled trigger tree
+/// references, deduped, each name individually owned by the caller -
+/// see Lens.timer_names for why these are duped rather than borrowed
+/// from the trigger's own compile-time arena.
+fn collectTimerNames(gpa: std.mem.Allocator, node: *const trigger.Node, names: *std.ArrayList([]u8)) std.mem.Allocator.Error!void {
+    switch (node.*) {
+        .signal_bool => {},
+        .compare => |c| {
+            if (c.signal.kind != .timer) return;
+            for (names.items) |existing| {
+                if (std.mem.eql(u8, existing, c.signal.timer_name)) return;
+            }
+            try names.append(gpa, try gpa.dupe(u8, c.signal.timer_name));
+        },
+        .not => |inner| try collectTimerNames(gpa, inner, names),
+        .and_, .or_ => |combine| {
+            try collectTimerNames(gpa, combine.lhs, names);
+            try collectTimerNames(gpa, combine.rhs, names);
+        },
+    }
 }
 
 fn paramIndex(lens: *const Lens, name: []const u8) ?u16 {
     for (lens.manifest.parameters, 0..) |p, i| {
         if (std.mem.eql(u8, p.name, name)) return @intCast(i);
+    }
+    return null;
+}
+
+fn timerIndex(lens: *const Lens, name: []const u8) ?usize {
+    for (lens.timer_names, 0..) |existing, i| {
+        if (std.mem.eql(u8, existing, name)) return i;
     }
     return null;
 }
@@ -395,21 +487,32 @@ fn clampToParam(p: manifest.Parameter, value: f32) f32 {
     };
 }
 
-/// Advances every in-flight ramp by real_dt_us, fires every trigger that
-/// just transitioned false-to-true, and returns the effect
-/// values that changed as a result - only param_set/param_ramp are
-/// handled here; show/hide/play_animation/swap_subgraph/reset_timer are
-/// not yet wired to anything (deliberately, see the module doc).
+/// Advances every named timer and in-flight ramp, fires every trigger
+/// that just transitioned false-to-true, and returns the effect values
+/// that changed as a result. Timers advance before triggers evaluate
+/// (a timer is a continuously-running clock a trigger reads, so this
+/// frame's trigger pass needs this frame's own elapsed time); ramps and
+/// model playback advance after, so an action that starts one this
+/// frame gets its first real advance now rather than sitting at its
+/// starting value until the next tick. show/hide/swap_subgraph are
+/// still not wired to anything (real remaining work, tracked
+/// separately from this lens's own scope).
 pub fn tick(lens: *Lens, gpa: std.mem.Allocator, real_dt_us: u32, signals: trigger.Signals) std.mem.Allocator.Error![]AppliedEffect {
+    for (lens.timer_elapsed_us) |*elapsed| elapsed.* += real_dt_us;
+    const timer_values = try gpa.alloc(trigger.TimerValue, lens.timer_names.len);
+    defer gpa.free(timer_values);
+    for (lens.timer_names, lens.timer_elapsed_us, 0..) |name, elapsed_us, i| {
+        timer_values[i] = .{ .name = name, .seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0 };
+    }
+    var live_signals = signals;
+    live_signals.timers = timer_values;
+
     var touched_params = try gpa.alloc(bool, lens.param_values.len);
     defer gpa.free(touched_params);
     @memset(touched_params, false);
 
-    // Triggers first, so a ramp an action starts this frame gets its
-    // first real advance below in the same tick rather than sitting at
-    // its starting value until the next one.
     for (lens.compiled_triggers, 0..) |*expr, i| {
-        const is_true = trigger.evaluate(expr.root, signals);
+        const is_true = trigger.evaluate(expr.root, live_signals);
         defer lens.trigger_was_true[i] = is_true;
         if (is_true and !lens.trigger_was_true[i]) {
             applyAction(lens, lens.manifest.triggers[i].action, touched_params);
@@ -423,6 +526,10 @@ pub fn tick(lens: *Lens, gpa: std.mem.Allocator, real_dt_us: u32, signals: trigg
             touched_params[i] = true;
             if (r.done) ramp.* = null;
         }
+    }
+
+    for (lens.nodes) |*node| {
+        if (node.model_elapsed_us) |*elapsed| elapsed.* += real_dt_us;
     }
 
     var out: std.ArrayList(AppliedEffect) = .empty;
@@ -453,7 +560,19 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
                 .spring => animation.Ramp.startSpring(lens.param_values[idx], target, action.stiffness, action.damping),
             };
         },
-        .show, .hide, .play_animation, .swap_subgraph, .reset_timer => {},
+        .play_animation => {
+            for (lens.nodes) |*node| {
+                if (node.node_type != .model_gltf) continue;
+                const stem = node.asset_stem orelse continue;
+                if (!std.mem.eql(u8, stem, action.target)) continue;
+                node.model_elapsed_us = 0;
+            }
+        },
+        .reset_timer => {
+            const idx = timerIndex(lens, action.target) orelse return;
+            lens.timer_elapsed_us[idx] = 0;
+        },
+        .show, .hide, .swap_subgraph => {},
     }
 }
 

@@ -10,6 +10,7 @@ pub const invalid_handle: u16 = std.math.maxInt(u16);
 
 pub const TextureHandle = struct { idx: u16 = invalid_handle };
 pub const VertexBufferHandle = struct { idx: u16 = invalid_handle };
+pub const IndexBufferHandle = struct { idx: u16 = invalid_handle };
 
 /// fs_beauty_reshape.sc's own u_facePoints packing - mirrored here so
 /// abi.zig's contour slicing compiles identically against the stub.
@@ -49,6 +50,8 @@ pub const PreviewFrame = union(enum) {
 
 pub const Renderer = struct {
     default_mask_texture: TextureHandle = .{},
+    width: u32 = 0,
+    height: u32 = 0,
 
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         _ = gpa;
@@ -198,6 +201,34 @@ pub const Renderer = struct {
         return .{};
     }
 
+    pub const ModelMesh = struct {
+        vertex_buffer: VertexBufferHandle = .{},
+        index_buffer: IndexBufferHandle = .{},
+        index_count: u32 = 0,
+    };
+
+    pub fn createModelMesh(r: *Renderer, positions: []const [3]f32, indices: []const u32) !ModelMesh {
+        _ = r;
+        _ = positions;
+        _ = indices;
+        return error.RendererUnavailable;
+    }
+
+    pub fn destroyModelMesh(mesh: ModelMesh) void {
+        _ = mesh;
+    }
+
+    pub fn submitModel(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = model_matrix;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub fn uploadNv12(r: *Renderer, width: u16, height: u16, y: [*]const u8, y_stride: u32, uv: [*]const u8, uv_stride: u32) !Nv12Textures {
         _ = r;
         _ = width;
@@ -272,6 +303,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadMakeupProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadModelProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 
