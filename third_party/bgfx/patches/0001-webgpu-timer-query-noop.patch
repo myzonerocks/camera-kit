@@ -1,0 +1,23 @@
+--- a/src/renderer_webgpu.cpp
++++ b/src/renderer_webgpu.cpp
+@@ -5266,7 +5266,9 @@
+ 			query.m_frameNum  = _frameNum;
+ 
+ 			const uint32_t offset = idx * 2 + 0;
+-			WGPU_CHECK(wgpuCommandEncoderWriteTimestamp(s_renderWGPU->m_cmd.m_commandEncoder, m_querySet, offset) );
++			BX_UNUSED(offset);
++			// camera-kit patch: encoder.writeTimestamp no longer exists in
++			// shipping WebGPU - see third_party/bgfx/patches/README.md.
+ 
+ 			return idx;
+ 		}
+@@ -5283,7 +5285,8 @@
+ 		query.m_fence = s_renderWGPU->m_cmd.m_counter;
+ 
+ 		const uint32_t offset = _idx * 2 + 1;
+-		WGPU_CHECK(wgpuCommandEncoderWriteTimestamp(s_renderWGPU->m_cmd.m_commandEncoder, m_querySet, offset) );
++		BX_UNUSED(offset);
++		// camera-kit patch: see begin() above.
+ 
+ 		m_control.consume(1);
+ 	}
