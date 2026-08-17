@@ -3200,7 +3200,7 @@ fn addWasmWebgpuSmokeStep(b: *std.Build, step: *std.Build.Step) void {
     const link = b.addSystemCommand(&.{em.em_plus_plus});
     setEmEnv(link, em);
     for (objects.items) |obj| link.addFileArg(obj);
-    link.addArgs(&.{ "-sALLOW_MEMORY_GROWTH=1", "--use-port=emdawnwebgpu" });
+    link.addArgs(&.{ "-sALLOW_MEMORY_GROWTH=1", "--use-port=emdawnwebgpu", "-sASYNCIFY=1" });
     link.addArg("-o");
     const js_out = link.addOutputFileArg("wasm_webgpu_smoke.js");
 
