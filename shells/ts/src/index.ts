@@ -304,7 +304,11 @@ export class PreviewSession {
   /// face to prove, not Chrome's fake capture device's own pattern).
   async loadStillFrame(url: string): Promise<void> {
     const image = await decodeImageRgba(await (await fetch(url)).blob());
-    this.submitRgbaFrame(image.data, image.width, image.height);
+    // Not mirrored: a loaded test photo isn't a front camera, and
+    // setLandmarksFromStill tracks this same unmirrored image - mirroring
+    // only the background here would leave the tracked landmarks
+    // pointing at the wrong side of the now-mirrored face.
+    this.submitRgbaFrame(image.data, image.width, image.height, false);
   }
 
   private ensureFramePixels(byteLength: number): void {
@@ -314,7 +318,7 @@ export class PreviewSession {
     this.framePixelsCapacity = byteLength;
   }
 
-  private submitRgbaFrame(rgba: Uint8ClampedArray, width: number, height: number): void {
+  private submitRgbaFrame(rgba: Uint8ClampedArray, width: number, height: number, mirror: boolean): void {
     this.frameWidth = width;
     this.frameHeight = height;
     const byteLength = width * height * 4;
@@ -322,7 +326,7 @@ export class PreviewSession {
     this.mod.HEAPU8.set(rgba, this.framePixelsPtr);
 
     const rotationQuarters = this.videoFlipped ? 2 : 0;
-    const flags = FRAME_FLAG_MIRROR | (rotationQuarters << FRAME_ROTATION_SHIFT);
+    const flags = (mirror ? FRAME_FLAG_MIRROR : 0) | (rotationQuarters << FRAME_ROTATION_SHIFT);
     this.mod.setValue(this.frameDescPtr, width, "i32");
     this.mod.setValue(this.frameDescPtr + 4, height, "i32");
     this.mod.setValue(this.frameDescPtr + 8, PIXEL_FORMAT_RGBA8, "i32");
@@ -389,7 +393,7 @@ export class PreviewSession {
       this.scratchCanvas.height = height;
       this.scratchCtx.drawImage(this.video, 0, 0, width, height);
       const pixels = this.scratchCtx.getImageData(0, 0, width, height);
-      this.submitRgbaFrame(pixels.data, width, height);
+      this.submitRgbaFrame(pixels.data, width, height, true);
     }
 
     const status = this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
