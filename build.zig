@@ -903,6 +903,13 @@ pub fn build(b: *std.Build) void {
                 "-sMODULARIZE=1",
                 "-sEXPORT_NAME=CameraKitWebModule",
                 "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,stringToNewUTF8,UTF8ToString,getValue,setValue",
+                // A real ES module (import CameraKitWebModule from
+                // "./camerakit_web.js") rather than a plain-global
+                // factory function a <script> tag would have to expose -
+                // the ts shell's whole build (bun, ESM throughout)
+                // already assumes every dependency is import-able.
+                "-sEXPORT_ES6=1",
+                "-sUSE_ES6_IMPORT_META=1",
             });
             link.addArg("-o");
             const js_out = link.addOutputFileArg("camerakit_web.js");
