@@ -2940,11 +2940,27 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // blend.pass's own fixed fragment shader, same reasoning as
         // fs_lut_pass above.
         .{ .name = "fs_blend_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // beauty.face's smooth effect blends toward this separable
+        // blur, run twice (horizontal then vertical) by the two
+        // different u_blurStep values the caller submits it with, same
+        // program both times.
+        .{ .name = "fs_blur_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // beauty.face's own fixed fragment shader: smooth and whiten,
+        // same reasoning as fs_lut_pass above.
+        .{ .name = "fs_beauty_face", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // beauty.reshape's own fixed fragment shader: thin_face and
+        // big_eye, same reasoning as fs_lut_pass above.
+        .{ .name = "fs_beauty_reshape", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
         .{ .profile = "metal", .platform = "ios", .tag = "metal" },
         .{ .profile = "spirv", .platform = "android", .tag = "spirv" },
         .{ .profile = "300_es", .platform = "android", .tag = "essl" },
+        // Same GLSL ES 3.00 profile Android's essl blobs target - bgfx
+        // reports OPENGLES for both - but compiled for asm.js rather
+        // than android, its own tag since shaderc's platform argument
+        // can affect the preprocessor defines it injects.
+        .{ .profile = "300_es", .platform = "asm.js", .tag = "essl_web" },
     };
     const computes = [_][]const u8{"cs_nv12_to_rgba"};
     for (computes) |compute_name| {
