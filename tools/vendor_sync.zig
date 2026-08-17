@@ -31,6 +31,9 @@ const Pin = struct {
     linux_x86_64_sha256: []const u8 = "",
     /// Skip rather than fail on a host with no matching platform archive.
     host_optional: bool = false,
+    /// Excluded from the default (no --only) sync - large, single-use
+    /// vendors name this so every CI job's setup doesn't pay for them.
+    opt_in: bool = false,
 };
 
 const builtin = @import("builtin");
@@ -125,13 +128,17 @@ const Sync = struct {
         return error.CommandFailed;
     }
 
-    fn syncOne(s: *Sync, name: []const u8) !void {
+    fn syncOne(s: *Sync, name: []const u8, explicit: bool) !void {
         const pin = s.loadPin(name) catch |err| {
             s.fail("{s}: cannot load pin: {t}", .{ name, err });
             return;
         };
         if (!std.mem.eql(u8, pin.name, name)) {
             s.fail("{s}: pin name '{s}' does not match its directory", .{ name, pin.name });
+            return;
+        }
+        if (pin.opt_in and !explicit) {
+            std.debug.print("vendor-sync: {s} opt-in, skipped\n", .{name});
             return;
         }
         if (!licenseAllowed(pin.license) and !licenseExcepted(pin.name, pin.license)) {
@@ -238,7 +245,7 @@ pub fn main(init: std.process.Init) !u8 {
         if (only) |wanted| {
             if (!std.mem.eql(u8, name, wanted)) continue;
         }
-        try s.syncOne(name);
+        try s.syncOne(name, only != null);
     }
 
     if (s.failures != 0) {
@@ -306,4 +313,19 @@ test "host archive override is null with no platform pins set" {
         .license_sha256 = "",
     };
     try t.expect(hostArchiveOverrideFor(pin, .macos, .aarch64) == null);
+}
+
+test "opt_in and host_optional default to false" {
+    const pin = Pin{
+        .name = "x",
+        .repo = "",
+        .version = "",
+        .commit = "",
+        .archive_sha256 = "",
+        .license = "MIT",
+        .license_file = "",
+        .license_sha256 = "",
+    };
+    try t.expect(!pin.opt_in);
+    try t.expect(!pin.host_optional);
 }
