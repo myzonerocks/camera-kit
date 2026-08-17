@@ -232,6 +232,13 @@ pub const Session = struct {
     web_beauty_reshape_target: ?render.Renderer.OffscreenTarget = null,
     web_beauty_targets_width: u16 = 0,
     web_beauty_targets_height: u16 = 0,
+    /// beauty.face's whiten effect reads these four - gray, origin,
+    /// skin, and custom, matching gpupixel's own beauty_face_unit_
+    /// filter.cc lookup set. Uploaded via ck_session_set_beauty_lut, a
+    /// caller's own PNG decode (a browser's native one, most likely -
+    /// there is no decoder wired into this build for web) handed in as
+    /// raw RGBA; whiten stays inert until all four are loaded.
+    web_beauty_lut_textures: [4]?render.TextureHandle = @splat(null),
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -427,15 +434,19 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
 }
 
 /// Whether beauty.face or beauty.reshape has anything to actually draw
-/// this frame on web - whiten alone never does (its LUT textures aren't
-/// loaded yet), lipstick/blush aren't wired (a mesh draw, not a
-/// full-screen pass like these two).
+/// this frame on web - whiten alone only counts once its four LUT
+/// textures have loaded (ck_session_set_beauty_lut), lipstick/blush
+/// aren't wired (a mesh draw, not a full-screen pass like these two).
 fn webBeautyActive(s: *const Session) bool {
     if (!is_web) return false;
     const smooth = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.smooth)];
+    const whiten = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.whiten)];
     const thin_face = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.thin_face)];
     const big_eye = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.big_eye)];
-    return smooth > 0.0 or thin_face > 0.0 or big_eye > 0.0;
+    const luts_loaded = for (s.web_beauty_lut_textures) |slot| {
+        if (slot == null) break false;
+    } else true;
+    return smooth > 0.0 or thin_face > 0.0 or big_eye > 0.0 or (whiten > 0.0 and luts_loaded);
 }
 
 fn ensureWebBeautyTargets(s: *Session, width: u16, height: u16) !void {
@@ -485,7 +496,15 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
     }
 
     const smooth = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.smooth)];
-    if (smooth > 0.0) {
+    const whiten_requested = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.whiten)];
+    const luts_loaded = for (s.web_beauty_lut_textures) |slot| {
+        if (slot == null) break false;
+    } else true;
+    // Whiten renders inert until all four LUT textures load on web
+    // (ck_session_set_beauty_lut) - the amount the caller actually
+    // requested still gets tracked either way, just not applied yet.
+    const whiten = if (luts_loaded) whiten_requested else 0.0;
+    if (smooth > 0.0 or whiten > 0.0) {
         const step_x = 1.0 / @as(f32, @floatFromInt(width));
         const step_y = 1.0 / @as(f32, @floatFromInt(height));
         var view_id = next_view_id.*;
@@ -500,11 +519,25 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
         const view_id2 = next_view_id.*;
         next_view_id.* += 1;
         render.Renderer.setViewTarget(view_id2, s.web_beauty_blur_h_target.?, width, height);
-        // Whiten always renders inert (0.0) until its four LUT textures
-        // load on web - default_mask_texture is a safe 1x1 placeholder
-        // for the four samplers the shader never actually reads while
-        // whiten is off.
-        r.submitBeautyFace(view_id2, current, s.web_beauty_mean_target.?.texture, r.default_mask_texture, r.default_mask_texture, r.default_mask_texture, r.default_mask_texture, smooth, 0.0);
+        // default_mask_texture is a safe 1x1 placeholder for whichever
+        // LUT slots aren't loaded yet - the shader never actually
+        // samples them while whiten is 0.
+        const lut = struct {
+            fn textureOr(slot: ?render.TextureHandle, fallback: render.TextureHandle) render.TextureHandle {
+                return slot orelse fallback;
+            }
+        }.textureOr;
+        r.submitBeautyFace(
+            view_id2,
+            current,
+            s.web_beauty_mean_target.?.texture,
+            lut(s.web_beauty_lut_textures[0], r.default_mask_texture),
+            lut(s.web_beauty_lut_textures[1], r.default_mask_texture),
+            lut(s.web_beauty_lut_textures[2], r.default_mask_texture),
+            lut(s.web_beauty_lut_textures[3], r.default_mask_texture),
+            smooth,
+            whiten,
+        );
         current = s.web_beauty_blur_h_target.?.texture;
     }
 
@@ -697,6 +730,12 @@ fn destroyWebBeautyTargets(session: *Session) void {
     }
     session.web_beauty_targets_width = 0;
     session.web_beauty_targets_height = 0;
+    if (session.engine.renderer) |*r| {
+        for (&session.web_beauty_lut_textures) |*slot| {
+            if (slot.*) |texture| r.destroyTexture(texture);
+            slot.* = null;
+        }
+    }
 }
 
 fn releaseCurrentFrame(session: *Session) void {
@@ -1096,6 +1135,27 @@ pub export fn ck_session_set_beauty(session: ?*Session, effect: i32, value: f32)
     }
     const chain = s.beauty_chain orelse return .again;
     beauty.set(chain, @enumFromInt(effect), value);
+    return .ok;
+}
+
+/// Uploads one of beauty.face's four whiten lookup textures on web -
+/// slot 0 gray, 1 origin, 2 skin, 3 custom, matching gpupixel's own
+/// lookup_gray/lookup_origin/lookup_skin/lookup_light asset order. rgba
+/// is a caller-decoded image (this build has no PNG decoder wired in
+/// for web); whiten renders inert until all four slots are loaded.
+/// Unsupported on every other target - native's whiten runs through
+/// adapters/beauty.zig's own gpupixel chain, not this texture set.
+pub export fn ck_session_set_beauty_lut(session: ?*Session, slot: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    if (!is_web) return .unsupported;
+    const s = session orelse return .invalid_argument;
+    if (slot < 0 or slot > 3) return .invalid_argument;
+    const bytes = rgba orelse return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    const texture = render.Renderer.createStaticTexture(@intCast(width), @intCast(height), bytes[0 .. @as(usize, width) * height * 4]);
+    const index: usize = @intCast(slot);
+    if (s.web_beauty_lut_textures[index]) |old| r.destroyTexture(old);
+    s.web_beauty_lut_textures[index] = texture;
     return .ok;
 }
 
