@@ -60,15 +60,34 @@ type EngineModuleFactory = (overrides?: Record<string, unknown>) => Promise<Engi
 /// involved at all - just plain bytes handed to the engine's own
 /// texture upload, which owns its own orientation convention entirely
 /// separately from WebGL's.
-async function decodeImageRgba(blob: Blob): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
+/// fit, when given, downscales (never upscales) so the decoded frame
+/// fits within maxWidth/maxHeight - LUT and makeup textures pass
+/// nothing and decode at native resolution; loadStillFrame passes the
+/// canvas's own size, since a corpus photo can be far larger than a
+/// real camera frame ever would be. The composite chain sizes every
+/// offscreen target and the final swap-chain view rect off the
+/// submitted frame's own dimensions, so a frame wider or taller than
+/// the actual WebGL drawing buffer gets silently clipped by the GPU to
+/// whatever corner overlaps it - real, found via a still photo (2400x
+/// 3000) submitted straight through to a 1280x720 canvas, where only
+/// the top-left ~13% ended up visible and every landmark-driven effect
+/// (thin-face, big-eye, lipstick, blush) happened to warp a region
+/// entirely outside that sliver, reading back as no change at all.
+async function decodeImageRgba(
+  blob: Blob,
+  fit?: { maxWidth: number; maxHeight: number },
+): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
   const bitmap = await createImageBitmap(blob);
+  const scale = fit ? Math.min(1, fit.maxWidth / bitmap.width, fit.maxHeight / bitmap.height) : 1;
+  const width = Math.round(bitmap.width * scale);
+  const height = Math.round(bitmap.height * scale);
   const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext("2d")!;
-  ctx.drawImage(bitmap, 0, 0);
-  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  return { data: image.data, width: canvas.width, height: canvas.height };
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  const image = ctx.getImageData(0, 0, width, height);
+  return { data: image.data, width, height };
 }
 
 export class PreviewSession {
@@ -211,6 +230,41 @@ export class PreviewSession {
     this.mod.ccall("ck_session_set_beauty", "number", ["number", "number", "number"], [this.session, effect, amount]);
   }
 
+  /// Activates a lens from its manifest JSON directly (ck_session_
+  /// activate_lens, not the directory-based variant) - the only
+  /// activation path this build actually supports: has_file_io is
+  /// comptime-false for every wasm target, so ck_session_activate_lens_
+  /// from_directory always reports unsupported here, and shader.pass/
+  /// lut.pass/blend.pass nodes need compiled resources a bundle
+  /// directory would provide that this shell has no way to supply yet.
+  /// A lens built entirely from beauty.* nodes (beauty-baseline, say)
+  /// activates and runs for real regardless, since those go through
+  /// applyWebBeautyChain's own embedded shaders, not a per-lens one.
+  activateLens(manifestJson: string): void {
+    const bytes = new TextEncoder().encode(manifestJson);
+    const ptr = this.mod.ccall("ck_alloc", "number", ["number"], [bytes.length]);
+    this.mod.HEAPU8.set(bytes, ptr);
+    this.mod.ccall("ck_session_activate_lens", "number", ["number", "number", "number"], [this.session, ptr, bytes.length]);
+    this.mod.ccall("ck_free", null, ["number", "number"], [ptr, bytes.length]);
+  }
+
+  deactivateLens(): void {
+    this.mod.ccall("ck_session_deactivate_lens", null, ["number"], [this.session]);
+  }
+
+  /// Advances the active lens's triggers/param ramps by dtUs. No face/
+  /// hands/tap/world/audio signal is live here - every signal reads as
+  /// false/zero, so only triggers with no `when` gate (or ones already
+  /// satisfied by a default) actually fire. Real signal wiring is
+  /// future work; this is enough to prove a lens activates and ticks
+  /// deterministically at all.
+  tickLens(dtUs: number): void {
+    const signalsPtr = this.mod.ccall("ck_alloc", "number", ["number"], [232]);
+    this.mod.HEAPU8.fill(0, signalsPtr, signalsPtr + 232);
+    this.mod.ccall("ck_session_tick_lens", "number", ["number", "number", "number"], [this.session, dtUs, signalsPtr]);
+    this.mod.ccall("ck_free", null, ["number", "number"], [signalsPtr, 232]);
+  }
+
   setVideoFlip(enabled: boolean): void {
     this.videoFlipped = enabled;
   }
@@ -303,7 +357,10 @@ export class PreviewSession {
   /// tooling only (skin-smoothing's content-adaptive blend needs a real
   /// face to prove, not Chrome's fake capture device's own pattern).
   async loadStillFrame(url: string): Promise<void> {
-    const image = await decodeImageRgba(await (await fetch(url)).blob());
+    const image = await decodeImageRgba(await (await fetch(url)).blob(), {
+      maxWidth: this.canvas.width,
+      maxHeight: this.canvas.height,
+    });
     // Not mirrored: a loaded test photo isn't a front camera, and
     // setLandmarksFromStill tracks this same unmirrored image - mirroring
     // only the background here would leave the tracked landmarks
@@ -393,7 +450,11 @@ export class PreviewSession {
       this.scratchCanvas.height = height;
       this.scratchCtx.drawImage(this.video, 0, 0, width, height);
       const pixels = this.scratchCtx.getImageData(0, 0, width, height);
-      this.submitRgbaFrame(pixels.data, width, height, true);
+      // Not mirrored here - the demo page's own CSS mirrors the canvas
+      // for display, so the engine keeps working in the camera's real,
+      // unmirrored coordinate space (matching tracking, which analyzes
+      // this same unmirrored buffer).
+      this.submitRgbaFrame(pixels.data, width, height, false);
     }
 
     const status = this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);

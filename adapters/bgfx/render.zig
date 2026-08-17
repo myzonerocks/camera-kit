@@ -827,10 +827,17 @@ pub const Renderer = struct {
         }
         const cache = r.rgba_upload_cache.?;
 
+        // Both axes reversed: bgfx's HTML5/WebGL2 backend samples (0,0)
+        // as the last pixel of an uploaded 2D texture, not the first.
         const mem = c.bgfx_alloc(@as(u32, width) * height * 4) orelse return error.OutOfMemory;
         const dst: [*]u8 = mem.*.data;
         for (0..height) |row| {
-            @memcpy(dst[row * width * 4 ..][0 .. width * 4], rgba[row * stride ..][0 .. width * 4]);
+            const src_row = rgba[(height - 1 - row) * stride ..];
+            const dst_row = dst[row * width * 4 ..];
+            for (0..width) |col| {
+                const src_col = width - 1 - col;
+                @memcpy(dst_row[col * 4 ..][0..4], src_row[src_col * 4 ..][0..4]);
+            }
         }
         c.bgfx_update_texture_2d(cache.texture, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
 

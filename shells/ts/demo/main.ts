@@ -263,6 +263,12 @@ async function run(): Promise<void> {
   (window as unknown as Record<string, unknown>).readCenterPixel = () => Array.from(preview.readCenterPixel());
   (window as unknown as Record<string, unknown>).readFrameSum = () => preview.readFrameSum();
   (window as unknown as Record<string, unknown>).captureFrame = () => preview.captureFrame();
+  (window as unknown as Record<string, unknown>).activateLens = async (url: string) => {
+    const manifestJson = await (await fetch(url)).text();
+    preview.activateLens(manifestJson);
+  };
+  (window as unknown as Record<string, unknown>).deactivateLens = () => preview.deactivateLens();
+  (window as unknown as Record<string, unknown>).tickLens = (dtUs: number) => preview.tickLens(dtUs);
   // Pausing the video element stops the per-frame texture re-upload,
   // freezing whatever the shader is currently sampling.
   (window as unknown as Record<string, unknown>).freezeCamera = () => preview.video.pause();

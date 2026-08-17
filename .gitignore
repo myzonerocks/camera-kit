@@ -65,6 +65,7 @@ shells/ts/demo/camerakit_web.js
 shells/ts/demo/camerakit_web.wasm
 shells/ts/demo/camerakit_tracking.wasm
 shells/ts/demo/face_landmarker.task
+shells/ts/demo/beauty-baseline.manifest.json
 shells/ts/**/*.wasm.map
 
 # Model assets are synced from .models at app build time, never tracked.
