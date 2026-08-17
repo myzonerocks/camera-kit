@@ -23,7 +23,33 @@ const Pin = struct {
     license_sha256: []const u8,
     /// Overrides the github archive pattern for other hosts or tag URLs.
     archive_url: []const u8 = "",
+    /// Per-host-platform prebuilt archive, for a vendor with no single
+    /// source tree every target compiles itself.
+    macos_aarch64_url: []const u8 = "",
+    macos_aarch64_sha256: []const u8 = "",
+    linux_x86_64_url: []const u8 = "",
+    linux_x86_64_sha256: []const u8 = "",
+    /// Skip rather than fail on a host with no matching platform archive.
+    host_optional: bool = false,
 };
+
+const builtin = @import("builtin");
+
+const ArchiveRef = struct { url: []const u8, sha256: []const u8 };
+
+fn hostArchiveOverrideFor(pin: Pin, os_tag: std.Target.Os.Tag, cpu_arch: std.Target.Cpu.Arch) ?ArchiveRef {
+    if (os_tag == .macos and cpu_arch == .aarch64 and pin.macos_aarch64_url.len != 0) {
+        return .{ .url = pin.macos_aarch64_url, .sha256 = pin.macos_aarch64_sha256 };
+    }
+    if (os_tag == .linux and cpu_arch == .x86_64 and pin.linux_x86_64_url.len != 0) {
+        return .{ .url = pin.linux_x86_64_url, .sha256 = pin.linux_x86_64_sha256 };
+    }
+    return null;
+}
+
+fn hostArchiveOverride(pin: Pin) ?ArchiveRef {
+    return hostArchiveOverrideFor(pin, builtin.os.tag, builtin.cpu.arch);
+}
 
 // Licenses that may enter this codebase. Anything else fails closed,
 // including anything unknown.
@@ -34,6 +60,7 @@ const license_allowlist = [_][]const u8{ "MIT", "BSD-2-Clause", "BSD-3-Clause", 
 const license_exceptions = [_]struct { name: []const u8, license: []const u8 }{
     .{ .name = "eigen", .license = "MPL-2.0" },
     .{ .name = "fft2d", .license = "Ooura" },
+    .{ .name = "emscripten-python", .license = "PSF-2.0" },
 };
 
 const max_archive_bytes: usize = 1 << 29;
@@ -120,16 +147,31 @@ const Sync = struct {
             return;
         }
 
+        const override = hostArchiveOverride(pin);
+        const platform_pinned = pin.macos_aarch64_url.len != 0 or pin.linux_x86_64_url.len != 0;
+        if (override == null and platform_pinned and pin.archive_url.len == 0) {
+            if (pin.host_optional) {
+                std.debug.print("vendor-sync: {s} not needed on this host, skipped\n", .{name});
+                return;
+            }
+            s.fail("{s}: no prebuilt archive pinned for this host ({t}-{t})", .{ name, builtin.os.tag, builtin.cpu.arch });
+            return;
+        }
+        const url = if (override) |o|
+            o.url
+        else if (pin.archive_url.len != 0)
+            pin.archive_url
+        else
+            try std.fmt.allocPrint(s.arena, "{s}/archive/{s}.tar.gz", .{ pin.repo, pin.commit });
+        const archive_sha256 = if (override) |o| o.sha256 else pin.archive_sha256;
+        const archive_ext = if (std.mem.endsWith(u8, url, ".tar.xz")) ".tar.xz" else ".tar.gz";
+
         Io.Dir.cwd().createDirPath(s.io, ".vendor-archives") catch {};
-        const archive_path = try std.fmt.allocPrint(s.arena, ".vendor-archives/{s}-{s}.tar.gz", .{ pin.name, pin.commit });
-        if (!s.fileDigestMatches(archive_path, pin.archive_sha256)) {
-            const url = if (pin.archive_url.len != 0)
-                pin.archive_url
-            else
-                try std.fmt.allocPrint(s.arena, "{s}/archive/{s}.tar.gz", .{ pin.repo, pin.commit });
+        const archive_path = try std.fmt.allocPrint(s.arena, ".vendor-archives/{s}-{s}{s}", .{ pin.name, pin.commit, archive_ext });
+        if (!s.fileDigestMatches(archive_path, archive_sha256)) {
             std.debug.print("vendor-sync: fetching {s}\n", .{url});
             try s.run(&.{ "curl", "-fsSL", url, "-o", archive_path });
-            if (!s.fileDigestMatches(archive_path, pin.archive_sha256)) {
+            if (!s.fileDigestMatches(archive_path, archive_sha256)) {
                 s.fail("{s}: archive digest mismatch after download", .{name});
                 return;
             }
@@ -138,7 +180,8 @@ const Sync = struct {
         const dest = try std.fmt.allocPrint(s.arena, ".vendor/{s}", .{pin.name});
         Io.Dir.cwd().deleteTree(s.io, dest) catch {};
         try Io.Dir.cwd().createDirPath(s.io, dest);
-        try s.run(&.{ "tar", "-xzf", archive_path, "-C", dest, "--strip-components=1" });
+        // -f auto-detects gzip vs xz.
+        try s.run(&.{ "tar", "-xf", archive_path, "-C", dest, "--strip-components=1" });
 
         const license_path = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ dest, pin.license_file });
         if (!s.fileDigestMatches(license_path, pin.license_sha256)) {
@@ -228,4 +271,39 @@ test "license allowlist admits permissive and rejects the rest" {
 test "sha256 hex matches a known vector" {
     const hex = Sync.sha256Hex("abc");
     try t.expectEqualStrings("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", &hex);
+}
+
+test "host archive override picks the matching platform pin" {
+    const pin = Pin{
+        .name = "x",
+        .repo = "",
+        .version = "",
+        .commit = "",
+        .archive_sha256 = "",
+        .license = "MIT",
+        .license_file = "",
+        .license_sha256 = "",
+        .macos_aarch64_url = "mac-url",
+        .macos_aarch64_sha256 = "mac-sha",
+        .linux_x86_64_url = "linux-url",
+        .linux_x86_64_sha256 = "linux-sha",
+    };
+    try t.expectEqualStrings("mac-url", hostArchiveOverrideFor(pin, .macos, .aarch64).?.url);
+    try t.expectEqualStrings("linux-url", hostArchiveOverrideFor(pin, .linux, .x86_64).?.url);
+    try t.expect(hostArchiveOverrideFor(pin, .windows, .x86_64) == null);
+    try t.expect(hostArchiveOverrideFor(pin, .macos, .x86_64) == null);
+}
+
+test "host archive override is null with no platform pins set" {
+    const pin = Pin{
+        .name = "x",
+        .repo = "",
+        .version = "",
+        .commit = "",
+        .archive_sha256 = "",
+        .license = "MIT",
+        .license_file = "",
+        .license_sha256 = "",
+    };
+    try t.expect(hostArchiveOverrideFor(pin, .macos, .aarch64) == null);
 }

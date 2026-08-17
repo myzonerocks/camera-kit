@@ -1,0 +1,14 @@
+.{
+    .name = "emscripten",
+    .repo = "https://github.com/emscripten-core/emsdk",
+    .version = "release 833aa203ba2283fc2b6adb504a79a3a0d692df81",
+    .commit = "833aa203ba2283fc2b6adb504a79a3a0d692df81",
+    .archive_sha256 = "",
+    .macos_aarch64_url = "https://storage.googleapis.com/webassembly/emscripten-releases-builds/mac/833aa203ba2283fc2b6adb504a79a3a0d692df81/wasm-binaries-arm64.tar.xz",
+    .macos_aarch64_sha256 = "62f6c99ad5bb4b0f90b09962e77c211391d2178cea228a471bd69aa0baf091b4",
+    .linux_x86_64_url = "https://storage.googleapis.com/webassembly/emscripten-releases-builds/linux/833aa203ba2283fc2b6adb504a79a3a0d692df81/wasm-binaries.tar.xz",
+    .linux_x86_64_sha256 = "6cb7cf45ad85b0b9b466a44cc4bb65ef380e47f040ce73e6f956bde782787f46",
+    .license = "MIT",
+    .license_file = "emscripten/LICENSE",
+    .license_sha256 = "620a78084fc7ca97c0b5dea9abf891f3ffcadfdbf305276f099c9c4e12fc1d86",
+}

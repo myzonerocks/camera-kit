@@ -1,0 +1,13 @@
+.{
+    .name = "emscripten-python",
+    .repo = "https://github.com/emscripten-core/emsdk",
+    .version = "3.13.3-0",
+    .commit = "python-3.13.3-0",
+    .archive_sha256 = "",
+    .macos_aarch64_url = "https://storage.googleapis.com/webassembly/emscripten-releases-builds/deps/python-3.13.3-0-macos-arm64.tar.gz",
+    .macos_aarch64_sha256 = "2b0899d7ade9463b0c909ef23aeea27546a4f412637998d817a49718bc2bac19",
+    .host_optional = true,
+    .license = "PSF-2.0",
+    .license_file = "lib/python3.13/LICENSE.txt",
+    .license_sha256 = "78b12c3a81360b357002334f0e70ea0e92eebf7a9b358805c03c48484945f3bb",
+}
