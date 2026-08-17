@@ -202,9 +202,13 @@ async function run(): Promise<void> {
   });
   await preview.start();
   // Persisted across reloads: a camera that hands the browser
-  // pre-rotated frames does so every time, not just this once.
+  // pre-rotated frames does so every time, not just this once. Default
+  // true on a device that's never recorded a choice - this demo's own
+  // camera does this consistently, so "never asked" should mean
+  // "already correct," not "upside down until you notice and fix it."
   const flipCameraCheckbox = document.getElementById("flip-camera") as HTMLInputElement | null;
-  const flipStored = localStorage.getItem("ckweb-flip-camera") === "1";
+  const flipRaw = localStorage.getItem("ckweb-flip-camera");
+  const flipStored = flipRaw === null ? true : flipRaw === "1";
   if (flipCameraCheckbox) {
     flipCameraCheckbox.checked = flipStored;
     preview.setVideoFlip(flipStored);
