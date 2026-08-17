@@ -24,7 +24,7 @@ pub const invalid_handle: u16 = std.math.maxInt(u16);
 /// points per vec4 uniform - thin_face/big_eye only ever index into
 /// that base range, never the five derived hub points face106.zig
 /// appends for lipstick/blush's own mesh.
-const face_point_vec4_count = 53;
+pub const face_point_vec4_count = 53;
 
 /// A named alias for bgfx's own texture handle, matching the stub
 /// module's TextureHandle - lets callers that need to name the type

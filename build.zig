@@ -825,6 +825,17 @@ pub fn build(b: *std.Build) void {
             abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, math_em));
             abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
             abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
+            // Web's own beauty.reshape dispatch needs the 106-point
+            // contour directly (no gpupixel bridge to hand raw
+            // landmarks to on this target) - the same module the real
+            // beauty adapter already reduces tracked landmarks through.
+            const face106_em = b.createModule(.{
+                .root_source_file = b.path("core/tracking/face106.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
+            });
+            abi_em.addImport("face106", face106_em);
             const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = .ReleaseSmall });
             const lens_trigger_em = b.createModule(.{
                 .root_source_file = b.path("core/lens/trigger.zig"),
