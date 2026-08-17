@@ -882,10 +882,20 @@ pub fn build(b: *std.Build) void {
                 "-sMAX_WEBGL_VERSION=2",
                 "-sFULL_ES3=1",
                 "-sALLOW_MEMORY_GROWTH=1",
-                // 64MB up front - comfortably past what session/engine
-                // creation and a frame or two of textures need, so
-                // normal startup doesn't grow memory at all.
-                "-sINITIAL_MEMORY=67108864",
+                // 256MB up front. 64MB (comfortably past what session/
+                // engine creation and a frame or two of textures need)
+                // was enough until the ts shell started submitting real
+                // RGBA frames through ck_session_submit_frame_rgba_copy
+                // - a single still test photo at 2400x3000 is 28.8MB by
+                // itself, on top of live 1280x720 camera frames, LUT/
+                // makeup textures, and bgfx's own state. Raised as a
+                // precaution while chasing a real readback bug that
+                // turned out to be unrelated (a stale bgfx view-target
+                // binding, fixed at its actual source in abi.zig) -
+                // kept anyway since a still-photo-sized upload genuinely
+                // is close enough to the old budget to be worth the
+                // headroom.
+                "-sINITIAL_MEMORY=268435456",
                 // Every ck_* entry point is a real call site the TS
                 // shell reaches dynamically (no single header enumerates
                 // them the way a hand-written EXPORTED_FUNCTIONS list

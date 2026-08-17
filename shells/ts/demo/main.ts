@@ -1,6 +1,5 @@
-import { Core, PreviewSession } from "../src/index.ts";
+import { PreviewSession } from "../src/index.ts";
 import { FACE_LANDMARK_COUNT } from "../src/tracking.ts";
-import { fill as fillFace106 } from "../src/face106.ts";
 
 const status = document.getElementById("status")!;
 const canvas = document.getElementById("preview") as HTMLCanvasElement;
@@ -112,9 +111,9 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     void link.send(pixels.data, analysisWidth, analysisHeight, Math.round(performance.now() * 1000)).then((reply) => {
       drawOverlay(reply, analysisWidth, analysisHeight);
       preview.setFaceLandmarks(
-        reply.presence >= 0.5 && reply.landmarkCount > 0
-          ? fillFace106(reply.landmarks, analysisWidth, analysisHeight)
-          : null,
+        reply.presence >= 0.5 && reply.landmarkCount > 0 ? reply.landmarks : null,
+        analysisWidth,
+        analysisHeight,
       );
       if (!trackingAnnounced) {
         trackingAnnounced = true;
@@ -154,35 +153,22 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     const pixels = stillCtx.getImageData(0, 0, still.width, still.height);
     const reply = await link.send(pixels.data, still.width, still.height, 0);
     preview.setFaceLandmarks(
-      reply.presence >= 0.5 && reply.landmarkCount > 0 ? fillFace106(reply.landmarks, still.width, still.height) : null,
+      reply.presence >= 0.5 && reply.landmarkCount > 0 ? reply.landmarks : null,
+      still.width,
+      still.height,
     );
   };
   (window as unknown as Record<string, unknown>).trackingUp = true;
 }
 
 async function run(): Promise<void> {
-  const core = await Core.load(new URL("./camerakit.wasm", import.meta.url));
-  const version = core.abiVersion();
-  status.textContent = `abi ${version >> 16}.${version & 0xffff}`;
-
-  // The conversion matrix comes from the core; sanity-check one known
-  // anchor so a broken wasm surface fails loudly here, not in a shader.
-  const m = core.yuvToRgbMatrix(1, 0);
-  if (Math.abs(m[0] - 255 / 219) > 1e-4) {
-    status.textContent = "core color matrix wrong";
-    return;
-  }
-
-  const engine = core.createEngine();
-  const session = core.createSession(engine);
-
-  const preview = new PreviewSession(core, session, canvas, {
+  const preview = await PreviewSession.create(canvas, new URL("./camerakit_web.js", import.meta.url), {
     onState(state) {
       status.textContent = `capture ${state}`;
       document.title = `camerakit ${state}`;
     },
     onFps(fps, rendered, cameraFrames) {
-      const level = core.degradeLevel(session);
+      const level = preview.degradeLevel();
       status.textContent = `capture ${preview.state}  ${fps.toFixed(1)} fps  frames ${cameraFrames}  degrade ${level}`;
       if (!proofLogged && cameraFrames > 30 && fps > 20) {
         const pixel = preview.readCenterPixel();
@@ -270,6 +256,7 @@ async function run(): Promise<void> {
   (window as unknown as Record<string, unknown>).loadStillFrame = (url: string) => preview.loadStillFrame(url);
   (window as unknown as Record<string, unknown>).readCenterPixel = () => Array.from(preview.readCenterPixel());
   (window as unknown as Record<string, unknown>).readFrameSum = () => preview.readFrameSum();
+  (window as unknown as Record<string, unknown>).captureFrame = () => preview.captureFrame();
   // Pausing the video element stops the per-frame texture re-upload,
   // freezing whatever the shader is currently sampling.
   (window as unknown as Record<string, unknown>).freezeCamera = () => preview.video.pause();
