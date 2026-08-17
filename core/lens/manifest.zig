@@ -850,7 +850,7 @@ fn crossReference(diags: *Diagnostics, path: *PathStack, arena: std.mem.Allocato
             else => false,
         };
         const needs_node = switch (trigger.action.kind) {
-            .show, .hide, .swap_subgraph => true,
+            .show, .hide, .swap_subgraph, .play_animation => true,
             else => false,
         };
         if (needs_param and !param_names.contains(trigger.action.target)) {

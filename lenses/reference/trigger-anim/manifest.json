@@ -1,0 +1,15 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.trigger-anim",
+  "version": "1.0.0",
+  "display_name": "Trigger Anim",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "clip", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}}
+  ],
+  "triggers": [
+    {"when": "timer('intro') >= 2.0", "action": {"kind": "play_animation", "target": "clip"}}
+  ]
+}

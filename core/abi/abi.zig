@@ -21,6 +21,7 @@ const manifest = @import("manifest");
 const trigger = @import("trigger");
 const asset = @import("asset");
 const image = @import("image");
+const gltf = @import("gltf");
 const face106 = @import("face106");
 
 /// Whether this build targets wasm32-emscripten - the only web target
@@ -283,16 +284,34 @@ pub const Session = struct {
     /// activation (directory-based only, same reason as shader_programs
     /// above), removed once ck_engine_render_frame's poll turns its
     /// result into a real texture or observes it failed.
-    lut_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.Loader) = .empty,
+    lut_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     /// One bgfx texture per lut.pass node whose asset finished loading.
     lut_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// One background loader per currently-spliced blend.pass node still
     /// waiting on its background image - mirrors lut_loaders exactly,
     /// one node type over.
-    blend_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.Loader) = .empty,
+    blend_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     /// One bgfx texture per blend.pass node whose background finished
     /// loading.
     blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// One background loader per currently-spliced model.gltf node
+    /// still waiting on its .glb - mirrors lut_loaders/blend_loaders,
+    /// one node type over.
+    model_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ModelLoader) = .empty,
+    /// One loaded model per model.gltf node whose .glb finished
+    /// loading: the gpu mesh plus the plain animation-sampling data
+    /// pollModelLoaders keeps around (not a bgfx resource, so it lives
+    /// here rather than inside render.Renderer).
+    model_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, LoadedModel) = .empty,
+};
+
+/// A model.gltf node's loaded state: real gpu buffers plus the plain
+/// CPU-side animation data renderCompositeChain samples every frame at
+/// the lens's own reported elapsed time.
+const LoadedModel = struct {
+    mesh: render.Renderer.ModelMesh,
+    base_color: [4]f32,
+    animation: ?gltf.DecodedAnimation,
 };
 
 fn abiAllocator() std.mem.Allocator {
@@ -654,6 +673,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // consuming an unavailable capability's data holds its
             // default state, not blocks the chain).
             .blend => s.blend_textures.contains(entry.graph_index),
+            .model => s.model_meshes.contains(entry.graph_index),
         };
         if (ready) ready_count += 1;
     }
@@ -668,13 +688,28 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // backbuffer, and the visible canvas simply stops updating -
         // found via a real toggle-on-then-off repro (whiten set to 1
         // then back to 0), not a static read.
-        render.Renderer.setViewTarget(0, null, @intCast(current.desc.width), @intCast(current.desc.height));
+        render.Renderer.setViewTarget(0, null, @intCast(r.width), @intCast(r.height));
         r.submitPreview(0, current.preview, rotation * 90, mirror);
         return;
     }
 
     const width: u16 = @intCast(current.desc.width);
     const height: u16 = @intCast(current.desc.height);
+    // The swap chain's own real size, never the source frame's - a
+    // stage whose output is null draws straight to the swap chain
+    // (see the loop below), and that target is whatever size the
+    // renderer was actually initialized/resized to, not the camera
+    // frame's own resolution. Conflating the two used to size the
+    // final view's rect to the frame's resolution regardless of the
+    // swap chain's real size: harmless for a full-screen quad (still
+    // fills whatever clamped viewport results) but silently
+    // mis-scaled the picture whenever the two sizes differ, which a
+    // model.gltf node's own non-full-screen mesh finally made visible
+    // - found via a real corpus frame (2400x3000) rendered into a
+    // 400x300 swap chain, the mesh landing entirely outside the
+    // visible viewport.
+    const output_width: u16 = @intCast(r.width);
+    const output_height: u16 = @intCast(r.height);
     try ensureChainTargets(e, width, height);
     const targets = [2]render.Renderer.OffscreenTarget{ e.chain_targets[0].?, e.chain_targets[1].? };
 
@@ -700,7 +735,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const view_id = next_view_id;
                 next_view_id += 1;
                 const output = if (drawn == ready_count) null else targets[next_slot % 2];
-                render.Renderer.setViewTarget(view_id, output, width, height);
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, width, height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture);
                 if (output) |target| {
                     input_texture = target.texture;
@@ -713,7 +748,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const view_id = next_view_id;
                 next_view_id += 1;
                 const output = if (drawn == ready_count) null else targets[next_slot % 2];
-                render.Renderer.setViewTarget(view_id, output, width, height);
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, width, height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitLutPass(view_id, input_texture, lut_texture);
                 if (output) |target| {
                     input_texture = target.texture;
@@ -727,8 +762,40 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const view_id = next_view_id;
                 next_view_id += 1;
                 const output = if (drawn == ready_count) null else targets[next_slot % 2];
-                render.Renderer.setViewTarget(view_id, output, width, height);
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, width, height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    next_slot += 1;
+                }
+            },
+            .model => {
+                const loaded = s.model_meshes.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                // Two views, not one: the blit needs the flat ortho
+                // every other pass shares, the mesh needs a real 3D
+                // view/projection, and bgfx's view transform is a
+                // per-view state, not per-draw - see submitModel's own
+                // doc comment.
+                const blit_view = next_view_id;
+                next_view_id += 1;
+                const mesh_view = next_view_id;
+                next_view_id += 1;
+                const output = if (drawn == ready_count) null else targets[next_slot % 2];
+                const rect_width = if (output != null) width else output_width;
+                const rect_height = if (output != null) height else output_height;
+                if (output) |target| {
+                    render.Renderer.setViewTarget(blit_view, target, width, height);
+                    render.Renderer.setViewTarget(mesh_view, target, width, height);
+                } else {
+                    render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                    render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                }
+                const elapsed_us = if (s.active_lens) |*lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
+                const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
+                const model_matrix = if (loaded.animation) |*anim| anim.sample(elapsed_seconds) else math.Mat4.identity;
+                const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_width)) / @as(f32, @floatFromInt(rect_height));
+                r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, aspect_ratio);
                 if (output) |target| {
                     input_texture = target.texture;
                     next_slot += 1;
@@ -743,7 +810,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // output is a plain sampled texture, never a view's render
         // target, so with no lens stage to hand it off to, it still
         // needs one real draw to actually reach the swap chain.
-        render.Renderer.setViewTarget(next_view_id, null, width, height);
+        render.Renderer.setViewTarget(next_view_id, null, output_width, output_height);
         r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture);
     }
 }
@@ -777,6 +844,9 @@ pub fn destroySession(session: *Session) void {
     destroyBlendState(session);
     session.blend_loaders.deinit(session.engine.gpa);
     session.blend_textures.deinit(session.engine.gpa);
+    destroyModelState(session);
+    session.model_loaders.deinit(session.engine.gpa);
+    session.model_meshes.deinit(session.engine.gpa);
     destroyChainOrder(session);
     if (session.active_lens) |*lens| lens.deinit(&session.lens_graph);
     session.active_lens = null;
@@ -942,6 +1012,7 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
     if (session) |s| {
         pollLutLoaders(s, r, s.engine.gpa);
         pollBlendLoaders(s, r, s.engine.gpa);
+        pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
@@ -1365,7 +1436,12 @@ pub export fn ck_session_beautify_frame(session: ?*Session, rgba_in: ?[*]const u
     return .ok;
 }
 
-fn toTriggerSignals(s: LensSignals) trigger.Signals {
+/// Takes s by pointer, not value: the returned Signals borrows
+/// &s.blendshapes directly, and a by-value parameter's address does not
+/// outlive this call - the caller's own LensSignals storage (guaranteed
+/// live for the whole ABI call per ck_session_tick_lens's own contract)
+/// is what the borrow must point into instead.
+fn toTriggerSignals(s: *const LensSignals) trigger.Signals {
     return .{
         .face_present = s.has_face,
         .hands_present = s.hands_present,
@@ -1450,6 +1526,19 @@ fn destroyBlendState(session: *Session) void {
     session.blend_textures.clearRetainingCapacity();
 }
 
+fn destroyModelState(session: *Session) void {
+    var loader_it = session.model_loaders.valueIterator();
+    while (loader_it.next()) |loader| loader.*.deinit();
+    session.model_loaders.clearRetainingCapacity();
+
+    var mesh_it = session.model_meshes.valueIterator();
+    while (mesh_it.next()) |loaded| {
+        render.Renderer.destroyModelMesh(loaded.mesh);
+        if (loaded.animation) |*anim| gltf.freeAnimation(session.engine.gpa, anim);
+    }
+    session.model_meshes.clearRetainingCapacity();
+}
+
 /// Replaces any currently active lens with the one manifest_json
 /// describes, splicing its nodes into the session's graph and applying
 /// its default effect values to the beauty chain if one is enabled. The
@@ -1473,6 +1562,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyShaderPrograms(session);
     destroyLutState(session);
     destroyBlendState(session);
+    destroyModelState(session);
     destroyChainOrder(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
@@ -1537,7 +1627,7 @@ fn createLutLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []co
     for (luts) |lut| {
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, lut.lut_stem }) catch continue;
         defer gpa.free(path);
-        const loader = asset.Loader.start(gpa, path) catch continue;
+        const loader = asset.ImageLoader.start(gpa, path) catch continue;
         session.lut_loaders.put(gpa, lut.graph_index, loader) catch {
             loader.deinit();
         };
@@ -1582,7 +1672,7 @@ fn createBlendLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     for (blends) |blend| {
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, blend.background_stem }) catch continue;
         defer gpa.free(path);
-        const loader = asset.Loader.start(gpa, path) catch continue;
+        const loader = asset.ImageLoader.start(gpa, path) catch continue;
         session.blend_loaders.put(gpa, blend.graph_index, loader) catch {
             loader.deinit();
         };
@@ -1615,6 +1705,65 @@ fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     }
 }
 
+/// Starts a background load for every spliced model.gltf node's .glb
+/// (assets/<stem>.glb) - mirrors createLutLoaders/createBlendLoaders
+/// exactly, one node type over.
+fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const models = try lens.modelNodes(gpa, &session.lens_graph);
+    defer gpa.free(models);
+    for (models) |model| {
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.glb", .{ bundle_path, model.model_stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.ModelLoader.start(gpa, path) catch continue;
+        session.model_loaders.put(gpa, model.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Turns every .glb load that finished (or failed) since the last
+/// frame into a real gpu mesh (or drops it) - mirrors pollLutLoaders/
+/// pollBlendLoaders, except the decoded geometry is freed right after
+/// upload (bgfx_copy takes its own copy) while the decoded animation
+/// data is kept: there is no gpu resource for it, renderCompositeChain
+/// samples it fresh every frame at the lens's own reported elapsed
+/// time.
+fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.model_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const mesh = r.createModelMesh(decoded.positions, decoded.indices) catch {
+                gpa.free(decoded.positions);
+                gpa.free(decoded.indices);
+                if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
+                finished.append(gpa, entry.key_ptr.*) catch {};
+                continue;
+            };
+            gpa.free(decoded.positions);
+            gpa.free(decoded.indices);
+            session.model_meshes.put(gpa, entry.key_ptr.*, .{
+                .mesh = mesh,
+                .base_color = decoded.base_color,
+                .animation = decoded.animation,
+            }) catch {
+                render.Renderer.destroyModelMesh(mesh);
+                if (decoded.animation) |*anim| gltf.freeAnimation(gpa, anim);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.model_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
 /// Activates the lens bundle at bundle_path (bundle_path/manifest.json),
 /// then creates a bgfx program for every shader.pass node it spliced
 /// and starts a background load for every lut.pass node's LUT image.
@@ -1638,6 +1787,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
     try createBlendLoaders(session, gpa, bundle_path);
+    try createModelLoaders(session, gpa, bundle_path);
     try buildChainOrder(session, gpa);
 }
 
@@ -1658,6 +1808,7 @@ pub export fn ck_session_deactivate_lens(session: ?*Session) void {
     destroyShaderPrograms(s);
     destroyLutState(s);
     destroyBlendState(s);
+    destroyModelState(s);
     destroyChainOrder(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
@@ -1671,7 +1822,7 @@ pub export fn ck_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*co
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
     if (s.active_lens == null) return .again;
-    const effects = runtime.tick(&s.active_lens.?, s.engine.gpa, dt_us, toTriggerSignals(sig.*)) catch return .out_of_memory;
+    const effects = runtime.tick(&s.active_lens.?, s.engine.gpa, dt_us, toTriggerSignals(sig)) catch return .out_of_memory;
     defer s.engine.gpa.free(effects);
     applyLensEffects(s, effects);
     return .ok;

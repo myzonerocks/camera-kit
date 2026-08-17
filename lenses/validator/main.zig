@@ -1,15 +1,15 @@
 //! The reference validator for one .glens bundle: a bundle this program
 //! accepts is, by definition, valid, and where this and the format
-//! disagree the format is right and this has a bug. Five stages, each
+//! disagree the format is right and this has a bug. Six stages, each
 //! collecting every diagnostic it finds rather than stopping at the
 //! first: bundle structure, manifest.json (via core/lens/manifest.zig),
 //! each trigger's `when` expression (via core/lens/trigger.zig), every
-//! shader in shaders/ compiled through the pinned toolchain, then every
-//! image under assets/ decoded for real. Later stages only run once the
-//! earlier one is clean, since e.g. a structurally invalid bundle has
-//! no manifest worth parsing. glTF/GLB assets are not decoded yet - no
-//! node type consumes one, so validating a full buffer/accessor graph
-//! ahead of that caller is real remaining work, not stubbed in early.
+//! shader in shaders/ compiled through the pinned toolchain, every
+//! image under assets/ decoded for real, then every glTF/GLB under
+//! assets/ decoded through the same cgltf binding a model.gltf node
+//! loads one with. Later stages only run once the earlier one is
+//! clean, since e.g. a structurally invalid bundle has no manifest
+//! worth parsing.
 //!
 //!   lens_validator <bundle-path>
 
@@ -17,6 +17,7 @@ const std = @import("std");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
 const image = @import("image");
+const gltf = @import("gltf");
 const build_options = @import("build_options");
 
 const max_bundle_bytes: u64 = 64 * 1024 * 1024;
@@ -252,6 +253,45 @@ fn validateAssets(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnosti
     return ok;
 }
 
+/// Every .glb/.gltf under assets/ - a model.gltf node's own asset -
+/// must decode cleanly through the same cgltf binding the runtime
+/// loads one with (adapters/gltf's decodeModel: first mesh, first
+/// primitive, its material's flat tint, and the first animation
+/// driving the node that mesh is attached to, if either exists). A
+/// bundle that passes this stage is guaranteed to never hand a broken
+/// or unsupported model (an external buffer reference, cubic-spline
+/// interpolation) to the node type that ends up loading it.
+fn validateModels(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnostics, bundle_path: []const u8) !bool {
+    var bundle_dir = std.Io.Dir.cwd().openDir(io, bundle_path, .{ .iterate = true }) catch return true;
+    defer bundle_dir.close(io);
+    var assets_dir = bundle_dir.openDir(io, "assets", .{ .iterate = true }) catch return true;
+    defer assets_dir.close(io);
+
+    var walker = try assets_dir.walk(gpa);
+    defer walker.deinit();
+    var ok = true;
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.basename, ".glb") and !std.mem.endsWith(u8, entry.basename, ".gltf")) continue;
+        const diag_path = try std.fmt.allocPrint(diags.arena, "/assets/{s}", .{entry.path});
+
+        const disk_path = try std.fs.path.join(diags.arena, &.{ bundle_path, "assets", entry.path });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, disk_path, gpa, .limited(max_asset_bytes)) catch |err| {
+            try diags.add(diag_path, "cannot read: {t}", .{err});
+            ok = false;
+            continue;
+        };
+        defer gpa.free(bytes);
+        const decoded = gltf.decodeModel(gpa, bytes) catch |err| {
+            try diags.add(diag_path, "does not decode as a valid model: {t}", .{err});
+            ok = false;
+            continue;
+        };
+        gltf.freeDecodedModel(gpa, decoded);
+    }
+    return ok;
+}
+
 fn report(io: std.Io, bundle_path: []const u8, diagnostics: []const manifest.Diagnostic, ok: bool) !void {
     var buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(io, &buffer);
@@ -358,6 +398,11 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (!try validateAssets(io, gpa, &diags, path)) {
+        try report(io, path, diags.list.items, false);
+        return 1;
+    }
+
+    if (!try validateModels(io, gpa, &diags, path)) {
         try report(io, path, diags.list.items, false);
         return 1;
     }
@@ -624,6 +669,50 @@ test "a real PNG under assets passes the asset-decode stage" {
     try t.expect(try validateBundle(t.io, t.allocator, &diags, bundle_path));
     try t.expect(try validateAssets(t.io, t.allocator, &diags, bundle_path));
     try t.expectEqual(@as(usize, 0), diags.list.items.len);
+}
+
+test "the real committed trigger-anim asset passes the model-decode stage" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = minimal_valid_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    const glb = try std.Io.Dir.cwd().readFileAlloc(t.io, "lenses/reference/trigger-anim/assets/clip.glb", t.allocator, .limited(max_asset_bytes));
+    defer t.allocator.free(glb);
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/clip.glb", .data = glb });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = tmpBundlePath(tmp, &path_buf);
+
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+
+    try t.expect(try validateBundle(t.io, t.allocator, &diags, bundle_path));
+    try t.expect(try validateModels(t.io, t.allocator, &diags, bundle_path));
+    try t.expectEqual(@as(usize, 0), diags.list.items.len);
+}
+
+test "a corrupt glb under assets fails the model-decode stage, naming the file" {
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "manifest.json", .data = minimal_valid_manifest });
+    try tmp.dir.createDirPath(t.io, "assets");
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "assets/clip.glb", .data = "not actually a glb" });
+
+    var path_buf: [64]u8 = undefined;
+    const bundle_path = tmpBundlePath(tmp, &path_buf);
+
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var diags = manifest.Diagnostics{ .arena = arena.allocator() };
+
+    try t.expect(try validateBundle(t.io, t.allocator, &diags, bundle_path));
+    try t.expect(!try validateModels(t.io, t.allocator, &diags, bundle_path));
+    var found = false;
+    for (diags.list.items) |d| {
+        if (std.mem.indexOf(u8, d.path, "clip.glb") != null) found = true;
+    }
+    try t.expect(found);
 }
 
 test "a corrupt PNG under assets fails the asset-decode stage, naming the file" {
