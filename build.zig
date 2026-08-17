@@ -891,6 +891,7 @@ pub fn build(b: *std.Build) void {
                 "-sLINKABLE=1",
                 "-sMODULARIZE=1",
                 "-sEXPORT_NAME=CameraKitWebModule",
+                "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,stringToNewUTF8,UTF8ToString,getValue,setValue",
             });
             link.addArg("-o");
             const js_out = link.addOutputFileArg("camerakit_web.js");

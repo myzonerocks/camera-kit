@@ -9,7 +9,12 @@ const render = @import("render");
 // bgfx_init's result rather than asserting it - false here just means
 // no browser canvas was present, not a build failure.
 export fn ck_core_smoke_probe() i32 {
-    var renderer = render.Renderer.init(std.heap.wasm_allocator, .{
+    // std.heap.c_allocator, not wasm_allocator: wasm_allocator grows
+    // memory through a raw wasm instruction Emscripten's own JS-side
+    // heap-view tracking never sees, leaving a caller's cached HEAP32/
+    // HEAPU8 view stale (found while diagnosing exactly this in
+    // core/abi/abi.zig's own allocator selection).
+    var renderer = render.Renderer.init(std.heap.c_allocator, .{
         .native_window_handle = @ptrCast(@constCast("#canvas")),
         .width = 640,
         .height = 480,

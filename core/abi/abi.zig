@@ -266,6 +266,17 @@ pub const Session = struct {
 };
 
 fn abiAllocator() std.mem.Allocator {
+    // wasm_allocator grows memory through a raw wasm memory.grow
+    // instruction, invisible to Emscripten's own JS-side heap-view
+    // tracking - real growth still happens, but any cached HEAP32/
+    // HEAPU8 view the JS side is holding across the call goes stale
+    // without Emscripten's own growth hook ever firing to refresh it
+    // (confirmed: a plain _malloc-triggered growth refreshes correctly,
+    // an allocation through here does not). Emscripten provides a real
+    // libc malloc that coordinates that refresh correctly; freestanding
+    // (the other wasm target this file compiles for) has no libc at
+    // all, so it keeps wasm_allocator, the only option there.
+    if (is_web) return std.heap.c_allocator;
     if (builtin.cpu.arch.isWasm()) return std.heap.wasm_allocator;
     if (builtin.single_threaded) return std.heap.page_allocator;
     return std.heap.smp_allocator;
