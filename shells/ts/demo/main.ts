@@ -109,6 +109,12 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     }
     const pixels = ctx.getImageData(0, 0, analysisWidth, analysisHeight);
     void link.send(pixels.data, analysisWidth, analysisHeight, Math.round(performance.now() * 1000)).then((reply) => {
+      // The video can pause (freezeCamera, driving a still-photo test)
+      // between this request going out and its reply coming back - a
+      // live "no face" result landing after that would silently clear
+      // landmarks setLandmarksFromStill just set explicitly for the
+      // frozen frame. Stale results while paused are simply dropped.
+      if (video.paused) return;
       drawOverlay(reply, analysisWidth, analysisHeight);
       preview.setFaceLandmarks(
         reply.presence >= 0.5 && reply.landmarkCount > 0 ? reply.landmarks : null,
