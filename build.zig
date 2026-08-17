@@ -702,6 +702,9 @@ pub fn build(b: *std.Build) void {
     const wasm_bgfx_smoke_step = b.step("wasm-bgfx-smoke", "Compile+link bgfx's real GL backend for wasm32-emscripten (needs emscripten vendors synced)");
     addWasmBgfxSmokeStep(b, wasm_bgfx_smoke_step);
 
+    const wasm_emscripten_core_smoke_step = b.step("wasm-emscripten-core-smoke", "Compile+link render.zig itself for wasm32-emscripten against real bgfx (needs emscripten vendors synced)");
+    addWasmEmscriptenCoreSmokeStep(b, wasm_emscripten_core_smoke_step, shaderc_exe);
+
     // The web core: the same export layer compiled to wasm32 with every ck_
     // symbol visible to the embedder.
     const wasm_step = b.step("wasm", "Build the camerakit core for the web");
@@ -2811,31 +2814,65 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     return shaderc_exe;
 }
 
-// Compiles bgfx, bx, bimg, and astc-encoder for wasm32-emscripten and
-// links wasm_bgfx_smoke_driver.cpp against them, through the vendored
-// em++ alone - `zig cc`'s own bundled headers shadow libc++'s here and
-// break the build.
-fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
-    const emscripten_present = blk: {
+const EmToolchain = struct {
+    em_plus_plus: []const u8,
+    em_root: []const u8,
+    em_python: []const u8,
+    em_llvm_root: []const u8,
+    em_config: []const u8,
+    node_exe: []const u8,
+};
+
+// The vendored, opt-in emscripten toolchain's real paths, or null if it
+// isn't synced (run: zig build vendor-sync -- --only emscripten &&
+// zig build vendor-sync -- --only emscripten-python) or node is missing
+// from PATH.
+fn emscriptenToolchain(b: *std.Build) ?EmToolchain {
+    const present = blk: {
         b.build_root.handle.access(b.graph.io, ".vendor/emscripten/emscripten/em++", .{}) catch break :blk false;
         b.build_root.handle.access(b.graph.io, ".vendor/emscripten-python/bin/python3", .{}) catch break :blk false;
         break :blk true;
     };
-    if (!emscripten_present) {
-        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
-        return;
-    }
-    const node_exe = b.findProgram(&.{"node"}, &.{}) catch {
-        step.dependOn(&b.addFail("camera-kit: node not found on PATH").step);
-        return;
+    if (!present) return null;
+    const node_exe = b.findProgram(&.{"node"}, &.{}) catch return null;
+    return .{
+        .em_plus_plus = b.pathFromRoot(".vendor/emscripten/emscripten/em++"),
+        .em_root = b.pathFromRoot(".vendor/emscripten"),
+        .em_python = b.pathFromRoot(".vendor/emscripten-python/bin/python3"),
+        .em_llvm_root = b.pathFromRoot(".vendor/emscripten/bin"),
+        .em_config = b.pathFromRoot("adapters/bgfx/em_config_empty"),
+        .node_exe = node_exe,
     };
+}
 
-    const em_root = b.pathFromRoot(".vendor/emscripten");
-    const em_plus_plus = b.pathFromRoot(".vendor/emscripten/emscripten/em++");
-    const em_python = b.pathFromRoot(".vendor/emscripten-python/bin/python3");
-    const em_llvm_root = b.pathFromRoot(".vendor/emscripten/bin");
-    const em_config = b.pathFromRoot("adapters/bgfx/em_config_empty");
+fn setEmEnv(run: *std.Build.Step.Run, em: EmToolchain) void {
+    run.setEnvironmentVariable("EMSDK_PYTHON", em.em_python);
+    run.setEnvironmentVariable("EM_CONFIG", em.em_config);
+    run.setEnvironmentVariable("EM_NODE_JS", em.node_exe);
+    run.setEnvironmentVariable("EM_BINARYEN_ROOT", em.em_root);
+    run.setEnvironmentVariable("EM_LLVM_ROOT", em.em_llvm_root);
+}
 
+fn addEmPlusPlusCompile(b: *std.Build, em: EmToolchain, src: []const u8, cxx_flags: []const []const u8, include_dirs: []const []const u8) std.Build.LazyPath {
+    const run = b.addSystemCommand(&.{em.em_plus_plus});
+    setEmEnv(run, em);
+    run.addArgs(cxx_flags);
+    for (include_dirs) |dir| {
+        run.addArg("-I");
+        run.addDirectoryArg(b.path(dir));
+    }
+    run.addArg("-c");
+    run.addFileArg(b.path(src));
+    run.addArg("-o");
+    const obj_name = b.fmt("{s}.o", .{std.fs.path.stem(src)});
+    return run.addOutputFileArg(obj_name);
+}
+
+// bgfx, bx, bimg, and astc-encoder for wasm32-emscripten, plus whatever
+// extra_sources the caller needs compiled alongside them - every caller
+// wants the same real GL backend under it, just a different driver on
+// top.
+fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []const u8) std.ArrayList(std.Build.LazyPath) {
     const cxx_flags = [_][]const u8{
         "-std=c++20",
         "-fno-strict-aliasing",
@@ -2871,36 +2908,28 @@ fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
     if (listFiles(b, ".vendor/bimg/3rdparty/astc-encoder/source", ".cpp")) |astc_sources| {
         sources.appendSlice(b.allocator, astc_sources) catch @panic("oom");
     }
-    sources.append(b.allocator, "adapters/bgfx/wasm_bgfx_smoke_driver.cpp") catch @panic("oom");
-
-    const setEmEnv = struct {
-        fn call(run: *std.Build.Step.Run, python: []const u8, config: []const u8, node: []const u8, root: []const u8, llvm: []const u8) void {
-            run.setEnvironmentVariable("EMSDK_PYTHON", python);
-            run.setEnvironmentVariable("EM_CONFIG", config);
-            run.setEnvironmentVariable("EM_NODE_JS", node);
-            run.setEnvironmentVariable("EM_BINARYEN_ROOT", root);
-            run.setEnvironmentVariable("EM_LLVM_ROOT", llvm);
-        }
-    }.call;
+    sources.appendSlice(b.allocator, extra_sources) catch @panic("oom");
 
     var objects: std.ArrayList(std.Build.LazyPath) = .empty;
     for (sources.items) |src| {
-        const run = b.addSystemCommand(&.{em_plus_plus});
-        setEmEnv(run, em_python, em_config, node_exe, em_root, em_llvm_root);
-        run.addArgs(&cxx_flags);
-        for (include_dirs) |dir| {
-            run.addArg("-I");
-            run.addDirectoryArg(b.path(dir));
-        }
-        run.addArg("-c");
-        run.addFileArg(b.path(src));
-        run.addArg("-o");
-        const obj_name = b.fmt("{s}.o", .{std.fs.path.stem(src)});
-        objects.append(b.allocator, run.addOutputFileArg(obj_name)) catch @panic("oom");
+        objects.append(b.allocator, addEmPlusPlusCompile(b, em, src, &cxx_flags, &include_dirs)) catch @panic("oom");
     }
+    return objects;
+}
 
-    const link = b.addSystemCommand(&.{em_plus_plus});
-    setEmEnv(link, em_python, em_config, node_exe, em_root, em_llvm_root);
+// Compiles bgfx, bx, bimg, and astc-encoder for wasm32-emscripten and
+// links wasm_bgfx_smoke_driver.cpp against them, through the vendored
+// em++ alone - `zig cc`'s own bundled headers shadow libc++'s here and
+// break the build.
+fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
+    const em = emscriptenToolchain(b) orelse {
+        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        return;
+    };
+    const objects = addBgfxWasmObjects(b, em, &.{"adapters/bgfx/wasm_bgfx_smoke_driver.cpp"});
+
+    const link = b.addSystemCommand(&.{em.em_plus_plus});
+    setEmEnv(link, em);
     for (objects.items) |obj| link.addFileArg(obj);
     link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1", "-sALLOW_MEMORY_GROWTH=1" });
     link.addArg("-o");
@@ -2909,6 +2938,79 @@ fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
     const install = b.addInstallDirectory(.{
         .source_dir = js_out.dirname(),
         .install_dir = .{ .custom = "wasm-bgfx-smoke" },
+        .install_subdir = "",
+    });
+    step.dependOn(&install.step);
+}
+
+// The real render.zig - the one binding over bgfx every native shell
+// already runs, not a rewrite - compiled as a wasm32-emscripten object
+// and linked against the same real bgfx/bx/bimg/astc-encoder objects
+// wasm-bgfx-smoke proves, plus a small Zig driver exporting one probe
+// function. Proves the whole mechanism the real web core needs: a Zig
+// object and bgfx's C++ objects, from two different compilers, linked
+// into one wasm module by em++ alone.
+fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*std.Build.Step.Compile) void {
+    const em = emscriptenToolchain(b) orelse {
+        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        return;
+    };
+    const shaderc_tool = shaderc_exe orelse {
+        step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        return;
+    };
+
+    const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
+    const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const shader_blobs_em = addShaderBlobs(b, shaderc_tool, em_target, .ReleaseSmall);
+    const render_em = b.createModule(.{
+        .root_source_file = b.path("adapters/bgfx/render.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "math", .module = math_em },
+            .{ .name = "shader_blobs", .module = shader_blobs_em },
+        },
+    });
+    render_em.addIncludePath(b.path(".vendor/bgfx/include"));
+    render_em.addIncludePath(b.path(".vendor/bx/include"));
+    // Real linking against emscripten's libc only happens later, at the
+    // em++ link step - this is an object-only build, so bgfx.h's own
+    // #include <stdlib.h> just needs the emscripten sysroot's headers
+    // on the search path, not Zig's own (nonexistent, for this target)
+    // libc linkage.
+    render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+
+    const driver_em = b.createModule(.{
+        .root_source_file = b.path("adapters/bgfx/wasm_emscripten_core_smoke.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{.{ .name = "render", .module = render_em }},
+    });
+    const zig_obj = b.addObject(.{ .name = "wasm_emscripten_core_smoke", .root_module = driver_em });
+
+    const objects = addBgfxWasmObjects(b, em, &.{});
+    const link = b.addSystemCommand(&.{em.em_plus_plus});
+    setEmEnv(link, em);
+    link.addFileArg(zig_obj.getEmittedBin());
+    for (objects.items) |obj| link.addFileArg(obj);
+    link.addArgs(&.{
+        "-sUSE_WEBGL2=1",
+        "-sMIN_WEBGL_VERSION=2",
+        "-sMAX_WEBGL_VERSION=2",
+        "-sFULL_ES3=1",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sEXPORTED_FUNCTIONS=_ck_core_smoke_probe",
+        "-sEXPORTED_RUNTIME_METHODS=ccall",
+        "-sMODULARIZE=1",
+        "-sEXPORT_NAME=CoreSmokeModule",
+    });
+    link.addArg("-o");
+    const js_out = link.addOutputFileArg("wasm_emscripten_core_smoke.js");
+
+    const install = b.addInstallDirectory(.{
+        .source_dir = js_out.dirname(),
+        .install_dir = .{ .custom = "wasm-emscripten-core-smoke" },
         .install_subdir = "",
     });
     step.dependOn(&install.step);
