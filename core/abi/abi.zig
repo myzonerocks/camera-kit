@@ -1436,7 +1436,12 @@ pub export fn ck_session_beautify_frame(session: ?*Session, rgba_in: ?[*]const u
     return .ok;
 }
 
-fn toTriggerSignals(s: LensSignals) trigger.Signals {
+/// Takes s by pointer, not value: the returned Signals borrows
+/// &s.blendshapes directly, and a by-value parameter's address does not
+/// outlive this call - the caller's own LensSignals storage (guaranteed
+/// live for the whole ABI call per ck_session_tick_lens's own contract)
+/// is what the borrow must point into instead.
+fn toTriggerSignals(s: *const LensSignals) trigger.Signals {
     return .{
         .face_present = s.has_face,
         .hands_present = s.hands_present,
@@ -1817,7 +1822,7 @@ pub export fn ck_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*co
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
     if (s.active_lens == null) return .again;
-    const effects = runtime.tick(&s.active_lens.?, s.engine.gpa, dt_us, toTriggerSignals(sig.*)) catch return .out_of_memory;
+    const effects = runtime.tick(&s.active_lens.?, s.engine.gpa, dt_us, toTriggerSignals(sig)) catch return .out_of_memory;
     defer s.engine.gpa.free(effects);
     applyLensEffects(s, effects);
     return .ok;
