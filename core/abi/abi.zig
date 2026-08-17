@@ -466,6 +466,22 @@ fn webBeautyActive(s: *const Session) bool {
         (lipstick > 0.0 and s.web_beauty_lipstick_texture != null) or (blush > 0.0 and s.web_beauty_blush_texture != null);
 }
 
+/// The one beauty-active check every caller should reach through -
+/// native's gpupixel chain on every other target, web_beauty_amounts
+/// here. ck_engine_render_frame's own fast-path gate and
+/// renderCompositeChain's chain dispatch both need this, and both once
+/// called beautyActive() directly - a real bug, not hypothetical: with
+/// no lens active (chain_order empty), render_frame's own gate skipped
+/// renderCompositeChain (and therefore applyWebBeautyChain) entirely on
+/// web, silently rendering the plain passthrough preview regardless of
+/// what web_beauty_amounts held. Caught by an actual browser proof
+/// (whiten toggled with real LUTs loaded, zero visible change), not by
+/// any Zig-level test - anyBeautyActive exists so the two call sites
+/// can't drift apart again the same way.
+fn anyBeautyActive(s: *const Session) bool {
+    return if (is_web) webBeautyActive(s) else beautyActive(s);
+}
+
 fn ensureWebBeautyTargets(s: *Session, width: u16, height: u16) !void {
     if (s.web_beauty_targets_width == width and s.web_beauty_targets_height == height and s.web_beauty_blur_h_target != null) return;
     for ([_]*?render.Renderer.OffscreenTarget{
@@ -635,7 +651,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         };
         if (ready) ready_count += 1;
     }
-    const beauty_active = if (is_web) webBeautyActive(s) else beautyActive(s);
+    const beauty_active = anyBeautyActive(s);
     if (ready_count == 0 and !beauty_active) {
         r.submitPreview(0, current.preview, rotation * 90, mirror);
         return;
@@ -914,7 +930,7 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
-            if (s.chain_order.len == 0 and !beautyActive(s)) {
+            if (s.chain_order.len == 0 and !anyBeautyActive(s)) {
                 r.submitPreview(0, current.preview, rotation * 90, mirror);
             } else {
                 renderCompositeChain(e, r, s, current, rotation, mirror) catch {
