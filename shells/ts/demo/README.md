@@ -1,24 +1,32 @@
 # Web demo
 
 A browser page with a live camera preview, real-time face tracking, and
-sliders for all six beauty effects, running the wasm core through plain
-WebGL2. No framework, no bundler beyond a single `bun build`.
+sliders for all six beauty effects, running the wasm core through a
+real bgfx renderer (WebGPU when the browser has a working adapter,
+WebGL2 otherwise). No framework, no bundler beyond a single `bun build`.
 
 ## One-time setup
 
 From the repo root:
 
-    zig build wasm
+    zig build wasm-emscripten
+    zig build wasm-emscripten-webgpu
     zig build tracking-wasm
     zig build fetch-models
-    cp zig-out/wasm/camerakit.wasm zig-out/wasm/camerakit_tracking.wasm shells/ts/demo/
+    cp zig-out/wasm-emscripten/camerakit_web.js zig-out/wasm-emscripten/camerakit_web.wasm shells/ts/demo/
+    mkdir -p shells/ts/demo/webgpu
+    cp zig-out/wasm-emscripten-webgpu/camerakit_web.js zig-out/wasm-emscripten-webgpu/camerakit_web.wasm shells/ts/demo/webgpu/
+    cp zig-out/wasm/camerakit_tracking.wasm shells/ts/demo/
     cp .models/face_landmarker.task .models/corpus/face_frontal_b.jpg .models/corpus/no_face_control.jpg shells/ts/demo/
     cd shells/ts/demo
     bun build ./tracking-worker.ts --outfile=./tracking-worker.js --format=esm
 
-The four files this copies in are gitignored build/fetch outputs, not
-source - re-run their step whenever the core, the tracking module, or
-the pinned models change.
+Everything this copies in is a gitignored build/fetch output, not
+source - re-run its step whenever the core, the tracking module, or
+the pinned models change. The webgpu/ subdirectory keeps its own
+camerakit_web.js/.wasm pair separate from the WebGL2 one at the top
+level - main.ts picks between them at load time based on whether the
+browser has a working WebGPU adapter.
 
 ## Run it
 

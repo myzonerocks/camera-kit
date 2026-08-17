@@ -44,6 +44,7 @@ interface EngineModule {
   HEAPU8: Uint8Array;
   HEAPF32: Float32Array;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
+  ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[], opts: { async: true }): Promise<number>;
   getValue(ptr: number, type: string): number;
   setValue(ptr: number, value: number, type: string): void;
   stringToNewUTF8(value: string): number;
@@ -147,7 +148,12 @@ export class PreviewSession {
     private engine: number,
     private session: number,
     private canvas: HTMLCanvasElement,
-    private gl: WebGL2RenderingContext,
+    /// Only set on the WebGL2 build - bgfx's WebGPU backend binds the
+    /// canvas to a 'webgpu' context instead, and a canvas can only ever
+    /// bind one context type for its lifetime. readPixels-based readback
+    /// (captureFrame/readCenterPixel/readFrameSum) needs this; it isn't
+    /// available on the WebGPU build yet.
+    private gl: WebGL2RenderingContext | null,
     private events: SessionEvents,
     readonly abiVersion: number,
   ) {
@@ -194,7 +200,7 @@ export class PreviewSession {
     mod.setValue(rendererDescPtr, selectorPtr, "i32");
     mod.setValue(rendererDescPtr + 4, canvas.width, "i32");
     mod.setValue(rendererDescPtr + 8, canvas.height, "i32");
-    const rendererStatus = mod.ccall("ck_engine_init_renderer", "number", ["number", "number"], [engine, rendererDescPtr]);
+    const rendererStatus = await mod.ccall("ck_engine_init_renderer", "number", ["number", "number"], [engine, rendererDescPtr], { async: true });
     mod.ccall("ck_free", null, ["number", "number"], [rendererDescPtr, 12]);
     if (rendererStatus !== CK_OK) throw new Error(`renderer init failed: ${rendererStatus}`);
 
@@ -204,12 +210,14 @@ export class PreviewSession {
     mod.ccall("ck_free", null, ["number", "number"], [sessionOut, 4]);
     if (sessionStatus !== CK_OK) throw new Error(`session create failed: ${sessionStatus}`);
 
-    // The same canvas Emscripten just created its own WebGL2 context on
-    // - browsers return the existing context for a repeat getContext
-    // call on one canvas, so this is that same context, not a second
-    // independent one.
-    const gl = canvas.getContext("webgl2");
-    if (!gl) throw new Error("webgl2 unavailable");
+    // The same canvas Emscripten's C++ side just created its own
+    // rendering context on - browsers return the existing context for
+    // a repeat getContext call on one canvas, so this is that same
+    // context, not a second independent one. Which type depends on
+    // which build was loaded: try webgpu first since a canvas already
+    // bound to 'webgpu' returns null (not the webgl2 context) from a
+    // mismatched getContext("webgl2") call.
+    const gl = canvas.getContext("webgpu") ? null : canvas.getContext("webgl2");
 
     return new PreviewSession(mod, engine, session, canvas, gl, events, version);
   }
@@ -498,6 +506,14 @@ export class PreviewSession {
     this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
   }
 
+  /// readPixels-based readback only exists on the WebGL2 build for now
+  /// - the WebGPU build's canvas has no synchronous pixel-read API
+  /// (its equivalent is an async GPUBuffer copy+map), not yet built.
+  private requireGl(): WebGL2RenderingContext {
+    if (!this.gl) throw new Error("pixel readback is not yet implemented on the WebGPU build");
+    return this.gl;
+  }
+
   /// Renders, reads, and PNG-encodes the canvas in one synchronous
   /// call - same reason readCenterPixel/readFrameSum render right
   /// before reading (bgfx's own context never preserves its drawing
@@ -508,7 +524,7 @@ export class PreviewSession {
   /// changed somewhere.
   captureFrame(): string {
     this.renderForReadback();
-    const gl = this.gl;
+    const gl = this.requireGl();
     const w = this.canvas.width;
     const h = this.canvas.height;
     const pixels = new Uint8Array(w * h * 4);
@@ -529,7 +545,7 @@ export class PreviewSession {
 
   readCenterPixel(): Uint8Array {
     this.renderForReadback();
-    const gl = this.gl;
+    const gl = this.requireGl();
     const pixel = new Uint8Array(4);
     gl.readPixels(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
     return pixel;
@@ -546,7 +562,7 @@ export class PreviewSession {
   /// coordinate dark for long stretches.
   readFrameSum(): number {
     this.renderForReadback();
-    const gl = this.gl;
+    const gl = this.requireGl();
     const pixels = new Uint8Array(this.canvas.width * this.canvas.height * 4);
     gl.readPixels(0, 0, this.canvas.width, this.canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
     let sum = 0;

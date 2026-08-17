@@ -1,4 +1,4 @@
-import { PreviewSession } from "../src/index.ts";
+import { PreviewSession, pickEngineUrl } from "../src/index.ts";
 import { FACE_LANDMARK_COUNT } from "../src/tracking.ts";
 
 const status = document.getElementById("status")!;
@@ -168,7 +168,16 @@ async function startTracking(preview: PreviewSession): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  const preview = await PreviewSession.create(canvas, new URL("./camerakit_web.js", import.meta.url), {
+  const webgpuUrl = new URL("./webgpu/camerakit_web.js", import.meta.url);
+  const webgl2Url = new URL("./camerakit_web.js", import.meta.url);
+  // ?engine=webgpu|webgl2 forces a specific build for testing both
+  // paths independently - real Chrome always has a working adapter,
+  // so the auto-detect in pickEngineUrl alone can never exercise the
+  // WebGL2 fallback here.
+  const forcedEngine = new URLSearchParams(location.search).get("engine");
+  const wasmJsUrl =
+    forcedEngine === "webgpu" ? webgpuUrl : forcedEngine === "webgl2" ? webgl2Url : await pickEngineUrl(webgpuUrl, webgl2Url);
+  const preview = await PreviewSession.create(canvas, wasmJsUrl, {
     onState(state) {
       status.textContent = `capture ${state}`;
       document.title = `camerakit ${state}`;
