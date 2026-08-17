@@ -659,6 +659,16 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     }
     const beauty_active = anyBeautyActive(s);
     if (ready_count == 0 and !beauty_active) {
+        // view 0 may still be bound to an offscreen chain/beauty target
+        // from an earlier frame that took the other branch below -
+        // bgfx_set_view_frame_buffer is stateful across frames, nothing
+        // resets it automatically once the chain/beauty that needed it
+        // stops being active. Without this, this branch keeps drawing
+        // into that stale offscreen target forever, never the real
+        // backbuffer, and the visible canvas simply stops updating -
+        // found via a real toggle-on-then-off repro (whiten set to 1
+        // then back to 0), not a static read.
+        render.Renderer.setViewTarget(0, null, @intCast(current.desc.width), @intCast(current.desc.height));
         r.submitPreview(0, current.preview, rotation * 90, mirror);
         return;
     }
@@ -936,15 +946,26 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
-            if (s.chain_order.len == 0 and !anyBeautyActive(s)) {
+            // Always through renderCompositeChain, which owns the one
+            // authoritative "is anything actually active" check and its
+            // own view-0-target reset for the plain-preview case. This
+            // used to duplicate that same check here first (skipping
+            // renderCompositeChain, and its reset, whenever nothing was
+            // active) - a real, found bug: once a frame went through
+            // the composite path and rebound view 0 to an offscreen
+            // target, this outer check took over again on the very next
+            // frame beauty/chain state went back to inactive and called
+            // submitPreview directly, with view 0 still pointed at that
+            // now-stale offscreen target - the canvas simply stopped
+            // updating. Same class of drift anyBeautyActive's own
+            // comment already names for exactly this dispatch: two call
+            // sites deciding the same thing separately eventually
+            // disagree.
+            renderCompositeChain(e, r, s, current, rotation, mirror) catch {
+                // A chain target failed to (re)create - present the
+                // plain preview rather than nothing this frame.
                 r.submitPreview(0, current.preview, rotation * 90, mirror);
-            } else {
-                renderCompositeChain(e, r, s, current, rotation, mirror) catch {
-                    // A chain target failed to (re)create - present the
-                    // plain preview rather than nothing this frame.
-                    r.submitPreview(0, current.preview, rotation * 90, mirror);
-                };
-            }
+            };
         } else {
             r.touch();
         }
