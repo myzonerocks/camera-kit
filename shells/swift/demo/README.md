@@ -27,8 +27,13 @@ Same as above with `ios-simulator` instead of `ios`:
 
 The Simulator has no real camera and no GLES-backed beauty context, so
 this proves capture plumbing and tracking, not beauty effects - a
-known Simulator limitation, not a bug. Simulator output is a dev
-signal only, never proof of on-device behavior.
+known Simulator limitation, not a bug (bgfx/tracking/lens activation
+all report success; beauty correctly reports unsupported). The
+Simulator's own synthetic camera feed can also die mid-session
+(`FigCaptureSourceSimulator`/`FigCaptureSessionSimulator` errors,
+capture state flips to failed after rendering fine for a while) -
+also a Simulator-side limitation, not a regression. Simulator output
+is a dev signal only, never proof of on-device behavior.
 
 ## Proving it
 
