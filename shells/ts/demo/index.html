@@ -6,7 +6,11 @@
 <title>camerakit demo</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; }
-  canvas { width: 100vw; height: 100vh; display: block; }
+  /* Front camera preview mirrors like a mirror would - CSS, not shader
+     math, so it flips the finished frame (preview and its landmark
+     overlay together) without touching how any beauty effect samples
+     or aligns against the underlying, unmirrored texture space. */
+  canvas { width: 100vw; height: 100vh; display: block; transform: scaleX(-1); }
   #overlay { position: fixed; inset: 0; pointer-events: none; }
   #status { position: fixed; top: 12px; left: 12px; color: #fff; font: 13px monospace; white-space: pre; }
   #controls { position: fixed; bottom: 12px; left: 12px; color: #fff; font: 13px monospace; }

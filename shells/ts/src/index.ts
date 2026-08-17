@@ -325,7 +325,7 @@ export class PreviewSession {
       ["mouth.png", "blusher.png"].map((name) =>
         fetch(new URL(name, baseUrl))
           .then((r) => r.blob())
-          .then((b) => createImageBitmap(b)),
+          .then((b) => createImageBitmap(b, { imageOrientation: "flipY" })),
       ),
     );
     const upload = (bitmap: ImageBitmap): WebGLTexture => {
@@ -353,7 +353,7 @@ export class PreviewSession {
       WHITEN_LUT_NAMES.map((name) =>
         fetch(new URL(`${name}.png`, lutBaseUrl))
           .then((r) => r.blob())
-          .then((b) => createImageBitmap(b)),
+          .then((b) => createImageBitmap(b, { imageOrientation: "flipY" })),
       ),
     );
     this.whitenLuts = bitmaps.map((bitmap) => {
@@ -763,7 +763,7 @@ export class PreviewSession {
   /// pattern; freezeCamera() first stops tick() from re-uploading over it
   /// on the next frame.
   async loadStillFrame(url: string): Promise<void> {
-    const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+    const bitmap = await createImageBitmap(await (await fetch(url)).blob(), { imageOrientation: "flipY" });
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
