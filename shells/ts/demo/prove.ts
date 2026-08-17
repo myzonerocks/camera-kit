@@ -137,6 +137,75 @@ let smooth = "";
   await evaluate("window.resumeCamera()");
 }
 
+// Thin-face and big-eye both warp which pixel gets sampled based on the
+// tracked face contour, so they need the same real-photo treatment as
+// smoothing, plus the contour itself: setLandmarksFromStill runs the
+// photo through the same tracker the live feed uses and feeds the result
+// into the preview session the way every real frame's result already
+// does, rather than only checking that the shader compiles.
+let reshape = "";
+{
+  const evaluate = async (expression: string) =>
+    (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })) as {
+      result?: { value?: unknown };
+    };
+  await evaluate("window.setThinFace(0)");
+  await evaluate("window.setBigEye(0)");
+  await evaluate("window.freezeCamera()");
+  await evaluate("window.loadStillFrame('./face_frontal_b.jpg')");
+  await evaluate("window.setLandmarksFromStill('./face_frontal_b.jpg')");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const before = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  await evaluate("window.setThinFace(1)");
+  await evaluate("window.setBigEye(0.15)");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const after = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  const delta = before !== undefined && after !== undefined ? Math.abs(after - before) : -1;
+  if (before !== undefined && after !== undefined && delta > 0) {
+    reshape = `CKWEB reshape: frame sum ${before} -> ${after}, delta ${delta}`;
+  } else {
+    reshape = `FAIL reshape: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
+  }
+  await evaluate("window.setThinFace(0)");
+  await evaluate("window.setBigEye(0)");
+  await evaluate("window.resumeCamera()");
+}
+
+// Lipstick and blush both need the makeup textures loaded and a tracked
+// face, same shape as the checks above.
+let makeup = "";
+{
+  const evaluate = async (expression: string) =>
+    (await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })) as {
+      result?: { value?: unknown };
+    };
+  for (let waited = 0; waited < 15_000; waited += 500) {
+    await Bun.sleep(500);
+    const ready = await evaluate("Boolean(window.makeupTexturesReady)");
+    if (ready.result?.value) break;
+  }
+  await evaluate("window.setLipstick(0)");
+  await evaluate("window.setBlush(0)");
+  await evaluate("window.freezeCamera()");
+  await evaluate("window.loadStillFrame('./face_frontal_b.jpg')");
+  await evaluate("window.setLandmarksFromStill('./face_frontal_b.jpg')");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const before = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  await evaluate("window.setLipstick(0.5)");
+  await evaluate("window.setBlush(0.5)");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const after = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
+  const delta = before !== undefined && after !== undefined ? Math.abs(after - before) : -1;
+  if (before !== undefined && after !== undefined && delta > 0) {
+    makeup = `CKWEB makeup: frame sum ${before} -> ${after}, delta ${delta}`;
+  } else {
+    makeup = `FAIL makeup: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
+  }
+  await evaluate("window.setLipstick(0)");
+  await evaluate("window.setBlush(0)");
+  await evaluate("window.resumeCamera()");
+}
+
 // The tracking pass: wait for the worker, then one corpus portrait must
 // track and the control frame must not.
 let tracking = "";
@@ -199,12 +268,18 @@ if (
   !whiten.startsWith("FAIL") &&
   smooth &&
   !smooth.startsWith("FAIL") &&
+  reshape &&
+  !reshape.startsWith("FAIL") &&
+  makeup &&
+  !makeup.startsWith("FAIL") &&
   tracking &&
   !tracking.startsWith("FAIL")
 ) {
   console.log(proof);
   console.log(whiten);
   console.log(smooth);
+  console.log(reshape);
+  console.log(makeup);
   console.log(tracking);
   console.log(`status: ${statusResult.result?.value}`);
   process.exit(0);
@@ -214,6 +289,12 @@ if (whiten) {
 }
 if (smooth) {
   console.log(smooth);
+}
+if (reshape) {
+  console.log(reshape);
+}
+if (makeup) {
+  console.log(makeup);
 }
 if (tracking) {
   console.log(tracking);

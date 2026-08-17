@@ -698,6 +698,13 @@ pub fn build(b: *std.Build) void {
     addIosSimulatorStep(b, optimize, shaderc_exe, flatc_exe);
     addAndroidStep(b, optimize, shaderc_exe, flatc_exe);
 
+    // Separate from wasm_step: needs the opt-in emscripten vendors most builds never touch.
+    const wasm_bgfx_smoke_step = b.step("wasm-bgfx-smoke", "Compile+link bgfx's real GL backend for wasm32-emscripten (needs emscripten vendors synced)");
+    addWasmBgfxSmokeStep(b, wasm_bgfx_smoke_step);
+
+    const wasm_emscripten_core_smoke_step = b.step("wasm-emscripten-core-smoke", "Compile+link render.zig itself for wasm32-emscripten against real bgfx (needs emscripten vendors synced)");
+    addWasmEmscriptenCoreSmokeStep(b, wasm_emscripten_core_smoke_step, shaderc_exe);
+
     // The web core: the same export layer compiled to wasm32 with every ck_
     // symbol visible to the embedder.
     const wasm_step = b.step("wasm", "Build the camerakit core for the web");
@@ -771,6 +778,161 @@ pub fn build(b: *std.Build) void {
         wasm_step.dependOn(&b.addInstallArtifact(camerakit_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
     }
 
+    // The render-capable half of the web core, real bgfx underneath
+    // instead of render_stub.zig - separate from wasm_step above (which
+    // stays as-is until the TS shell actually points at this one)
+    // rather than replacing it outright. tracking/segmentation/beauty/
+    // image/asset stay the same stubs wasm_step already uses - gpupixel
+    // still isn't ported to web, and the effects this step renders
+    // (beauty.face, beauty.reshape) need none of them.
+    const wasm_emscripten_step = b.step("wasm-emscripten", "Build the camerakit core for the web with a real bgfx renderer (needs emscripten vendors synced)");
+    {
+        const em = emscriptenToolchain(b);
+        if (em == null) {
+            wasm_emscripten_step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        } else if (shaderc_exe == null) {
+            wasm_emscripten_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        } else {
+            const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
+            const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const graph_em = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, .ReleaseSmall);
+            const face_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const render_em = b.createModule(.{
+                .root_source_file = b.path("adapters/bgfx/render.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{
+                    .{ .name = "math", .module = math_em },
+                    .{ .name = "shader_blobs", .module = shader_blobs_em },
+                    .{ .name = "face_mesh", .module = face_mesh_em },
+                },
+            });
+            render_em.addIncludePath(b.path(".vendor/bgfx/include"));
+            render_em.addIncludePath(b.path(".vendor/bx/include"));
+            render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+
+            const abi_em = b.createModule(.{
+                .root_source_file = b.path("core/abi/abi.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{
+                    .{ .name = "graph", .module = graph_em },
+                    .{ .name = "math", .module = math_em },
+                    .{ .name = "render", .module = render_em },
+                },
+            });
+            // abiAllocator()'s std.heap.c_allocator branch on web needs
+            // real libc linkage - symbol resolution happens later at
+            // the em++ link step regardless, same as render_em's own
+            // sysroot include path below.
+            abi_em.link_libc = true;
+            const tracking_cores_em = trackingCoreModules(b, em_target, .ReleaseSmall, math_em);
+            abi_em.addImport("face", tracking_cores_em.face);
+            abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, math_em));
+            abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
+            abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
+            // Web's own beauty.reshape dispatch needs the 106-point
+            // contour directly (no gpupixel bridge to hand raw
+            // landmarks to on this target) - the same module the real
+            // beauty adapter already reduces tracked landmarks through.
+            const face106_em = b.createModule(.{
+                .root_source_file = b.path("core/tracking/face106.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
+            });
+            abi_em.addImport("face106", face106_em);
+            const lens_manifest_em = b.createModule(.{ .root_source_file = b.path("core/lens/manifest.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const lens_trigger_em = b.createModule(.{
+                .root_source_file = b.path("core/lens/trigger.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{.{ .name = "face", .module = tracking_cores_em.face }},
+            });
+            const lens_animation_em = b.createModule(.{ .root_source_file = b.path("core/lens/animation.zig"), .target = em_target, .optimize = .ReleaseSmall });
+            const lens_runtime_em = b.createModule(.{
+                .root_source_file = b.path("core/lens/runtime.zig"),
+                .target = em_target,
+                .optimize = .ReleaseSmall,
+                .imports = &.{
+                    .{ .name = "graph", .module = graph_em },
+                    .{ .name = "manifest", .module = lens_manifest_em },
+                    .{ .name = "trigger", .module = lens_trigger_em },
+                    .{ .name = "animation", .module = lens_animation_em },
+                    .{ .name = "face", .module = tracking_cores_em.face },
+                },
+            });
+            abi_em.addImport("manifest", lens_manifest_em);
+            abi_em.addImport("trigger", lens_trigger_em);
+            abi_em.addImport("runtime", lens_runtime_em);
+            const image_em = imageStubModule(b, em_target, .ReleaseSmall);
+            abi_em.addImport("image", image_em);
+            abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em));
+
+            const camerakit_em_obj = b.addObject(.{ .name = "camerakit_web", .root_module = abi_em });
+            const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{});
+            const link = b.addSystemCommand(&.{em.?.em_plus_plus});
+            setEmEnv(link, em.?);
+            link.addFileArg(camerakit_em_obj.getEmittedBin());
+            for (bgfx_objects.items) |obj| link.addFileArg(obj);
+            link.addArgs(&.{
+                "-sUSE_WEBGL2=1",
+                "-sMIN_WEBGL_VERSION=2",
+                "-sMAX_WEBGL_VERSION=2",
+                "-sFULL_ES3=1",
+                "-sALLOW_MEMORY_GROWTH=1",
+                // 256MB up front. 64MB (comfortably past what session/
+                // engine creation and a frame or two of textures need)
+                // was enough until the ts shell started submitting real
+                // RGBA frames through ck_session_submit_frame_rgba_copy
+                // - a single still test photo at 2400x3000 is 28.8MB by
+                // itself, on top of live 1280x720 camera frames, LUT/
+                // makeup textures, and bgfx's own state. Raised as a
+                // precaution while chasing a real readback bug that
+                // turned out to be unrelated (a stale bgfx view-target
+                // binding, fixed at its actual source in abi.zig) -
+                // kept anyway since a still-photo-sized upload genuinely
+                // is close enough to the old budget to be worth the
+                // headroom.
+                "-sINITIAL_MEMORY=268435456",
+                // Every ck_* entry point is a real call site the TS
+                // shell reaches dynamically (no single header enumerates
+                // them the way a hand-written EXPORTED_FUNCTIONS list
+                // would need re-syncing against every time one is
+                // added) - EXPORT_ALL keeps them all reachable, the same
+                // bulk-export spirit rdynamic already gives the
+                // wasm32-freestanding build above.
+                // EXPORT_ALL alone isn't enough to actually keep these
+                // symbols in the link (verified: without LINKABLE too,
+                // every ck_* export comes back undefined) - LINKABLE is
+                // deprecated upstream but still the real requirement as
+                // of this emscripten pin.
+                "-sEXPORT_ALL=1",
+                "-sLINKABLE=1",
+                "-sMODULARIZE=1",
+                "-sEXPORT_NAME=CameraKitWebModule",
+                "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,stringToNewUTF8,UTF8ToString,getValue,setValue",
+                // A real ES module (import CameraKitWebModule from
+                // "./camerakit_web.js") rather than a plain-global
+                // factory function a <script> tag would have to expose -
+                // the ts shell's whole build (bun, ESM throughout)
+                // already assumes every dependency is import-able.
+                "-sEXPORT_ES6=1",
+                "-sUSE_ES6_IMPORT_META=1",
+            });
+            link.addArg("-o");
+            const js_out = link.addOutputFileArg("camerakit_web.js");
+
+            const install = b.addInstallDirectory(.{
+                .source_dir = js_out.dirname(),
+                .install_dir = .{ .custom = "wasm-emscripten" },
+                .install_subdir = "",
+            });
+            wasm_emscripten_step.dependOn(&install.step);
+        }
+    }
+
     const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
     const conformance_step = b.step("conformance", "Run a reference lens through the real ABI twice and prove bit-stable output");
     if (have_render_stack and gltf_module != null and target.result.os.tag == .macos) {
@@ -783,11 +945,15 @@ pub fn build(b: *std.Build) void {
         // desktop.zig's own lower-level direct bgfx cImport - a second
         // module instance for the host target, sharing the same
         // shader_blobs the harness module below already builds.
+        const face_mesh_module = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh.zig"), .target = target, .optimize = optimize });
         const render_module = b.createModule(.{
             .root_source_file = b.path("adapters/bgfx/render.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "math", .module = math_module }},
+            .imports = &.{
+                .{ .name = "math", .module = math_module },
+                .{ .name = "face_mesh", .module = face_mesh_module },
+            },
         });
         render_module.addIncludePath(b.path(".vendor/bgfx/include"));
         render_module.addIncludePath(b.path(".vendor/bx/include"));
@@ -1022,11 +1188,15 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
 
     const math_android = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = android_target, .optimize = optimize });
     const graph_android = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = android_target, .optimize = optimize });
+    const face_mesh_android = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh.zig"), .target = android_target, .optimize = optimize });
     const render_android = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = android_target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "math", .module = math_android }},
+        .imports = &.{
+            .{ .name = "math", .module = math_android },
+            .{ .name = "face_mesh", .module = face_mesh_android },
+        },
     });
     render_android.addIncludePath(b.path(".vendor/bgfx/include"));
     render_android.addIncludePath(b.path(".vendor/bx/include"));
@@ -2488,11 +2658,19 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .target = ios_target,
         .optimize = optimize,
     });
+    const face_mesh_ios = b.createModule(.{
+        .root_source_file = b.path("core/tracking/face_mesh.zig"),
+        .target = ios_target,
+        .optimize = optimize,
+    });
     const render_ios = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = ios_target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "math", .module = math_ios }},
+        .imports = &.{
+            .{ .name = "math", .module = math_ios },
+            .{ .name = "face_mesh", .module = face_mesh_ios },
+        },
     });
     render_ios.addIncludePath(b.path(".vendor/bgfx/include"));
     render_ios.addIncludePath(b.path(".vendor/bx/include"));
@@ -2807,6 +2985,211 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     return shaderc_exe;
 }
 
+const EmToolchain = struct {
+    em_plus_plus: []const u8,
+    em_root: []const u8,
+    em_python: []const u8,
+    em_llvm_root: []const u8,
+    em_config: []const u8,
+    node_exe: []const u8,
+};
+
+// The vendored, opt-in emscripten toolchain's real paths, or null if it
+// isn't synced (run: zig build vendor-sync -- --only emscripten &&
+// zig build vendor-sync -- --only emscripten-python) or node is missing
+// from PATH.
+fn emscriptenToolchain(b: *std.Build) ?EmToolchain {
+    const present = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/emscripten/emscripten/em++", .{}) catch break :blk false;
+        b.build_root.handle.access(b.graph.io, ".vendor/emscripten-python/bin/python3", .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (!present) return null;
+    const node_exe = b.findProgram(&.{"node"}, &.{}) catch return null;
+    return .{
+        .em_plus_plus = b.pathFromRoot(".vendor/emscripten/emscripten/em++"),
+        .em_root = b.pathFromRoot(".vendor/emscripten"),
+        .em_python = b.pathFromRoot(".vendor/emscripten-python/bin/python3"),
+        .em_llvm_root = b.pathFromRoot(".vendor/emscripten/bin"),
+        .em_config = b.pathFromRoot("adapters/bgfx/em_config_empty"),
+        .node_exe = node_exe,
+    };
+}
+
+fn setEmEnv(run: *std.Build.Step.Run, em: EmToolchain) void {
+    run.setEnvironmentVariable("EMSDK_PYTHON", em.em_python);
+    run.setEnvironmentVariable("EM_CONFIG", em.em_config);
+    run.setEnvironmentVariable("EM_NODE_JS", em.node_exe);
+    run.setEnvironmentVariable("EM_BINARYEN_ROOT", em.em_root);
+    run.setEnvironmentVariable("EM_LLVM_ROOT", em.em_llvm_root);
+}
+
+fn addEmPlusPlusCompile(b: *std.Build, em: EmToolchain, src: []const u8, cxx_flags: []const []const u8, include_dirs: []const []const u8) std.Build.LazyPath {
+    const run = b.addSystemCommand(&.{em.em_plus_plus});
+    setEmEnv(run, em);
+    run.addArgs(cxx_flags);
+    for (include_dirs) |dir| {
+        run.addArg("-I");
+        run.addDirectoryArg(b.path(dir));
+    }
+    run.addArg("-c");
+    run.addFileArg(b.path(src));
+    run.addArg("-o");
+    const obj_name = b.fmt("{s}.o", .{std.fs.path.stem(src)});
+    return run.addOutputFileArg(obj_name);
+}
+
+// bgfx, bx, bimg, and astc-encoder for wasm32-emscripten, plus whatever
+// extra_sources the caller needs compiled alongside them - every caller
+// wants the same real GL backend under it, just a different driver on
+// top.
+fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []const u8) std.ArrayList(std.Build.LazyPath) {
+    const cxx_flags = [_][]const u8{
+        "-std=c++20",
+        "-fno-strict-aliasing",
+        "-fno-exceptions",
+        "-fno-rtti",
+        "-Wno-date-time",
+        "-D__STDC_FORMAT_MACROS",
+        "-DBIMG_CONFIG_PARSE_AVIF=0",
+        "-DBIMG_CONFIG_PARSE_HEIF=0",
+        "-DBIMG_CONFIG_PARSE_EXR=0",
+        "-DBX_CONFIG_DEBUG=0",
+    };
+    const include_dirs = [_][]const u8{
+        ".vendor/bx/include",
+        ".vendor/bx/3rdparty",
+        ".vendor/bimg/include",
+        ".vendor/bimg/3rdparty",
+        ".vendor/bimg/3rdparty/astc-encoder/include",
+        ".vendor/bimg/3rdparty/iqa/include",
+        ".vendor/bimg/3rdparty/tinyexr/deps",
+        ".vendor/bgfx/include",
+        ".vendor/bgfx/3rdparty",
+        ".vendor/bgfx/3rdparty/khronos",
+        ".vendor/bgfx/src",
+    };
+
+    var sources: std.ArrayList([]const u8) = .empty;
+    sources.append(b.allocator, ".vendor/bgfx/src/amalgamated.cpp") catch @panic("oom");
+    sources.append(b.allocator, ".vendor/bx/src/amalgamated.cpp") catch @panic("oom");
+    for ([_][]const u8{ "image", "image_cubemap_filter", "image_decode", "image_encode" }) |name| {
+        sources.append(b.allocator, b.fmt(".vendor/bimg/src/{s}.cpp", .{name})) catch @panic("oom");
+    }
+    if (listFiles(b, ".vendor/bimg/3rdparty/astc-encoder/source", ".cpp")) |astc_sources| {
+        sources.appendSlice(b.allocator, astc_sources) catch @panic("oom");
+    }
+    sources.appendSlice(b.allocator, extra_sources) catch @panic("oom");
+
+    var objects: std.ArrayList(std.Build.LazyPath) = .empty;
+    for (sources.items) |src| {
+        objects.append(b.allocator, addEmPlusPlusCompile(b, em, src, &cxx_flags, &include_dirs)) catch @panic("oom");
+    }
+    return objects;
+}
+
+// Compiles bgfx, bx, bimg, and astc-encoder for wasm32-emscripten and
+// links wasm_bgfx_smoke_driver.cpp against them, through the vendored
+// em++ alone - `zig cc`'s own bundled headers shadow libc++'s here and
+// break the build.
+fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
+    const em = emscriptenToolchain(b) orelse {
+        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        return;
+    };
+    const objects = addBgfxWasmObjects(b, em, &.{"adapters/bgfx/wasm_bgfx_smoke_driver.cpp"});
+
+    const link = b.addSystemCommand(&.{em.em_plus_plus});
+    setEmEnv(link, em);
+    for (objects.items) |obj| link.addFileArg(obj);
+    link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1", "-sALLOW_MEMORY_GROWTH=1" });
+    link.addArg("-o");
+    const js_out = link.addOutputFileArg("wasm_bgfx_smoke.js");
+
+    const install = b.addInstallDirectory(.{
+        .source_dir = js_out.dirname(),
+        .install_dir = .{ .custom = "wasm-bgfx-smoke" },
+        .install_subdir = "",
+    });
+    step.dependOn(&install.step);
+}
+
+// The real render.zig - the one binding over bgfx every native shell
+// already runs, not a rewrite - compiled as a wasm32-emscripten object
+// and linked against the same real bgfx/bx/bimg/astc-encoder objects
+// wasm-bgfx-smoke proves, plus a small Zig driver exporting one probe
+// function. Proves the whole mechanism the real web core needs: a Zig
+// object and bgfx's C++ objects, from two different compilers, linked
+// into one wasm module by em++ alone.
+fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*std.Build.Step.Compile) void {
+    const em = emscriptenToolchain(b) orelse {
+        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        return;
+    };
+    const shaderc_tool = shaderc_exe orelse {
+        step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        return;
+    };
+
+    const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
+    const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const shader_blobs_em = addShaderBlobs(b, shaderc_tool, em_target, .ReleaseSmall);
+    const face_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const render_em = b.createModule(.{
+        .root_source_file = b.path("adapters/bgfx/render.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "math", .module = math_em },
+            .{ .name = "shader_blobs", .module = shader_blobs_em },
+            .{ .name = "face_mesh", .module = face_mesh_em },
+        },
+    });
+    render_em.addIncludePath(b.path(".vendor/bgfx/include"));
+    render_em.addIncludePath(b.path(".vendor/bx/include"));
+    // Real linking against emscripten's libc only happens later, at the
+    // em++ link step - this is an object-only build, so bgfx.h's own
+    // #include <stdlib.h> just needs the emscripten sysroot's headers
+    // on the search path, not Zig's own (nonexistent, for this target)
+    // libc linkage.
+    render_em.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+
+    const driver_em = b.createModule(.{
+        .root_source_file = b.path("adapters/bgfx/wasm_emscripten_core_smoke.zig"),
+        .target = em_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{.{ .name = "render", .module = render_em }},
+    });
+    driver_em.link_libc = true;
+    const zig_obj = b.addObject(.{ .name = "wasm_emscripten_core_smoke", .root_module = driver_em });
+
+    const objects = addBgfxWasmObjects(b, em, &.{});
+    const link = b.addSystemCommand(&.{em.em_plus_plus});
+    setEmEnv(link, em);
+    link.addFileArg(zig_obj.getEmittedBin());
+    for (objects.items) |obj| link.addFileArg(obj);
+    link.addArgs(&.{
+        "-sUSE_WEBGL2=1",
+        "-sMIN_WEBGL_VERSION=2",
+        "-sMAX_WEBGL_VERSION=2",
+        "-sFULL_ES3=1",
+        "-sALLOW_MEMORY_GROWTH=1",
+        "-sEXPORTED_FUNCTIONS=_ck_core_smoke_probe",
+        "-sEXPORTED_RUNTIME_METHODS=ccall",
+        "-sMODULARIZE=1",
+        "-sEXPORT_NAME=CoreSmokeModule",
+    });
+    link.addArg("-o");
+    const js_out = link.addOutputFileArg("wasm_emscripten_core_smoke.js");
+
+    const install = b.addInstallDirectory(.{
+        .source_dir = js_out.dirname(),
+        .install_dir = .{ .custom = "wasm-emscripten-core-smoke" },
+        .install_subdir = "",
+    });
+    step.dependOn(&install.step);
+}
+
 // Compiles the kit's shaders with the vendored compiler at build time and
 // exposes the blobs as one embedded module, per backend profile.
 fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -2833,11 +3216,34 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // blend.pass's own fixed fragment shader, same reasoning as
         // fs_lut_pass above.
         .{ .name = "fs_blend_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // beauty.face's smooth effect blends toward this separable
+        // blur, run twice (horizontal then vertical) by the two
+        // different u_blurStep values the caller submits it with, same
+        // program both times.
+        .{ .name = "fs_blur_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // beauty.face's own fixed fragment shader: smooth and whiten,
+        // same reasoning as fs_lut_pass above.
+        .{ .name = "fs_beauty_face", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // beauty.reshape's own fixed fragment shader: thin_face and
+        // big_eye, same reasoning as fs_lut_pass above.
+        .{ .name = "fs_beauty_reshape", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // beauty.lipstick/beauty.blusher's own mesh vertex stage - its
+        // own varying def, a_position is vec2 here, not the vec3 every
+        // other vertex contract in this project shares.
+        .{ .name = "vs_makeup", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
+        // beauty.lipstick/beauty.blusher's own fixed fragment shader,
+        // same reasoning as fs_lut_pass above.
+        .{ .name = "fs_makeup", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_makeup.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
         .{ .profile = "metal", .platform = "ios", .tag = "metal" },
         .{ .profile = "spirv", .platform = "android", .tag = "spirv" },
         .{ .profile = "300_es", .platform = "android", .tag = "essl" },
+        // Same GLSL ES 3.00 profile Android's essl blobs target - bgfx
+        // reports OPENGLES for both - but compiled for asm.js rather
+        // than android, its own tag since shaderc's platform argument
+        // can affect the preprocessor defines it injects.
+        .{ .profile = "300_es", .platform = "asm.js", .tag = "essl_web" },
     };
     const computes = [_][]const u8{"cs_nv12_to_rgba"};
     for (computes) |compute_name| {

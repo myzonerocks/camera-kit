@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const math = @import("math");
 const blobs = @import("shader_blobs");
+const face_mesh = @import("face_mesh");
 
 pub const android_vk = if (builtin.os.tag == .linux and builtin.abi.isAndroid())
     @import("android_vk.zig")
@@ -19,6 +20,12 @@ pub const c = @cImport({
 });
 
 pub const invalid_handle: u16 = std.math.maxInt(u16);
+
+/// fs_beauty_reshape.sc packs the 106-point base face contour two
+/// points per vec4 uniform - thin_face/big_eye only ever index into
+/// that base range, never the five derived hub points face106.zig
+/// appends for lipstick/blush's own mesh.
+pub const face_point_vec4_count = 53;
 
 /// A named alias for bgfx's own texture handle, matching the stub
 /// module's TextureHandle - lets callers that need to name the type
@@ -51,6 +58,13 @@ const UploadCache = struct {
     height: u16,
 };
 
+const RgbaUploadCache = struct {
+    texture: c.bgfx_texture_handle_t,
+    width: u16,
+    height: u16,
+    format: u32,
+};
+
 pub const PreviewFrame = union(enum) {
     bgra: struct {
         texture: c.bgfx_texture_handle_t,
@@ -81,12 +95,41 @@ pub const Renderer = struct {
     nv12_program: c.bgfx_program_handle_t,
     lut_program: c.bgfx_program_handle_t,
     blend_program: c.bgfx_program_handle_t,
+    blur_program: c.bgfx_program_handle_t,
+    beauty_face_program: c.bgfx_program_handle_t,
+    beauty_reshape_program: c.bgfx_program_handle_t,
+    makeup_program: c.bgfx_program_handle_t,
+    /// The 176-triangle face-makeup mesh's fixed index buffer -
+    /// face_mesh.triangle_indices, uploaded once, never changes.
+    makeup_index_buffer: c.bgfx_index_buffer_handle_t,
+    /// The live tracked 111-point contour, stream 0 of a makeup draw -
+    /// dynamic (updated every frame submitMakeup runs), unlike every
+    /// other buffer here.
+    makeup_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+    /// Stream 1 of a makeup draw: face_mesh.canonical_uv scaled into
+    /// each effect's own crop of the source image - static, computed
+    /// once at init, never changes per-frame the way position does.
+    makeup_lipstick_uv_buffer: c.bgfx_vertex_buffer_handle_t,
+    makeup_blush_uv_buffer: c.bgfx_vertex_buffer_handle_t,
     tex_color: c.bgfx_uniform_handle_t,
     tex_y: c.bgfx_uniform_handle_t,
     tex_uv: c.bgfx_uniform_handle_t,
     tex_lut: c.bgfx_uniform_handle_t,
     tex_background: c.bgfx_uniform_handle_t,
     tex_mask: c.bgfx_uniform_handle_t,
+    tex_mean: c.bgfx_uniform_handle_t,
+    tex_lookup_gray: c.bgfx_uniform_handle_t,
+    tex_lookup_origin: c.bgfx_uniform_handle_t,
+    tex_lookup_skin: c.bgfx_uniform_handle_t,
+    tex_lookup_custom: c.bgfx_uniform_handle_t,
+    tex_makeup: c.bgfx_uniform_handle_t,
+    blur_step_uniform: c.bgfx_uniform_handle_t,
+    beauty_params_uniform: c.bgfx_uniform_handle_t,
+    reshape_params_uniform: c.bgfx_uniform_handle_t,
+    makeup_params_uniform: c.bgfx_uniform_handle_t,
+    /// 106 tracked face points, two per vec4 (xy, zw) - matching
+    /// fs_beauty_reshape.sc's own u_facePoints packing.
+    face_points_uniform: c.bgfx_uniform_handle_t,
     /// Solid white 1x1: blend.pass's mask input when segmentation is
     /// unavailable. A mask of 1.0 everywhere means "always foreground,"
     /// so binding this reproduces the SPEC's degradation rule exactly -
@@ -95,6 +138,7 @@ pub const Renderer = struct {
     default_mask_texture: c.bgfx_texture_handle_t,
     yuv_uniform: c.bgfx_uniform_handle_t,
     upload_cache: ?UploadCache = null,
+    rgba_upload_cache: ?RgbaUploadCache = null,
 
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         var bgfx_init: c.bgfx_init_t = undefined;
@@ -162,6 +206,28 @@ pub const Renderer = struct {
         };
         const lut_program = try loadLutProgram();
         const blend_program = try loadBlendProgram();
+        const blur_program = try loadBlurProgram();
+        const beauty_face_program = try loadBeautyFaceProgram();
+        const beauty_reshape_program = try loadBeautyReshapeProgram();
+        const makeup_program = try loadMakeupProgram();
+
+        var makeup_position_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&makeup_position_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&makeup_position_layout, c.BGFX_ATTRIB_POSITION, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&makeup_position_layout);
+        var makeup_uv_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&makeup_uv_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&makeup_uv_layout, c.BGFX_ATTRIB_TEXCOORD1, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&makeup_uv_layout);
+
+        const makeup_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&face_mesh.triangle_indices, @sizeOf(@TypeOf(face_mesh.triangle_indices))), 0);
+        const makeup_position_buffer = c.bgfx_create_dynamic_vertex_buffer(face_mesh.canonical_uv.len / 2, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        var lipstick_uv: [face_mesh.canonical_uv.len]f32 = undefined;
+        face_mesh.makeupUv(face_mesh.lipstick_bounds, &lipstick_uv);
+        const makeup_lipstick_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&lipstick_uv, @sizeOf(@TypeOf(lipstick_uv))), &makeup_uv_layout, 0);
+        var blush_uv: [face_mesh.canonical_uv.len]f32 = undefined;
+        face_mesh.makeupUv(face_mesh.blush_bounds, &blush_uv);
+        const makeup_blush_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&blush_uv, @sizeOf(@TypeOf(blush_uv))), &makeup_uv_layout, 0);
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
@@ -189,12 +255,31 @@ pub const Renderer = struct {
             .nv12_program = nv12_program,
             .lut_program = lut_program,
             .blend_program = blend_program,
+            .blur_program = blur_program,
+            .beauty_face_program = beauty_face_program,
+            .beauty_reshape_program = beauty_reshape_program,
+            .makeup_program = makeup_program,
+            .makeup_index_buffer = makeup_index_buffer,
+            .makeup_position_buffer = makeup_position_buffer,
+            .makeup_lipstick_uv_buffer = makeup_lipstick_uv_buffer,
+            .makeup_blush_uv_buffer = makeup_blush_uv_buffer,
             .tex_color = c.bgfx_create_uniform("s_texColor", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_y = c.bgfx_create_uniform("s_texY", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_uv = c.bgfx_create_uniform("s_texUV", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_lut = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_background = c.bgfx_create_uniform("s_texBackground", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_mask = c.bgfx_create_uniform("s_texMask", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_mean = c.bgfx_create_uniform("s_texMean", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_lookup_gray = c.bgfx_create_uniform("s_texLookupGray", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_lookup_origin = c.bgfx_create_uniform("s_texLookupOrigin", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_lookup_skin = c.bgfx_create_uniform("s_texLookupSkin", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_lookup_custom = c.bgfx_create_uniform("s_texLookupCustom", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_makeup = c.bgfx_create_uniform("s_texMakeup", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .blur_step_uniform = c.bgfx_create_uniform("u_blurStep", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .beauty_params_uniform = c.bgfx_create_uniform("u_beautyParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .reshape_params_uniform = c.bgfx_create_uniform("u_reshapeParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .default_mask_texture = createMaskTexture(1, 1, &[_]u8{255}),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
         };
@@ -262,6 +347,51 @@ pub const Renderer = struct {
         };
     }
 
+    /// beauty.face's smooth effect blur input - one program, run twice
+    /// (horizontal then vertical) with a different u_blurStep each time.
+    pub fn loadBlurProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_blur_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_blur_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_blur_pass_essl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// The one fixed beauty.face program every lens shares - kit-authored
+    /// like lut_program, same reasoning.
+    pub fn loadBeautyFaceProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_beauty_face_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_beauty_face_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_beauty_face_essl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// The one fixed beauty.reshape program every lens shares -
+    /// kit-authored like lut_program, same reasoning.
+    pub fn loadBeautyReshapeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_beauty_reshape_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_beauty_reshape_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_beauty_reshape_essl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// The one fixed beauty.lipstick/beauty.blusher program every lens
+    /// shares - its own vertex stage (vs_makeup, not vs_lens_pass; the
+    /// mesh needs two vertex attributes, not a full-screen quad).
+    pub fn loadMakeupProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_makeup_metal, blobs.fs_makeup_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_makeup_spirv, blobs.fs_makeup_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_makeup_essl, blobs.fs_makeup_essl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     pub fn destroyProgram(program: c.bgfx_program_handle_t) void {
         c.bgfx_destroy_program(program);
     }
@@ -279,6 +409,9 @@ pub const Renderer = struct {
             c.bgfx_destroy_texture(cache.y);
             c.bgfx_destroy_texture(cache.uv);
         }
+        if (r.rgba_upload_cache) |cache| {
+            c.bgfx_destroy_texture(cache.texture);
+        }
         c.bgfx_destroy_texture(r.default_mask_texture);
         c.bgfx_destroy_uniform(r.tex_color);
         c.bgfx_destroy_uniform(r.tex_y);
@@ -286,11 +419,30 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_lut);
         c.bgfx_destroy_uniform(r.tex_background);
         c.bgfx_destroy_uniform(r.tex_mask);
+        c.bgfx_destroy_uniform(r.tex_mean);
+        c.bgfx_destroy_uniform(r.tex_lookup_gray);
+        c.bgfx_destroy_uniform(r.tex_lookup_origin);
+        c.bgfx_destroy_uniform(r.tex_lookup_skin);
+        c.bgfx_destroy_uniform(r.tex_lookup_custom);
+        c.bgfx_destroy_uniform(r.tex_makeup);
+        c.bgfx_destroy_uniform(r.blur_step_uniform);
+        c.bgfx_destroy_uniform(r.beauty_params_uniform);
+        c.bgfx_destroy_uniform(r.reshape_params_uniform);
+        c.bgfx_destroy_uniform(r.makeup_params_uniform);
+        c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.yuv_uniform);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
         c.bgfx_destroy_program(r.lut_program);
         c.bgfx_destroy_program(r.blend_program);
+        c.bgfx_destroy_program(r.blur_program);
+        c.bgfx_destroy_program(r.beauty_face_program);
+        c.bgfx_destroy_program(r.beauty_reshape_program);
+        c.bgfx_destroy_program(r.makeup_program);
+        c.bgfx_destroy_index_buffer(r.makeup_index_buffer);
+        c.bgfx_destroy_dynamic_vertex_buffer(r.makeup_position_buffer);
+        c.bgfx_destroy_vertex_buffer(r.makeup_lipstick_uv_buffer);
+        c.bgfx_destroy_vertex_buffer(r.makeup_blush_uv_buffer);
         c.bgfx_shutdown();
         if (is_android) {
             if (r.zero_copy) |*zc| {
@@ -532,6 +684,82 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.blend_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws one pass of beauty.face's separable blur input into
+    /// view_id - one call for the horizontal tap, one for the vertical,
+    /// step carrying the per-tap UV offset for whichever direction this
+    /// call is.
+    pub fn submitBlurPass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, step: [2]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        const step_vec4 = [4]f32{ step[0], step[1], 0.0, 0.0 };
+        c.bgfx_set_uniform(r.blur_step_uniform, &step_vec4, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.blur_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one beauty.face node (smooth+whiten) as a full-screen pass
+    /// into view_id: the frame and its separable blur on units 0-1, the
+    /// four whitening LUTs on units 2-5, matching gpupixel's own
+    /// beauty_face_unit_filter.cc lookup set.
+    pub fn submitBeautyFace(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mean_texture: c.bgfx_texture_handle_t, lookup_gray: c.bgfx_texture_handle_t, lookup_origin: c.bgfx_texture_handle_t, lookup_skin: c.bgfx_texture_handle_t, lookup_custom: c.bgfx_texture_handle_t, smooth_amount: f32, whiten_amount: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_mean, mean_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_lookup_gray, lookup_gray, std.math.maxInt(u32));
+        c.bgfx_set_texture(3, r.tex_lookup_origin, lookup_origin, std.math.maxInt(u32));
+        c.bgfx_set_texture(4, r.tex_lookup_skin, lookup_skin, std.math.maxInt(u32));
+        c.bgfx_set_texture(5, r.tex_lookup_custom, lookup_custom, std.math.maxInt(u32));
+        const params = [4]f32{ smooth_amount, whiten_amount, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.beauty_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.beauty_face_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one beauty.reshape node (thin_face+big_eye) as a
+    /// full-screen pass into view_id. face_points is the live tracked
+    /// contour, 106 points as 212 floats (x0,y0,x1,y1,...) - the same
+    /// flat layout core/tracking/face106.zig's base 106 points already
+    /// fill, packed two points per vec4 with no repacking since that is
+    /// already fs_beauty_reshape.sc's own u_facePoints layout.
+    pub fn submitBeautyReshape(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, face_points: *const [face_point_vec4_count * 4]f32, aspect_ratio: f32, thin_face_amount: f32, big_eye_amount: f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        const params = [4]f32{ aspect_ratio, thin_face_amount, big_eye_amount, 0.0 };
+        c.bgfx_set_uniform(r.reshape_params_uniform, &params, 1);
+        c.bgfx_set_uniform(r.face_points_uniform, face_points, face_point_vec4_count);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.beauty_reshape_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one beauty.lipstick or beauty.blusher node: the 176-triangle
+    /// mesh over the live tracked contour, not a full-screen pass -
+    /// uv_buffer picks which effect (makeupLipstickUvBuffer/
+    /// makeupBlushUvBuffer), positions is this frame's own 111 tracked
+    /// points in 0-1 UV space (both the mesh's vertex position and,
+    /// unchanged, its background sample point - vs_makeup.sc's own
+    /// trick for reading the frame at exactly the screen position each
+    /// triangle draws over).
+    pub fn submitMakeup(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, makeup_texture: c.bgfx_texture_handle_t, uv_buffer: c.bgfx_vertex_buffer_handle_t, positions: *const [face_mesh.canonical_uv.len]f32, intensity: f32) void {
+        c.bgfx_update_dynamic_vertex_buffer(r.makeup_position_buffer, 0, c.bgfx_copy(positions, @sizeOf(@TypeOf(positions.*))));
+        c.bgfx_set_dynamic_vertex_buffer(0, r.makeup_position_buffer, 0, face_mesh.canonical_uv.len / 2);
+        c.bgfx_set_vertex_buffer(1, uv_buffer, 0, face_mesh.canonical_uv.len / 2);
+        c.bgfx_set_index_buffer(r.makeup_index_buffer, 0, face_mesh.triangle_indices.len);
+        c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_makeup, makeup_texture, std.math.maxInt(u32));
+        const params = [4]f32{ intensity, 0.0, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.makeup_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.makeup_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    pub fn makeupLipstickUvBuffer(r: *const Renderer) c.bgfx_vertex_buffer_handle_t {
+        return r.makeup_lipstick_uv_buffer;
+    }
+
+    pub fn makeupBlushUvBuffer(r: *const Renderer) c.bgfx_vertex_buffer_handle_t {
+        return r.makeup_blush_uv_buffer;
+    }
+
     /// The stated CPU path: copies NV12 planes into two cached updatable
     /// textures, recreated only when the size changes. The row copies go
     /// through bgfx's frame allocator, freed after submission; the cache
@@ -572,6 +800,41 @@ pub const Renderer = struct {
         c.bgfx_update_texture_2d(cache.uv, 0, 0, 0, 0, width / 2, height / 2, uv_mem, std.math.maxInt(u16));
 
         return .{ .y = cache.y, .uv = cache.uv };
+    }
+
+    /// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a
+    /// browser's own canvas/video frame byte buffer, say, with no
+    /// native GPU handle behind it for wrapExternalTexture's zero-copy
+    /// path to use. Same cached-and-updated shape as uploadNv12 above,
+    /// not createStaticTexture's one-shot immutable upload - a live
+    /// camera frame changes every call, the same texture reused rather
+    /// than recreated each time.
+    pub fn uploadRgba(r: *Renderer, width: u16, height: u16, format: u32, rgba: [*]const u8, stride: u32) !c.bgfx_texture_handle_t {
+        if (r.rgba_upload_cache) |cache| {
+            if (cache.width != width or cache.height != height or cache.format != format) {
+                c.bgfx_destroy_texture(cache.texture);
+                r.rgba_upload_cache = null;
+            }
+        }
+        if (r.rgba_upload_cache == null) {
+            const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+            r.rgba_upload_cache = .{
+                .texture = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0),
+                .width = width,
+                .height = height,
+                .format = format,
+            };
+        }
+        const cache = r.rgba_upload_cache.?;
+
+        const mem = c.bgfx_alloc(@as(u32, width) * height * 4) orelse return error.OutOfMemory;
+        const dst: [*]u8 = mem.*.data;
+        for (0..height) |row| {
+            @memcpy(dst[row * width * 4 ..][0 .. width * 4], rgba[row * stride ..][0 .. width * 4]);
+        }
+        c.bgfx_update_texture_2d(cache.texture, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
+
+        return cache.texture;
     }
 
     /// Zero-copy submission of a camera hardware buffer: the adapter

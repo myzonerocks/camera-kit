@@ -1,4 +1,4 @@
-import { Core, PreviewSession } from "../src/index.ts";
+import { PreviewSession } from "../src/index.ts";
 import { FACE_LANDMARK_COUNT } from "../src/tracking.ts";
 
 const status = document.getElementById("status")!;
@@ -96,14 +96,31 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     requestAnimationFrame(feed);
     if (link.busy) return;
     const video = preview.video;
-    if (video.readyState < 2 || video.videoWidth === 0) return;
+    if (video.readyState < 2 || video.videoWidth === 0 || video.paused) return;
     const analysisHeight = Math.round((analysisWidth * video.videoHeight) / video.videoWidth);
     scratch.width = analysisWidth;
     scratch.height = analysisHeight;
-    ctx.drawImage(video, 0, 0, analysisWidth, analysisHeight);
+    if (preview.isVideoFlipped()) {
+      ctx.setTransform(1, 0, 0, -1, 0, analysisHeight);
+      ctx.drawImage(video, 0, 0, analysisWidth, analysisHeight);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    } else {
+      ctx.drawImage(video, 0, 0, analysisWidth, analysisHeight);
+    }
     const pixels = ctx.getImageData(0, 0, analysisWidth, analysisHeight);
     void link.send(pixels.data, analysisWidth, analysisHeight, Math.round(performance.now() * 1000)).then((reply) => {
+      // The video can pause (freezeCamera, driving a still-photo test)
+      // between this request going out and its reply coming back - a
+      // live "no face" result landing after that would silently clear
+      // landmarks setLandmarksFromStill just set explicitly for the
+      // frozen frame. Stale results while paused are simply dropped.
+      if (video.paused) return;
       drawOverlay(reply, analysisWidth, analysisHeight);
+      preview.setFaceLandmarks(
+        reply.presence >= 0.5 && reply.landmarkCount > 0 ? reply.landmarks : null,
+        analysisWidth,
+        analysisHeight,
+      );
       if (!trackingAnnounced) {
         trackingAnnounced = true;
         console.log(`CKWEB tracking running: serial results flowing, presence ${reply.presence.toFixed(3)}`);
@@ -129,32 +146,35 @@ async function startTracking(preview: PreviewSession): Promise<void> {
       expected: FACE_LANDMARK_COUNT,
     };
   };
+  // Same still-image path, but for reshape's own proof: tracks the image
+  // and feeds the result straight into the preview session's face
+  // contour, the way the live feed loop above does every frame.
+  (window as unknown as Record<string, unknown>).setLandmarksFromStill = async (url: string) => {
+    const bitmap = await createImageBitmap(await (await fetch(url)).blob());
+    const still = document.createElement("canvas");
+    still.width = bitmap.width;
+    still.height = bitmap.height;
+    const stillCtx = still.getContext("2d", { willReadFrequently: true })!;
+    stillCtx.drawImage(bitmap, 0, 0);
+    const pixels = stillCtx.getImageData(0, 0, still.width, still.height);
+    const reply = await link.send(pixels.data, still.width, still.height, 0);
+    preview.setFaceLandmarks(
+      reply.presence >= 0.5 && reply.landmarkCount > 0 ? reply.landmarks : null,
+      still.width,
+      still.height,
+    );
+  };
   (window as unknown as Record<string, unknown>).trackingUp = true;
 }
 
 async function run(): Promise<void> {
-  const core = await Core.load(new URL("./camerakit.wasm", import.meta.url));
-  const version = core.abiVersion();
-  status.textContent = `abi ${version >> 16}.${version & 0xffff}`;
-
-  // The conversion matrix comes from the core; sanity-check one known
-  // anchor so a broken wasm surface fails loudly here, not in a shader.
-  const m = core.yuvToRgbMatrix(1, 0);
-  if (Math.abs(m[0] - 255 / 219) > 1e-4) {
-    status.textContent = "core color matrix wrong";
-    return;
-  }
-
-  const engine = core.createEngine();
-  const session = core.createSession(engine);
-
-  const preview = new PreviewSession(core, session, canvas, {
+  const preview = await PreviewSession.create(canvas, new URL("./camerakit_web.js", import.meta.url), {
     onState(state) {
       status.textContent = `capture ${state}`;
       document.title = `camerakit ${state}`;
     },
     onFps(fps, rendered, cameraFrames) {
-      const level = core.degradeLevel(session);
+      const level = preview.degradeLevel();
       status.textContent = `capture ${preview.state}  ${fps.toFixed(1)} fps  frames ${cameraFrames}  degrade ${level}`;
       if (!proofLogged && cameraFrames > 30 && fps > 20) {
         const pixel = preview.readCenterPixel();
@@ -173,6 +193,22 @@ async function run(): Promise<void> {
     },
   });
   await preview.start();
+  // Persisted across reloads: a camera that hands the browser
+  // pre-rotated frames does so every time, not just this once. Default
+  // true on a device that's never recorded a choice - this demo's own
+  // camera does this consistently, so "never asked" should mean
+  // "already correct," not "upside down until you notice and fix it."
+  const flipCameraCheckbox = document.getElementById("flip-camera") as HTMLInputElement | null;
+  const flipRaw = localStorage.getItem("ckweb-flip-camera");
+  const flipStored = flipRaw === null ? true : flipRaw === "1";
+  if (flipCameraCheckbox) {
+    flipCameraCheckbox.checked = flipStored;
+    preview.setVideoFlip(flipStored);
+    flipCameraCheckbox.addEventListener("change", () => {
+      preview.setVideoFlip(flipCameraCheckbox.checked);
+      localStorage.setItem("ckweb-flip-camera", flipCameraCheckbox.checked ? "1" : "0");
+    });
+  }
   startTracking(preview).catch((err) => {
     (window as unknown as Record<string, unknown>).trackingError = String(err);
     console.log(`tracking unavailable: ${String(err)}`);
@@ -193,9 +229,40 @@ async function run(): Promise<void> {
   (window as unknown as Record<string, unknown>).setSmooth = (value: number) => {
     preview.setSmooth(value);
   };
+  const thinFaceSlider = document.getElementById("thin-face") as HTMLInputElement | null;
+  thinFaceSlider?.addEventListener("input", () => {
+    preview.setThinFace(Number(thinFaceSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setThinFace = (value: number) => {
+    preview.setThinFace(value);
+  };
+  const bigEyeSlider = document.getElementById("big-eye") as HTMLInputElement | null;
+  bigEyeSlider?.addEventListener("input", () => {
+    preview.setBigEye(Number(bigEyeSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setBigEye = (value: number) => {
+    preview.setBigEye(value);
+  };
+  await preview.loadMakeupTextures(new URL("./res/", import.meta.url));
+  const lipstickSlider = document.getElementById("lipstick") as HTMLInputElement | null;
+  lipstickSlider?.addEventListener("input", () => {
+    preview.setLipstick(Number(lipstickSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setLipstick = (value: number) => {
+    preview.setLipstick(value);
+  };
+  const blushSlider = document.getElementById("blush") as HTMLInputElement | null;
+  blushSlider?.addEventListener("input", () => {
+    preview.setBlush(Number(blushSlider.value));
+  });
+  (window as unknown as Record<string, unknown>).setBlush = (value: number) => {
+    preview.setBlush(value);
+  };
+  (window as unknown as Record<string, unknown>).makeupTexturesReady = true;
   (window as unknown as Record<string, unknown>).loadStillFrame = (url: string) => preview.loadStillFrame(url);
   (window as unknown as Record<string, unknown>).readCenterPixel = () => Array.from(preview.readCenterPixel());
   (window as unknown as Record<string, unknown>).readFrameSum = () => preview.readFrameSum();
+  (window as unknown as Record<string, unknown>).captureFrame = () => preview.captureFrame();
   // Pausing the video element stops the per-frame texture re-upload,
   // freezing whatever the shader is currently sampling.
   (window as unknown as Record<string, unknown>).freezeCamera = () => preview.video.pause();

@@ -1,8 +1,10 @@
-// The web shell over the camerakit wasm core. Framework-free: the package
-// exposes the same shapes as the other shells and owns only what the
-// platform forces on it, capture through getUserMedia and the GPU surface
-// through WebGL2. Session accounting, degradation, and color math all come
-// from the core.
+// The web shell over camerakit_web, the real bgfx-backed engine every
+// other shell already runs (Swift/Kotlin call the exact same frozen ABI
+// through their own thin platform glue). This shell owns only what the
+// browser forces on it - camera capture through getUserMedia, decoding
+// PNGs the core has no decoder for, driving the render loop - and hands
+// everything else (the frame graph, all six beauty effects, mirror and
+// rotation) straight to the engine.
 
 export const CK_OK = 0;
 
@@ -14,92 +16,19 @@ export const enum DegradeLevel {
   Passthrough = 4,
 }
 
-interface CoreExports {
-  memory: WebAssembly.Memory;
-  ck_abi_version(): number;
-  ck_alloc(size: number): number;
-  ck_free(ptr: number, size: number): void;
-  ck_engine_create(config: number, out: number): number;
-  ck_engine_destroy(engine: number): void;
-  ck_session_create(engine: number, config: number, out: number): number;
-  ck_session_destroy(session: number): void;
-  ck_session_report_frame(session: number, frameTimeUs: number, thermal: number): number;
-  ck_session_degrade_level(session: number): number;
-  ck_color_yuv_to_rgb(standard: number, range: number, outMatrix: number): number;
+export const enum BeautyEffect {
+  Smooth = 0,
+  Whiten = 1,
+  ThinFace = 2,
+  BigEye = 3,
+  Lipstick = 4,
+  Blush = 5,
 }
 
-export class Core {
-  private constructor(private exports: CoreExports) {}
-
-  static async load(wasmUrl: string | URL): Promise<Core> {
-    const response = await fetch(wasmUrl);
-    const { instance } = await WebAssembly.instantiateStreaming(response, {});
-    const core = new Core(instance.exports as unknown as CoreExports);
-    const version = core.abiVersion();
-    if (version >> 16 !== 0) {
-      throw new Error(`camerakit abi major mismatch: ${version >> 16}`);
-    }
-    return core;
-  }
-
-  abiVersion(): number {
-    return this.exports.ck_abi_version() >>> 0;
-  }
-
-  createEngine(): number {
-    const out = this.exports.ck_alloc(4);
-    try {
-      if (this.exports.ck_engine_create(0, out) !== CK_OK) {
-        throw new Error("engine create failed");
-      }
-      return new DataView(this.exports.memory.buffer).getUint32(out, true);
-    } finally {
-      this.exports.ck_free(out, 4);
-    }
-  }
-
-  destroyEngine(engine: number): void {
-    this.exports.ck_engine_destroy(engine);
-  }
-
-  createSession(engine: number): number {
-    const out = this.exports.ck_alloc(4);
-    try {
-      if (this.exports.ck_session_create(engine, 0, out) !== CK_OK) {
-        throw new Error("session create failed");
-      }
-      return new DataView(this.exports.memory.buffer).getUint32(out, true);
-    } finally {
-      this.exports.ck_free(out, 4);
-    }
-  }
-
-  destroySession(session: number): void {
-    this.exports.ck_session_destroy(session);
-  }
-
-  reportFrame(session: number, frameTimeUs: number): DegradeLevel {
-    return this.exports.ck_session_report_frame(session, frameTimeUs, 0);
-  }
-
-  degradeLevel(session: number): DegradeLevel {
-    return this.exports.ck_session_degrade_level(session);
-  }
-
-  // The exact conversion the core computes, as a column-major mat4 for the
-  // shader: rgb = (m * vec4(yuv, 1)).rgb.
-  yuvToRgbMatrix(standard: number, range: number): Float32Array {
-    const out = this.exports.ck_alloc(64);
-    try {
-      if (this.exports.ck_color_yuv_to_rgb(standard, range, out) !== CK_OK) {
-        throw new Error("invalid color parameters");
-      }
-      return new Float32Array(this.exports.memory.buffer.slice(out, out + 64));
-    } finally {
-      this.exports.ck_free(out, 64);
-    }
-  }
-}
+const FRAME_FLAG_MIRROR = 0x1;
+const FRAME_ROTATION_SHIFT = 8;
+const PIXEL_FORMAT_RGBA8 = 4;
+export const FACE_LANDMARK_COUNT = 478;
 
 export type CaptureState = "idle" | "running" | "denied" | "failed" | "interrupted";
 
@@ -108,38 +37,45 @@ export interface SessionEvents {
   onFps?(fps: number, renderedFrames: number, cameraFrames: number): void;
 }
 
-// Live camera preview: getUserMedia into a video element, each frame uploaded
-// to a WebGL2 texture and drawn full-canvas. The browser delivers decoded
-// RGB; the raw-plane path with the core's conversion matrix arrives with
-// VideoFrame ingestion.
-// The skin-smoothing "whiten" look is a tone curve plus a three-stage
-// lookup-texture pass, run natively here in WebGL2/GLSL ES rather than
-// through a shared native pipeline, since browsers have no way to hand a
-// wasm GL context to WebGPU/WebGL2 the way native platforms can.
-const WHITEN_LUT_NAMES = ["lookup_gray", "lookup_origin", "lookup_skin", "lookup_light"] as const;
+/// Emscripten's own Module surface, the pieces this shell actually uses.
+/// EXPORTED_RUNTIME_METHODS in build.zig's wasm-emscripten link step is
+/// the source of truth for what's actually present at runtime.
+interface EngineModule {
+  HEAPU8: Uint8Array;
+  HEAPF32: Float32Array;
+  ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
+  getValue(ptr: number, type: string): number;
+  setValue(ptr: number, value: number, type: string): void;
+  stringToNewUTF8(value: string): number;
+}
+
+type EngineModuleFactory = (overrides?: Record<string, unknown>) => Promise<EngineModule>;
+
+/// Decodes a fetched blob to raw RGBA bytes via a 2D canvas. Unlike
+/// texImage2D (see the git history on this file - a real, hard-won
+/// lesson from the old hand-rolled WebGL2 shell this one replaces),
+/// getImageData has always had simple, browser-consistent semantics:
+/// row 0 is the visual top of the image, full stop. No DOM-source
+/// orientation quirks to work around, because there's no texImage2D
+/// involved at all - just plain bytes handed to the engine's own
+/// texture upload, which owns its own orientation convention entirely
+/// separately from WebGL's.
+async function decodeImageRgba(blob: Blob): Promise<{ data: Uint8ClampedArray; width: number; height: number }> {
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(bitmap, 0, 0);
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return { data: image.data, width: canvas.width, height: canvas.height };
+}
 
 export class PreviewSession {
-  private stream: MediaStream | null = null;
-  /// The camera element frames render from; analysis passes sample it too.
   readonly video = document.createElement("video");
-  private gl: WebGL2RenderingContext;
-  private program: WebGLProgram;
-  private texture: WebGLTexture;
-  private whitenLuts: WebGLTexture[] = [];
-  private whitenAmount = 0;
-  private whitenUniform: WebGLUniformLocation | null;
-  private smoothAmount = 0;
-  private smoothUniform: WebGLUniformLocation | null;
-  private blurProgram: WebGLProgram;
-  private blurStepUniform: WebGLUniformLocation | null;
-  private blurTexture: WebGLTexture;
-  private blurFbo: WebGLFramebuffer;
-  private meanTexture: WebGLTexture;
-  private meanFbo: WebGLFramebuffer;
-  private meanWidth = 0;
-  private meanHeight = 0;
-  private frameWidth = 0;
-  private frameHeight = 0;
+  state: CaptureState = "idle";
+
+  private stream: MediaStream | null = null;
   private raf = 0;
   private lastTick = 0;
   private fpsWindowStart = 0;
@@ -147,48 +83,99 @@ export class PreviewSession {
   private renderedFrames = 0;
   private cameraFrames = 0;
   private lastVideoTime = -1;
-  state: CaptureState = "idle";
+  private frameWidth = 0;
+  private frameHeight = 0;
+  /// Some cameras (seen with certain external/virtual devices on macOS)
+  /// hand the browser frames pre-rotated 180 degrees - the raw decoded
+  /// video is upside down before any code here touches it. Carried as a
+  /// quarter-turn count on the submitted frame's own flags, the same
+  /// mechanism every other shell uses for sensor orientation - not a
+  /// CSS or texture-upload workaround.
+  private videoFlipped = false;
+  private whitenLutsLoaded = 0;
+  private lipstickTextureLoaded = false;
+  private blushTextureLoaded = false;
+  private scratchCanvas = document.createElement("canvas");
+  private scratchCtx: CanvasRenderingContext2D;
+  /// Reused across frames, grown on resize rather than alloc/freed every
+  /// tick - the frame descriptor is a fixed 32 bytes, the pixel buffer
+  /// tracks the video's current resolution.
+  private frameDescPtr: number;
+  private framePixelsPtr = 0;
+  private framePixelsCapacity = 0;
+  /// Fixed capacity: FACE_LANDMARK_COUNT never changes.
+  private landmarksPtr: number;
 
-  constructor(
-    private core: Core,
+  private constructor(
+    private mod: EngineModule,
+    private engine: number,
     private session: number,
     private canvas: HTMLCanvasElement,
-    private events: SessionEvents = {},
+    private gl: WebGL2RenderingContext,
+    private events: SessionEvents,
+    readonly abiVersion: number,
   ) {
-    // preserveDrawingBuffer keeps the last drawn frame in place between
-    // rAF callbacks - without it the browser is free to clear the
-    // default framebuffer right after compositing, so anything reading
-    // pixels back outside the render loop itself (screenshots, the
-    // prover's readPixels calls) can race a blank buffer.
-    const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
+    this.scratchCtx = this.scratchCanvas.getContext("2d", { willReadFrequently: true })!;
+    this.frameDescPtr = mod.ccall("ck_alloc", "number", ["number"], [32]);
+    this.landmarksPtr = mod.ccall("ck_alloc", "number", ["number"], [FACE_LANDMARK_COUNT * 3 * 4]);
+  }
+
+  /// Loads camerakit_web.js (a real ES module - see build.zig) and
+  /// stands up the engine, renderer, and session against canvas. A
+  /// dynamic import, not a static one: bun's bundler would otherwise
+  /// try to inline/transform this file, which would break Emscripten's
+  /// own import.meta.url-relative fetch of camerakit_web.wasm sitting
+  /// next to it.
+  static async create(canvas: HTMLCanvasElement, wasmJsUrl: string | URL, events: SessionEvents = {}): Promise<PreviewSession> {
+    if (!canvas.id) throw new Error("canvas needs a stable id for bgfx's own selector lookup");
+    const imported = (await import(/* @vite-ignore */ String(wasmJsUrl))) as { default: EngineModuleFactory };
+    // bgfx's own HTML5 backend creates this canvas's WebGL2 context
+    // itself, in C++, via emscripten_webgl_create_context - confirmed
+    // by real render capture: passing webGLContextAttributes here (the
+    // documented Emscripten Module override) has no effect at all,
+    // getContextAttributes() still reports preserveDrawingBuffer false
+    // regardless. bgfx's own context creation isn't something this
+    // shell can reach without patching vendored source, which this
+    // project doesn't do - readCenterPixel/readFrameSum below work
+    // around it by reading immediately after a fresh render instead.
+    const mod = await imported.default({ canvas });
+
+    const version = mod.ccall("ck_abi_version", "number", [], []) >>> 0;
+    if (version >> 16 !== 0) throw new Error(`camerakit abi major mismatch: ${version >> 16}`);
+
+    const engineOut = mod.ccall("ck_alloc", "number", ["number"], [4]);
+    const engineStatus = mod.ccall("ck_engine_create", "number", ["number", "number"], [0, engineOut]);
+    const engine = mod.getValue(engineOut, "i32");
+    mod.ccall("ck_free", null, ["number", "number"], [engineOut, 4]);
+    if (engineStatus !== CK_OK) throw new Error(`engine create failed: ${engineStatus}`);
+
+    // bgfx's HTML5 backend resolves its own canvas via this selector
+    // string (glcontext_html5.cpp, not documented in the C header) -
+    // Module.canvas above is Emscripten's own, separate mechanism for
+    // the same canvas; both need to agree.
+    const selectorPtr = mod.stringToNewUTF8(`#${canvas.id}`);
+    const rendererDescPtr = mod.ccall("ck_alloc", "number", ["number"], [12]);
+    mod.setValue(rendererDescPtr, selectorPtr, "i32");
+    mod.setValue(rendererDescPtr + 4, canvas.width, "i32");
+    mod.setValue(rendererDescPtr + 8, canvas.height, "i32");
+    const rendererStatus = mod.ccall("ck_engine_init_renderer", "number", ["number", "number"], [engine, rendererDescPtr]);
+    mod.ccall("ck_free", null, ["number", "number"], [rendererDescPtr, 12]);
+    if (rendererStatus !== CK_OK) throw new Error(`renderer init failed: ${rendererStatus}`);
+
+    const sessionOut = mod.ccall("ck_alloc", "number", ["number"], [4]);
+    const sessionStatus = mod.ccall("ck_session_create", "number", ["number", "number", "number"], [engine, 0, sessionOut]);
+    const session = mod.getValue(sessionOut, "i32");
+    mod.ccall("ck_free", null, ["number", "number"], [sessionOut, 4]);
+    if (sessionStatus !== CK_OK) throw new Error(`session create failed: ${sessionStatus}`);
+
+    // The same canvas Emscripten just created its own WebGL2 context on
+    // - browsers return the existing context for a repeat getContext
+    // call on one canvas, so this is that same context, not a second
+    // independent one.
+    const gl = canvas.getContext("webgl2");
     if (!gl) throw new Error("webgl2 unavailable");
-    this.gl = gl;
-    this.program = this.buildProgram();
-    this.whitenUniform = gl.getUniformLocation(this.program, "u_whiten");
-    this.smoothUniform = gl.getUniformLocation(this.program, "u_smooth");
-    const texture = gl.createTexture();
-    if (!texture) throw new Error("texture create failed");
-    this.texture = texture;
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-    // u_mean stays bound to a fixed unit (5; 1-4 are the whiten LUTs)
-    // for the same reason those are: it never changes, only the pixels
-    // it points at do, via computeMean re-rendering into it each frame.
-    gl.useProgram(this.program);
-    gl.uniform1i(gl.getUniformLocation(this.program, "u_mean"), 5);
-
-    this.blurProgram = this.buildBlurProgram();
-    this.blurStepUniform = gl.getUniformLocation(this.blurProgram, "u_step");
-    const blurTarget = this.createRenderTarget();
-    this.blurTexture = blurTarget.texture;
-    this.blurFbo = blurTarget.fbo;
-    const meanTarget = this.createRenderTarget();
-    this.meanTexture = meanTarget.texture;
-    this.meanFbo = meanTarget.fbo;
+    return new PreviewSession(mod, engine, session, canvas, gl, events, version);
   }
 
   private setState(state: CaptureState): void {
@@ -196,298 +183,166 @@ export class PreviewSession {
     this.events.onState?.(state);
   }
 
-  /// Zero until the LUT textures actually finish loading, matching the
-  /// shader's own `if (u_whiten > 0.0)` skip - the effect degrades to a
-  /// no-op rather than sampling unbound textures while the fetch is in
-  /// flight.
   setWhiten(amount: number): void {
-    this.whitenAmount = this.whitenLuts.length === WHITEN_LUT_NAMES.length ? amount : 0;
+    this.setBeauty(BeautyEffect.Whiten, this.whitenLutsLoaded === 4 ? amount : 0);
   }
 
   setSmooth(amount: number): void {
-    this.smoothAmount = amount;
+    this.setBeauty(BeautyEffect.Smooth, amount);
   }
 
-  /// Fetches and decodes the four LUT textures the whiten pass samples,
-  /// relative to lutBaseUrl (the demo's own res/ directory). Safe to
-  /// call once after construction; setWhiten stays a no-op until this
-  /// resolves.
-  async loadWhitenLuts(lutBaseUrl: string | URL): Promise<void> {
-    const gl = this.gl;
-    const bitmaps = await Promise.all(
-      WHITEN_LUT_NAMES.map((name) =>
-        fetch(new URL(`${name}.png`, lutBaseUrl))
-          .then((r) => r.blob())
-          .then((b) => createImageBitmap(b)),
-      ),
+  setThinFace(amount: number): void {
+    this.setBeauty(BeautyEffect.ThinFace, amount);
+  }
+
+  setBigEye(amount: number): void {
+    this.setBeauty(BeautyEffect.BigEye, amount);
+  }
+
+  setLipstick(amount: number): void {
+    this.setBeauty(BeautyEffect.Lipstick, this.lipstickTextureLoaded ? amount : 0);
+  }
+
+  setBlush(amount: number): void {
+    this.setBeauty(BeautyEffect.Blush, this.blushTextureLoaded ? amount : 0);
+  }
+
+  private setBeauty(effect: BeautyEffect, amount: number): void {
+    this.mod.ccall("ck_session_set_beauty", "number", ["number", "number", "number"], [this.session, effect, amount]);
+  }
+
+  setVideoFlip(enabled: boolean): void {
+    this.videoFlipped = enabled;
+  }
+
+  isVideoFlipped(): boolean {
+    return this.videoFlipped;
+  }
+
+  /// landmarks are raw tracker output - x, y in sourceWidth/sourceHeight
+  /// pixels (whatever resolution the caller's own tracking pass ran
+  /// at, which need not match the live video's own resolution), z in
+  /// the same relative scale, three floats per point, matching
+  /// ck_face_result's own convention. Scaled here to the frame
+  /// currently being rendered - the engine's own contour math expects
+  /// "frame pixels" of the frame it's compositing, not of whatever
+  /// analysis resolution tracking happened to use. Null clears
+  /// tracking (no face this frame).
+  setFaceLandmarks(landmarks: Float32Array | null, sourceWidth: number, sourceHeight: number): void {
+    if (!landmarks || landmarks.length === 0 || this.frameWidth === 0) {
+      this.mod.ccall("ck_session_set_face_landmarks", "number", ["number", "number", "number"], [this.session, 0, 0]);
+      return;
+    }
+    const scaleX = this.frameWidth / sourceWidth;
+    const scaleY = this.frameHeight / sourceHeight;
+    const pointCount = landmarks.length / 3;
+    const base = this.landmarksPtr >> 2;
+    for (let at = 0; at < pointCount; at += 1) {
+      this.mod.HEAPF32[base + at * 3] = landmarks[at * 3]! * scaleX;
+      this.mod.HEAPF32[base + at * 3 + 1] = landmarks[at * 3 + 1]! * scaleY;
+      this.mod.HEAPF32[base + at * 3 + 2] = landmarks[at * 3 + 2]!;
+    }
+    this.mod.ccall(
+      "ck_session_set_face_landmarks",
+      "number",
+      ["number", "number", "number"],
+      [this.session, this.landmarksPtr, pointCount],
     );
-    this.whitenLuts = bitmaps.map((bitmap) => {
-      const tex = gl.createTexture();
-      if (!tex) throw new Error("lut texture create failed");
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
-      return tex;
+  }
+
+  /// Fetches the four whiten lookup textures (gray/origin/skin/custom),
+  /// relative to lutBaseUrl. Safe to call once after construction;
+  /// setWhiten stays a no-op until this resolves.
+  async loadWhitenLuts(lutBaseUrl: string | URL): Promise<void> {
+    const names = ["lookup_gray", "lookup_origin", "lookup_skin", "lookup_light"];
+    const images = await Promise.all(
+      names.map((name) => fetch(new URL(`${name}.png`, lutBaseUrl)).then((r) => r.blob()).then(decodeImageRgba)),
+    );
+    images.forEach((image, slot) => {
+      const ptr = this.mod.ccall("ck_alloc", "number", ["number"], [image.data.length]);
+      this.mod.HEAPU8.set(image.data, ptr);
+      this.mod.ccall(
+        "ck_session_set_beauty_lut",
+        "number",
+        ["number", "number", "number", "number", "number"],
+        [this.session, slot, ptr, image.width, image.height],
+      );
+      this.mod.ccall("ck_free", null, ["number", "number"], [ptr, image.data.length]);
+      this.whitenLutsLoaded += 1;
     });
+  }
 
-    // Each LUT gets its own fixed texture unit (1-4; 0 stays the camera
-    // frame) - bound once here since the LUTs themselves never change,
-    // unlike u_whiten which tick() updates every frame.
-    const samplerNames = ["u_lookupGray", "u_lookupOrigin", "u_lookupSkin", "u_lookupCustom"];
-    gl.useProgram(this.program);
-    for (const [index, tex] of this.whitenLuts.entries()) {
-      gl.activeTexture(gl.TEXTURE1 + index);
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.uniform1i(gl.getUniformLocation(this.program, samplerNames[index]!), 1 + index);
+  /// Fetches mouth.png/blusher.png, relative to baseUrl. Safe to call
+  /// once after construction; setLipstick/setBlush stay a no-op until
+  /// this resolves.
+  async loadMakeupTextures(baseUrl: string | URL): Promise<void> {
+    const [mouth, blusher] = await Promise.all(
+      ["mouth.png", "blusher.png"].map((name) => fetch(new URL(name, baseUrl)).then((r) => r.blob()).then(decodeImageRgba)),
+    );
+    for (const [effect, image] of [
+      [BeautyEffect.Lipstick, mouth],
+      [BeautyEffect.Blush, blusher],
+    ] as const) {
+      const ptr = this.mod.ccall("ck_alloc", "number", ["number"], [image.data.length]);
+      this.mod.HEAPU8.set(image.data, ptr);
+      this.mod.ccall(
+        "ck_session_set_beauty_makeup_texture",
+        "number",
+        ["number", "number", "number", "number", "number"],
+        [this.session, effect, ptr, image.width, image.height],
+      );
+      this.mod.ccall("ck_free", null, ["number", "number"], [ptr, image.data.length]);
     }
-    gl.activeTexture(gl.TEXTURE0);
+    this.lipstickTextureLoaded = true;
+    this.blushTextureLoaded = true;
   }
 
-  private buildProgram(): WebGLProgram {
-    const gl = this.gl;
-    const vsSource = `#version 300 es
-      const vec2 corners[4] = vec2[](vec2(-1.,-1.), vec2(1.,-1.), vec2(1.,1.), vec2(-1.,1.));
-      const vec2 uvs[4] = vec2[](vec2(0.,1.), vec2(1.,1.), vec2(1.,0.), vec2(0.,0.));
-      out vec2 v_uv;
-      void main() {
-        gl_Position = vec4(corners[gl_VertexID], 0., 1.);
-        v_uv = uvs[gl_VertexID];
-      }`;
-    // The whiten branch below is a verbatim port of gpupixel's own
-    // GLES fragment shader (beauty_face_unit_filter.cc), not a
-    // reimplementation - same tone curve constants, same three-stage
-    // 4x4-atlas LUT indexing math, same mix/alpha blending.
-    const fsSource = `#version 300 es
-      precision highp float;
-      uniform sampler2D u_frame;
-      uniform sampler2D u_mean;
-      uniform sampler2D u_lookupGray;
-      uniform sampler2D u_lookupOrigin;
-      uniform sampler2D u_lookupSkin;
-      uniform sampler2D u_lookupCustom;
-      uniform float u_smooth;
-      uniform float u_whiten;
-      in vec2 v_uv;
-      out vec4 fragColor;
-
-      const float levelRangeInv = 1.02657;
-      const float levelBlack = 0.0258820;
-      const float alpha = 0.7;
-
-      void main() {
-        vec4 iColor = texture(u_frame, v_uv);
-        vec3 color = iColor.rgb;
-
-        // A verbatim port of gpupixel's own skin-smoothing math
-        // (beauty_face_unit_filter.cc's blurAlpha branch): u_mean is a
-        // wide separable blur of the frame, and how strongly a pixel
-        // blends toward it depends on both how flat that area already
-        // is (low local variance, estimated here from the difference
-        // between the frame and its own blur) and how close it sits to
-        // mid-tone (the min/clamp term), so edges and shadows resist
-        // smoothing while flat skin doesn't.
-        if (u_smooth > 0.0) {
-          vec3 meanColor = texture(u_mean, v_uv).rgb;
-          vec3 diff = (iColor.rgb - meanColor) * 7.07;
-          diff = min(diff * diff, vec3(1.0));
-          float theta = 0.1;
-          float p = clamp((min(iColor.r, meanColor.r - 0.1) - 0.2) * 4.0, 0.0, 1.0);
-          float meanVar = (diff.r + diff.g + diff.b) / 3.0;
-          float kMin = clamp((1.0 - meanVar / (meanVar + theta)) * p * u_smooth, 0.0, 1.0);
-          color = mix(iColor.rgb, meanColor, kMin);
-        }
-
-        if (u_whiten > 0.0) {
-          vec3 colorEPM = color;
-          color = clamp((colorEPM - vec3(levelBlack)) * levelRangeInv, 0.0, 1.0);
-          vec3 texel = vec3(
-            texture(u_lookupGray, vec2(color.r, 0.5)).r,
-            texture(u_lookupGray, vec2(color.g, 0.5)).g,
-            texture(u_lookupGray, vec2(color.b, 0.5)).b
-          );
-          texel = mix(color, texel, 0.5);
-          texel = mix(colorEPM, texel, alpha);
-
-          texel = clamp(texel, 0.0, 1.0);
-          float blueColor = texel.b * 15.0;
-          vec2 quad1;
-          quad1.y = floor(floor(blueColor) * 0.25);
-          quad1.x = floor(blueColor) - (quad1.y * 4.0);
-          vec2 quad2;
-          quad2.y = floor(ceil(blueColor) * 0.25);
-          quad2.x = ceil(blueColor) - (quad2.y * 4.0);
-          vec2 texPos2 = texel.rg * 0.234375 + 0.0078125;
-          vec2 texPos1 = quad1 * 0.25 + texPos2;
-          texPos2 = quad2 * 0.25 + texPos2;
-          vec3 newColor1Origin = texture(u_lookupOrigin, texPos1).rgb;
-          vec3 newColor2Origin = texture(u_lookupOrigin, texPos2).rgb;
-          vec3 colorOrigin = mix(newColor1Origin, newColor2Origin, fract(blueColor));
-          texel = mix(colorOrigin, color, alpha);
-
-          texel = clamp(texel, 0.0, 1.0);
-          blueColor = texel.b * 15.0;
-          quad1.y = floor(floor(blueColor) * 0.25);
-          quad1.x = floor(blueColor) - (quad1.y * 4.0);
-          quad2.y = floor(ceil(blueColor) * 0.25);
-          quad2.x = ceil(blueColor) - (quad2.y * 4.0);
-          texPos2 = texel.rg * 0.234375 + 0.0078125;
-          texPos1 = quad1 * 0.25 + texPos2;
-          texPos2 = quad2 * 0.25 + texPos2;
-          vec3 newColor1 = texture(u_lookupSkin, texPos1).rgb;
-          vec3 newColor2 = texture(u_lookupSkin, texPos2).rgb;
-          color = mix(newColor1, newColor2, fract(blueColor));
-          color = clamp(color, 0.0, 1.0);
-
-          float blueColorCustom = color.b * 63.0;
-          vec2 quad1Custom;
-          quad1Custom.y = floor(floor(blueColorCustom) / 8.0);
-          quad1Custom.x = floor(blueColorCustom) - (quad1Custom.y * 8.0);
-          vec2 quad2Custom;
-          quad2Custom.y = floor(ceil(blueColorCustom) / 8.0);
-          quad2Custom.x = ceil(blueColorCustom) - (quad2Custom.y * 8.0);
-          vec2 texPos1Custom;
-          texPos1Custom.x = (quad1Custom.x / 8.0) + 0.5 / 512.0 + ((1.0 / 8.0 - 1.0 / 512.0) * color.r);
-          texPos1Custom.y = (quad1Custom.y / 8.0) + 0.5 / 512.0 + ((1.0 / 8.0 - 1.0 / 512.0) * color.g);
-          vec2 texPos2Custom;
-          texPos2Custom.x = (quad2Custom.x / 8.0) + 0.5 / 512.0 + ((1.0 / 8.0 - 1.0 / 512.0) * color.r);
-          texPos2Custom.y = (quad2Custom.y / 8.0) + 0.5 / 512.0 + ((1.0 / 8.0 - 1.0 / 512.0) * color.g);
-          newColor1 = texture(u_lookupCustom, texPos1Custom).rgb;
-          newColor2 = texture(u_lookupCustom, texPos2Custom).rgb;
-          vec3 colorCustom = mix(newColor1, newColor2, fract(blueColorCustom));
-          color = mix(color, colorCustom, u_whiten);
-        }
-
-        fragColor = vec4(color, iColor.a);
-      }`;
-    return this.linkProgram(vsSource, fsSource);
-  }
-
-  // A 9-tap box blur (radius 4, weight 1/9 each - matching gpupixel's own
-  // BoxMonoBlurFilter at its default radius), run once horizontally and
-  // once vertically to make a full separable blur. u_step carries the
-  // per-tap offset in UV space, computed by the caller from the source
-  // dimensions so the same program serves both directions.
-  private buildBlurProgram(): WebGLProgram {
-    const vsSource = `#version 300 es
-      const vec2 corners[4] = vec2[](vec2(-1.,-1.), vec2(1.,-1.), vec2(1.,1.), vec2(-1.,1.));
-      const vec2 uvs[4] = vec2[](vec2(0.,1.), vec2(1.,1.), vec2(1.,0.), vec2(0.,0.));
-      out vec2 v_uv;
-      void main() {
-        gl_Position = vec4(corners[gl_VertexID], 0., 1.);
-        v_uv = uvs[gl_VertexID];
-      }`;
-    const fsSource = `#version 300 es
-      precision highp float;
-      uniform sampler2D u_src;
-      uniform vec2 u_step;
-      in vec2 v_uv;
-      out vec4 fragColor;
-      void main() {
-        vec3 sum = vec3(0.0);
-        for (int i = -4; i <= 4; i++) {
-          sum += texture(u_src, v_uv + u_step * float(i)).rgb;
-        }
-        fragColor = vec4(sum / 9.0, 1.0);
-      }`;
-    return this.linkProgram(vsSource, fsSource);
-  }
-
-  private linkProgram(vsSource: string, fsSource: string): WebGLProgram {
-    const gl = this.gl;
-    const compile = (type: number, source: string): WebGLShader => {
-      const shader = gl.createShader(type);
-      if (!shader) throw new Error("shader create failed");
-      gl.shaderSource(shader, source);
-      gl.compileShader(shader);
-      if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        throw new Error(String(gl.getShaderInfoLog(shader)));
-      }
-      return shader;
-    };
-    const program = gl.createProgram();
-    if (!program) throw new Error("program create failed");
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, vsSource));
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fsSource));
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(String(gl.getProgramInfoLog(program)));
-    }
-    return program;
-  }
-
-  private createRenderTarget(): { texture: WebGLTexture; fbo: WebGLFramebuffer } {
-    const gl = this.gl;
-    const texture = gl.createTexture();
-    if (!texture) throw new Error("texture create failed");
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    const fbo = gl.createFramebuffer();
-    if (!fbo) throw new Error("framebuffer create failed");
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    return { texture, fbo };
-  }
-
-  /// (Re)allocates the two intermediate blur targets at the source frame's
-  /// own resolution - the blur runs on the camera frame before it's scaled
-  /// to the canvas, matching gpupixel's own filter, which blurs its input
-  /// framebuffer rather than whatever size it happens to be displayed at.
-  private ensureBlurTargets(width: number, height: number): void {
-    if (this.meanWidth === width && this.meanHeight === height) return;
-    this.meanWidth = width;
-    this.meanHeight = height;
-    const gl = this.gl;
-    for (const texture of [this.blurTexture, this.meanTexture]) {
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    }
-  }
-
-  /// Two-pass separable blur of the current camera frame into meanTexture:
-  /// horizontal into the intermediate blurTexture, then vertical from
-  /// there. Only run when smoothing is actually active - skipped
-  /// entirely otherwise, matching every other effect's no-op-when-off
-  /// degradation.
-  private computeMean(width: number, height: number): void {
-    const gl = this.gl;
-    gl.useProgram(this.blurProgram);
-    gl.viewport(0, 0, width, height);
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.blurFbo);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.uniform2f(this.blurStepUniform, 4 / width, 0);
-    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.meanFbo);
-    gl.bindTexture(gl.TEXTURE_2D, this.blurTexture);
-    gl.uniform2f(this.blurStepUniform, 0, 4 / height);
-    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  }
-
-  /// Uploads a still image directly into the frame texture the composite
-  /// shader reads, bypassing the video element entirely. Skin-smoothing's
-  /// blend factor is content-adaptive (it deliberately favors flat,
-  /// skin-toned regions over sharp edges - see the shader comment above),
-  /// so proving it needs a real photo rather than a synthetic test
-  /// pattern; freezeCamera() first stops tick() from re-uploading over it
-  /// on the next frame.
+  /// Uploads a still image directly into the frame the engine renders,
+  /// bypassing the video element entirely - freezeCamera() first stops
+  /// tick() from re-submitting over it on the next frame. Test/demo
+  /// tooling only (skin-smoothing's content-adaptive blend needs a real
+  /// face to prove, not Chrome's fake capture device's own pattern).
   async loadStillFrame(url: string): Promise<void> {
-    const bitmap = await createImageBitmap(await (await fetch(url)).blob());
-    const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, this.texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bitmap);
-    this.frameWidth = bitmap.width;
-    this.frameHeight = bitmap.height;
+    const image = await decodeImageRgba(await (await fetch(url)).blob());
+    // Not mirrored: a loaded test photo isn't a front camera, and
+    // setLandmarksFromStill tracks this same unmirrored image - mirroring
+    // only the background here would leave the tracked landmarks
+    // pointing at the wrong side of the now-mirrored face.
+    this.submitRgbaFrame(image.data, image.width, image.height, false);
+  }
+
+  private ensureFramePixels(byteLength: number): void {
+    if (this.framePixelsCapacity >= byteLength) return;
+    if (this.framePixelsPtr !== 0) this.mod.ccall("ck_free", null, ["number", "number"], [this.framePixelsPtr, this.framePixelsCapacity]);
+    this.framePixelsPtr = this.mod.ccall("ck_alloc", "number", ["number"], [byteLength]);
+    this.framePixelsCapacity = byteLength;
+  }
+
+  private submitRgbaFrame(rgba: Uint8ClampedArray, width: number, height: number, mirror: boolean): void {
+    this.frameWidth = width;
+    this.frameHeight = height;
+    const byteLength = width * height * 4;
+    this.ensureFramePixels(byteLength);
+    this.mod.HEAPU8.set(rgba, this.framePixelsPtr);
+
+    const rotationQuarters = this.videoFlipped ? 2 : 0;
+    const flags = (mirror ? FRAME_FLAG_MIRROR : 0) | (rotationQuarters << FRAME_ROTATION_SHIFT);
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, PIXEL_FORMAT_RGBA8, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, flags, "i32");
+    const timestampUs = Math.round(performance.now() * 1000);
+    this.mod.setValue(this.frameDescPtr + 24, timestampUs >>> 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, Math.floor(timestampUs / 4294967296), "i32");
+
+    this.mod.ccall(
+      "ck_session_submit_frame_rgba_copy",
+      "number",
+      ["number", "number", "number", "number"],
+      [this.session, this.frameDescPtr, this.framePixelsPtr, width * 4],
+    );
   }
 
   async start(): Promise<void> {
@@ -527,34 +382,22 @@ export class PreviewSession {
     const now = performance.now();
     const frameTimeUs = Math.max(0, Math.round((now - this.lastTick) * 1000));
     this.lastTick = now;
-    this.core.reportFrame(this.session, frameTimeUs);
+    this.mod.ccall("ck_session_report_frame", "number", ["number", "number", "number"], [this.session, frameTimeUs, 0]);
 
-    const gl = this.gl;
-    if (this.video.readyState >= 2) {
-      if (this.video.currentTime !== this.lastVideoTime) {
-        this.lastVideoTime = this.video.currentTime;
-        this.cameraFrames += 1;
-        gl.bindTexture(gl.TEXTURE_2D, this.texture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.video);
-        this.frameWidth = this.video.videoWidth;
-        this.frameHeight = this.video.videoHeight;
-      }
-      this.ensureBlurTargets(this.frameWidth, this.frameHeight);
-      const smoothActive = this.smoothAmount > 0;
-      if (smoothActive) {
-        this.computeMean(this.frameWidth, this.frameHeight);
-      }
+    if (this.video.readyState >= 2 && this.video.currentTime !== this.lastVideoTime) {
+      this.lastVideoTime = this.video.currentTime;
+      this.cameraFrames += 1;
+      const width = this.video.videoWidth;
+      const height = this.video.videoHeight;
+      this.scratchCanvas.width = width;
+      this.scratchCanvas.height = height;
+      this.scratchCtx.drawImage(this.video, 0, 0, width, height);
+      const pixels = this.scratchCtx.getImageData(0, 0, width, height);
+      this.submitRgbaFrame(pixels.data, width, height, true);
+    }
 
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-      gl.useProgram(this.program);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, this.texture);
-      gl.activeTexture(gl.TEXTURE5);
-      gl.bindTexture(gl.TEXTURE_2D, this.meanTexture);
-      gl.uniform1f(this.smoothUniform, smoothActive ? this.smoothAmount : 0);
-      gl.uniform1f(this.whitenUniform, this.whitenAmount);
-      gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+    const status = this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
+    if (status === CK_OK) {
       this.renderedFrames += 1;
       this.fpsWindowFrames += 1;
     }
@@ -567,19 +410,55 @@ export class PreviewSession {
     }
   };
 
+  /// bgfx's own WebGL2 context (see the comment on create() above) never
+  /// preserves its drawing buffer, so a read has to happen synchronously
+  /// right after a fresh render - one JS turn later and the browser has
+  /// already presented and cleared it. Both read methods below render
+  /// once more immediately before reading rather than trusting whatever
+  /// the last rAF tick happened to leave behind.
+  private renderForReadback(): void {
+    this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
+  }
+
+  /// Renders, reads, and PNG-encodes the canvas in one synchronous
+  /// call - same reason readCenterPixel/readFrameSum render right
+  /// before reading (bgfx's own context never preserves its drawing
+  /// buffer), a caller across an async boundary can't split render and
+  /// read into two separate steps either. Test/debug tooling: a real
+  /// image beats a frame-sum heuristic for verifying a landmark-driven
+  /// effect actually landed where it should, not just that something
+  /// changed somewhere.
+  captureFrame(): string {
+    this.renderForReadback();
+    const gl = this.gl;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    const pixels = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    const out = document.createElement("canvas");
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext("2d")!;
+    const imageData = ctx.createImageData(w, h);
+    const rowBytes = w * 4;
+    for (let y = 0; y < h; y += 1) {
+      const srcStart = (h - 1 - y) * rowBytes;
+      imageData.data.set(pixels.subarray(srcStart, srcStart + rowBytes), y * rowBytes);
+    }
+    ctx.putImageData(imageData, 0, 0);
+    return out.toDataURL("image/png");
+  }
+
   readCenterPixel(): Uint8Array {
+    this.renderForReadback();
     const gl = this.gl;
     const pixel = new Uint8Array(4);
-    gl.readPixels(
-      Math.floor(this.canvas.width / 2),
-      Math.floor(this.canvas.height / 2),
-      1,
-      1,
-      gl.RGBA,
-      gl.UNSIGNED_BYTE,
-      pixel,
-    );
+    gl.readPixels(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
     return pixel;
+  }
+
+  degradeLevel(): DegradeLevel {
+    return this.mod.ccall("ck_session_degrade_level", "number", ["number"], [this.session]);
   }
 
   /// Sums every RGBA byte over the whole canvas - a courser but far more
@@ -588,6 +467,7 @@ export class PreviewSession {
   /// to put its own "lit" content anywhere and leave any single fixed
   /// coordinate dark for long stretches.
   readFrameSum(): number {
+    this.renderForReadback();
     const gl = this.gl;
     const pixels = new Uint8Array(this.canvas.width * this.canvas.height * 4);
     gl.readPixels(0, 0, this.canvas.width, this.canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);

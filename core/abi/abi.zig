@@ -21,6 +21,16 @@ const manifest = @import("manifest");
 const trigger = @import("trigger");
 const asset = @import("asset");
 const image = @import("image");
+const face106 = @import("face106");
+
+/// Whether this build targets wasm32-emscripten - the only web target
+/// with a real bgfx renderer under it (wasm32-freestanding, the other
+/// wasm target this file compiles for, links render_stub.zig instead).
+/// adapters/beauty.zig's gpupixel bridge isn't ported to web (2026-08-15
+/// GPU-compositing decision), so beauty.face/beauty.reshape need their
+/// own dispatch here in place of applyBeautyCompositing's gpupixel
+/// calls - guarded on this rather than reachable from every target.
+const is_web = builtin.os.tag == .emscripten;
 
 // A directory-based lens activation needs to read files (manifest.json,
 // compiled shader bytecode) from within an exported ck_ function, which
@@ -204,6 +214,54 @@ pub const Session = struct {
     beauty_input_native: ?*anyopaque = null,
     beauty_output_texture: ?render.TextureHandle = null,
     beauty_output_native: ?*anyopaque = null,
+    /// beauty.face/beauty.reshape/beauty.lipstick/beauty.blusher's own
+    /// state on web, where there is no gpupixel beauty_chain to hold
+    /// the six effect amounts or drive compositing - unused on every
+    /// other target. Indices match core/lens/runtime.zig's EffectSlot
+    /// (smooth, whiten, thin_face, big_eye, lipstick, blush); whiten is
+    /// tracked but not yet applied (its four LUT textures aren't loaded
+    /// on web yet).
+    web_beauty_amounts: [6]f32 = @splat(0),
+    /// fs_blur_pass.sc's own two-pass scratch space (H then V) ahead of
+    /// submitBeautyFace, plus beauty.reshape's own output target -
+    /// sized and recreated the same lazy way ensureChainTargets already
+    /// manages the lens chain's own targets.
+    web_beauty_blur_h_target: ?render.Renderer.OffscreenTarget = null,
+    web_beauty_mean_target: ?render.Renderer.OffscreenTarget = null,
+    web_beauty_reshape_target: ?render.Renderer.OffscreenTarget = null,
+    /// beauty.lipstick/beauty.blusher's own ping-pong pair: unlike every
+    /// other pass here, a makeup draw only rasterizes its own mesh
+    /// triangles, never a full-screen quad, so its background sample
+    /// and its own write target can never be the same texture - lipstick
+    /// reads whichever of these was blitted to first and writes the
+    /// other, blush does the same starting from lipstick's output (or
+    /// the blit target directly if lipstick is off).
+    web_beauty_makeup_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
+    web_beauty_targets_width: u16 = 0,
+    web_beauty_targets_height: u16 = 0,
+    /// beauty.face's whiten effect reads these four - gray, origin,
+    /// skin, and custom, matching gpupixel's own beauty_face_unit_
+    /// filter.cc lookup set. Uploaded via ck_session_set_beauty_lut, a
+    /// caller's own PNG decode (a browser's native one, most likely -
+    /// there is no decoder wired into this build for web) handed in as
+    /// raw RGBA; whiten stays inert until all four are loaded.
+    web_beauty_lut_textures: [4]?render.TextureHandle = @splat(null),
+    /// beauty.lipstick/beauty.blusher's own source images (gpupixel's
+    /// mouth.png/blusher.png) - uploaded via ck_session_set_beauty_
+    /// makeup_texture the same caller-decodes-the-PNG way the whiten
+    /// LUTs are. An effect stays inert until its own texture loads,
+    /// same rule as whiten's four.
+    web_beauty_lipstick_texture: ?render.TextureHandle = null,
+    web_beauty_blush_texture: ?render.TextureHandle = null,
+    /// beauty.reshape/beauty.lipstick/beauty.blusher's face contour on
+    /// web, set directly by the caller via ck_session_set_face_landmarks
+    /// - the internal tracking worker s.face_tracking drives everywhere
+    /// else is permanently unavailable here (ck_session_enable_face_
+    /// tracking reports unsupported on this target), so there is no
+    /// other way for a landmark-driven web effect to ever see a face.
+    /// Null means no face this frame, the same meaning a zero
+    /// landmark_count carries elsewhere.
+    web_face_landmarks: ?[face.landmark_count]face.Landmark = null,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -238,6 +296,17 @@ pub const Session = struct {
 };
 
 fn abiAllocator() std.mem.Allocator {
+    // wasm_allocator grows memory through a raw wasm memory.grow
+    // instruction, invisible to Emscripten's own JS-side heap-view
+    // tracking - real growth still happens, but any cached HEAP32/
+    // HEAPU8 view the JS side is holding across the call goes stale
+    // without Emscripten's own growth hook ever firing to refresh it
+    // (confirmed: a plain _malloc-triggered growth refreshes correctly,
+    // an allocation through here does not). Emscripten provides a real
+    // libc malloc that coordinates that refresh correctly; freestanding
+    // (the other wasm target this file compiles for) has no libc at
+    // all, so it keeps wasm_allocator, the only option there.
+    if (is_web) return std.heap.c_allocator;
     if (builtin.cpu.arch.isWasm()) return std.heap.wasm_allocator;
     if (builtin.single_threaded) return std.heap.page_allocator;
     return std.heap.smp_allocator;
@@ -387,6 +456,176 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
     return beautified;
 }
 
+/// Whether beauty.face or beauty.reshape has anything to actually draw
+/// this frame on web - whiten alone only counts once its four LUT
+/// textures have loaded (ck_session_set_beauty_lut), lipstick/blush
+/// aren't wired (a mesh draw, not a full-screen pass like these two).
+fn webBeautyActive(s: *const Session) bool {
+    if (!is_web) return false;
+    const smooth = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.smooth)];
+    const whiten = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.whiten)];
+    const thin_face = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.thin_face)];
+    const big_eye = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.big_eye)];
+    const lipstick = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.lipstick)];
+    const blush = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.blush)];
+    const luts_loaded = for (s.web_beauty_lut_textures) |slot| {
+        if (slot == null) break false;
+    } else true;
+    return smooth > 0.0 or thin_face > 0.0 or big_eye > 0.0 or (whiten > 0.0 and luts_loaded) or
+        (lipstick > 0.0 and s.web_beauty_lipstick_texture != null) or (blush > 0.0 and s.web_beauty_blush_texture != null);
+}
+
+/// The one beauty-active check every caller should reach through -
+/// native's gpupixel chain on every other target, web_beauty_amounts
+/// here. ck_engine_render_frame's own fast-path gate and
+/// renderCompositeChain's chain dispatch both need this, and both once
+/// called beautyActive() directly - a real bug, not hypothetical: with
+/// no lens active (chain_order empty), render_frame's own gate skipped
+/// renderCompositeChain (and therefore applyWebBeautyChain) entirely on
+/// web, silently rendering the plain passthrough preview regardless of
+/// what web_beauty_amounts held. Caught by an actual browser proof
+/// (whiten toggled with real LUTs loaded, zero visible change), not by
+/// any Zig-level test - anyBeautyActive exists so the two call sites
+/// can't drift apart again the same way.
+fn anyBeautyActive(s: *const Session) bool {
+    return if (is_web) webBeautyActive(s) else beautyActive(s);
+}
+
+fn ensureWebBeautyTargets(s: *Session, width: u16, height: u16) !void {
+    if (s.web_beauty_targets_width == width and s.web_beauty_targets_height == height and s.web_beauty_blur_h_target != null) return;
+    for ([_]*?render.Renderer.OffscreenTarget{
+        &s.web_beauty_blur_h_target,
+        &s.web_beauty_mean_target,
+        &s.web_beauty_reshape_target,
+        &s.web_beauty_makeup_targets[0],
+        &s.web_beauty_makeup_targets[1],
+    }) |slot| {
+        if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+    }
+    s.web_beauty_targets_width = width;
+    s.web_beauty_targets_height = height;
+}
+
+/// beauty.face and beauty.reshape's own dispatch on web, in place of
+/// applyBeautyCompositing's gpupixel bridge above (not ported to this
+/// target). Reshape runs first, matching the reference GLSL's own
+/// composition order (warp which pixel gets sampled, then smooth/
+/// whiten the color that lands) even though they're two separate bgfx
+/// passes here rather than one combined shader.
+fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, width: u16, height: u16, input_texture: render.TextureHandle) !render.TextureHandle {
+    try ensureWebBeautyTargets(s, width, height);
+    var current = input_texture;
+
+    // Shared by beauty.reshape (only needs the base 106) and the
+    // lipstick/blush mesh (needs all 111, including face106.zig's five
+    // derived hub points) - computed once regardless of which of the
+    // four landmark-driven effects are actually active this frame.
+    var contour: [face106.point_count * 2]f32 = undefined;
+    const has_face = blk: {
+        // Web has no internal tracking worker (ck_session_enable_face_
+        // tracking reports unsupported on this target) - the caller
+        // feeds landmarks directly via ck_session_set_face_landmarks.
+        const landmarks = s.web_face_landmarks orelse break :blk false;
+        face106.fill(&landmarks, @floatFromInt(width), @floatFromInt(height), &contour);
+        break :blk true;
+    };
+
+    const thin_face = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.thin_face)];
+    const big_eye = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.big_eye)];
+    if (has_face and (thin_face > 0.0 or big_eye > 0.0)) {
+        const view_id = next_view_id.*;
+        next_view_id.* += 1;
+        render.Renderer.setViewTarget(view_id, s.web_beauty_reshape_target.?, width, height);
+        const aspect_ratio: f32 = @as(f32, @floatFromInt(width)) / @as(f32, @floatFromInt(height));
+        r.submitBeautyReshape(view_id, current, contour[0 .. render.face_point_vec4_count * 4], aspect_ratio, thin_face, big_eye);
+        current = s.web_beauty_reshape_target.?.texture;
+    }
+
+    const smooth = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.smooth)];
+    const whiten_requested = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.whiten)];
+    const luts_loaded = for (s.web_beauty_lut_textures) |slot| {
+        if (slot == null) break false;
+    } else true;
+    // Whiten renders inert until all four LUT textures load on web
+    // (ck_session_set_beauty_lut) - the amount the caller actually
+    // requested still gets tracked either way, just not applied yet.
+    const whiten = if (luts_loaded) whiten_requested else 0.0;
+    if (smooth > 0.0 or whiten > 0.0) {
+        const step_x = 1.0 / @as(f32, @floatFromInt(width));
+        const step_y = 1.0 / @as(f32, @floatFromInt(height));
+        var view_id = next_view_id.*;
+        next_view_id.* += 1;
+        render.Renderer.setViewTarget(view_id, s.web_beauty_blur_h_target.?, width, height);
+        r.submitBlurPass(view_id, current, .{ step_x, 0.0 });
+        view_id = next_view_id.*;
+        next_view_id.* += 1;
+        render.Renderer.setViewTarget(view_id, s.web_beauty_mean_target.?, width, height);
+        r.submitBlurPass(view_id, s.web_beauty_blur_h_target.?.texture, .{ 0.0, step_y });
+
+        const view_id2 = next_view_id.*;
+        next_view_id.* += 1;
+        render.Renderer.setViewTarget(view_id2, s.web_beauty_blur_h_target.?, width, height);
+        // default_mask_texture is a safe 1x1 placeholder for whichever
+        // LUT slots aren't loaded yet - the shader never actually
+        // samples them while whiten is 0.
+        const lut = struct {
+            fn textureOr(slot: ?render.TextureHandle, fallback: render.TextureHandle) render.TextureHandle {
+                return slot orelse fallback;
+            }
+        }.textureOr;
+        r.submitBeautyFace(
+            view_id2,
+            current,
+            s.web_beauty_mean_target.?.texture,
+            lut(s.web_beauty_lut_textures[0], r.default_mask_texture),
+            lut(s.web_beauty_lut_textures[1], r.default_mask_texture),
+            lut(s.web_beauty_lut_textures[2], r.default_mask_texture),
+            lut(s.web_beauty_lut_textures[3], r.default_mask_texture),
+            smooth,
+            whiten,
+        );
+        current = s.web_beauty_blur_h_target.?.texture;
+    }
+
+    const lipstick = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.lipstick)];
+    const blush = s.web_beauty_amounts[@intFromEnum(runtime.EffectSlot.blush)];
+    const lipstick_ready = lipstick > 0.0 and s.web_beauty_lipstick_texture != null;
+    const blush_ready = blush > 0.0 and s.web_beauty_blush_texture != null;
+    if (has_face and (lipstick_ready or blush_ready)) {
+        // A makeup draw only rasterizes its own mesh triangles, so its
+        // background sample and its write target can never be the same
+        // texture (a read-write feedback hazard) - blit current into
+        // slot 0 first, then each active effect reads whichever slot
+        // holds the frame so far and writes the other.
+        const blit_view = next_view_id.*;
+        next_view_id.* += 1;
+        render.Renderer.setViewTarget(blit_view, s.web_beauty_makeup_targets[0].?, width, height);
+        r.submitShaderPass(blit_view, r.passthroughProgram(), current);
+        var slot: usize = 0;
+
+        if (lipstick_ready) {
+            const view_id = next_view_id.*;
+            next_view_id.* += 1;
+            const next_slot = 1 - slot;
+            render.Renderer.setViewTarget(view_id, s.web_beauty_makeup_targets[next_slot].?, width, height);
+            r.submitMakeup(view_id, s.web_beauty_makeup_targets[slot].?.texture, s.web_beauty_lipstick_texture.?, r.makeupLipstickUvBuffer(), &contour, lipstick);
+            slot = next_slot;
+        }
+        if (blush_ready) {
+            const view_id = next_view_id.*;
+            next_view_id.* += 1;
+            const next_slot = 1 - slot;
+            render.Renderer.setViewTarget(view_id, s.web_beauty_makeup_targets[next_slot].?, width, height);
+            r.submitMakeup(view_id, s.web_beauty_makeup_targets[slot].?.texture, s.web_beauty_blush_texture.?, r.makeupBlushUvBuffer(), &contour, blush);
+            slot = next_slot;
+        }
+        current = s.web_beauty_makeup_targets[slot].?.texture;
+    }
+
+    return current;
+}
+
 /// Draws the active lens's full composite chain - beauty, shader.pass,
 /// lut.pass, and blend.pass mixed freely: the camera preview captures
 /// into one ping-pong target (view 0), beauty (when active) composites
@@ -418,8 +657,18 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         };
         if (ready) ready_count += 1;
     }
-    const beauty_active = beautyActive(s);
+    const beauty_active = anyBeautyActive(s);
     if (ready_count == 0 and !beauty_active) {
+        // view 0 may still be bound to an offscreen chain/beauty target
+        // from an earlier frame that took the other branch below -
+        // bgfx_set_view_frame_buffer is stateful across frames, nothing
+        // resets it automatically once the chain/beauty that needed it
+        // stops being active. Without this, this branch keeps drawing
+        // into that stale offscreen target forever, never the real
+        // backbuffer, and the visible canvas simply stops updating -
+        // found via a real toggle-on-then-off repro (whiten set to 1
+        // then back to 0), not a static read.
+        render.Renderer.setViewTarget(0, null, @intCast(current.desc.width), @intCast(current.desc.height));
         r.submitPreview(0, current.preview, rotation * 90, mirror);
         return;
     }
@@ -435,7 +684,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     var next_view_id: u8 = 1;
 
     if (beauty_active) {
-        input_texture = applyBeautyCompositing(r, s, &next_view_id, width, height, input_texture);
+        input_texture = if (is_web)
+            try applyWebBeautyChain(r, s, &next_view_id, width, height, input_texture)
+        else
+            applyBeautyCompositing(r, s, &next_view_id, width, height, input_texture);
     }
 
     var drawn: usize = 0;
@@ -532,6 +784,7 @@ pub fn destroySession(session: *Session) void {
     if (session.beauty_chain) |chain| beauty.destroy(session.engine.gpa, chain);
     session.beauty_chain = null;
     destroyBeautyCompositing(session);
+    destroyWebBeautyTargets(session);
     if (session.face_tracking) |worker| tracking.destroy(worker);
     session.face_tracking = null;
     if (session.segmentation_worker) |worker| segmentation.destroy(worker);
@@ -557,6 +810,34 @@ fn destroyBeautyCompositing(session: *Session) void {
     session.beauty_input = null;
     if (session.beauty_interop) |interop| beauty.interopDestroy(session.engine.gpa, interop);
     session.beauty_interop = null;
+}
+
+/// Tears down beauty.face/beauty.reshape's own offscreen targets on
+/// web - safe to call whether or not they were ever created, same as
+/// destroyBeautyCompositing above.
+fn destroyWebBeautyTargets(session: *Session) void {
+    for ([_]*?render.Renderer.OffscreenTarget{
+        &session.web_beauty_blur_h_target,
+        &session.web_beauty_mean_target,
+        &session.web_beauty_reshape_target,
+        &session.web_beauty_makeup_targets[0],
+        &session.web_beauty_makeup_targets[1],
+    }) |slot| {
+        if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = null;
+    }
+    session.web_beauty_targets_width = 0;
+    session.web_beauty_targets_height = 0;
+    if (session.engine.renderer) |*r| {
+        for (&session.web_beauty_lut_textures) |*slot| {
+            if (slot.*) |texture| r.destroyTexture(texture);
+            slot.* = null;
+        }
+        if (session.web_beauty_lipstick_texture) |tex| r.destroyTexture(tex);
+        session.web_beauty_lipstick_texture = null;
+        if (session.web_beauty_blush_texture) |tex| r.destroyTexture(tex);
+        session.web_beauty_blush_texture = null;
+    }
 }
 
 fn releaseCurrentFrame(session: *Session) void {
@@ -665,15 +946,26 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
-            if (s.chain_order.len == 0 and !beautyActive(s)) {
+            // Always through renderCompositeChain, which owns the one
+            // authoritative "is anything actually active" check and its
+            // own view-0-target reset for the plain-preview case. This
+            // used to duplicate that same check here first (skipping
+            // renderCompositeChain, and its reset, whenever nothing was
+            // active) - a real, found bug: once a frame went through
+            // the composite path and rebound view 0 to an offscreen
+            // target, this outer check took over again on the very next
+            // frame beauty/chain state went back to inactive and called
+            // submitPreview directly, with view 0 still pointed at that
+            // now-stale offscreen target - the canvas simply stopped
+            // updating. Same class of drift anyBeautyActive's own
+            // comment already names for exactly this dispatch: two call
+            // sites deciding the same thing separately eventually
+            // disagree.
+            renderCompositeChain(e, r, s, current, rotation, mirror) catch {
+                // A chain target failed to (re)create - present the
+                // plain preview rather than nothing this frame.
                 r.submitPreview(0, current.preview, rotation * 90, mirror);
-            } else {
-                renderCompositeChain(e, r, s, current, rotation, mirror) catch {
-                    // A chain target failed to (re)create - present the
-                    // plain preview rather than nothing this frame.
-                    r.submitPreview(0, current.preview, rotation * 90, mirror);
-                };
-            }
+            };
         } else {
             r.touch();
         }
@@ -791,6 +1083,26 @@ pub export fn ck_session_submit_frame_copy(session: ?*Session, desc: ?*const Fra
         .uv = uploaded.uv,
         .conversion = math.color.yuvToRgb(standard, range),
     } } };
+    s.copied_frames += 1;
+    return .ok;
+}
+
+/// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a canvas or
+/// video element's own byte buffer, most likely, with no native GPU
+/// handle behind it the way ck_session_submit_frame's zero-copy path
+/// needs. Same shape as ck_session_submit_frame_copy above, just a
+/// single interleaved plane instead of NV12's two.
+pub export fn ck_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const rgba_ptr = rgba orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+
+    releaseCurrentFrame(s);
+    const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
+    const texture = r.uploadRgba(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride) catch return .out_of_memory;
+    s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .bgra = .{ .texture = texture } } };
     s.copied_frames += 1;
     return .ok;
 }
@@ -935,16 +1247,101 @@ pub export fn ck_session_disable_beauty(session: ?*Session) void {
     if (s.beauty_chain) |chain| beauty.destroy(s.engine.gpa, chain);
     s.beauty_chain = null;
     destroyBeautyCompositing(s);
+    if (is_web) {
+        s.web_beauty_amounts = @splat(0);
+        destroyWebBeautyTargets(s);
+    }
 }
 
 /// Effect identifiers follow the header: smooth, whiten, thin face, big
 /// eye, lipstick, blush. Values clamp to zero and one; zero disables the
-/// effect.
+/// effect. On web this writes web_beauty_amounts directly rather than a
+/// gpupixel chain (there is no chain on this target, so it works
+/// regardless of ck_session_enable_beauty's own result - that call
+/// still goes through the native/stub beauty module unchanged).
 pub export fn ck_session_set_beauty(session: ?*Session, effect: i32, value: f32) Status {
     const s = session orelse return .invalid_argument;
-    const chain = s.beauty_chain orelse return .again;
     if (effect < 0 or effect > 5) return .invalid_argument;
+    if (is_web) {
+        s.web_beauty_amounts[@intCast(effect)] = std.math.clamp(value, 0.0, 1.0);
+        return .ok;
+    }
+    const chain = s.beauty_chain orelse return .again;
     beauty.set(chain, @enumFromInt(effect), value);
+    return .ok;
+}
+
+/// Uploads one of beauty.face's four whiten lookup textures on web -
+/// slot 0 gray, 1 origin, 2 skin, 3 custom, matching gpupixel's own
+/// lookup_gray/lookup_origin/lookup_skin/lookup_light asset order. rgba
+/// is a caller-decoded image (this build has no PNG decoder wired in
+/// for web); whiten renders inert until all four slots are loaded.
+/// Unsupported on every other target - native's whiten runs through
+/// adapters/beauty.zig's own gpupixel chain, not this texture set.
+pub export fn ck_session_set_beauty_lut(session: ?*Session, slot: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    if (!is_web) return .unsupported;
+    const s = session orelse return .invalid_argument;
+    if (slot < 0 or slot > 3) return .invalid_argument;
+    const bytes = rgba orelse return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    const texture = render.Renderer.createStaticTexture(@intCast(width), @intCast(height), bytes[0 .. @as(usize, width) * height * 4]);
+    const index: usize = @intCast(slot);
+    if (s.web_beauty_lut_textures[index]) |old| r.destroyTexture(old);
+    s.web_beauty_lut_textures[index] = texture;
+    return .ok;
+}
+
+/// Uploads beauty.lipstick's (effect 0) or beauty.blusher's (effect 1)
+/// own source image on web - gpupixel's mouth.png/blusher.png,
+/// caller-decoded the same way ck_session_set_beauty_lut's rgba is.
+/// Unsupported on every other target - native's lipstick/blush run
+/// through adapters/beauty.zig's own gpupixel chain.
+pub export fn ck_session_set_beauty_makeup_texture(session: ?*Session, effect: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
+    if (!is_web) return .unsupported;
+    const s = session orelse return .invalid_argument;
+    const bytes = rgba orelse return .invalid_argument;
+    if (width == 0 or height == 0) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    const texture = render.Renderer.createStaticTexture(@intCast(width), @intCast(height), bytes[0 .. @as(usize, width) * height * 4]);
+    const slot = switch (effect) {
+        @intFromEnum(runtime.EffectSlot.lipstick) => &s.web_beauty_lipstick_texture,
+        @intFromEnum(runtime.EffectSlot.blush) => &s.web_beauty_blush_texture,
+        else => {
+            r.destroyTexture(texture);
+            return .invalid_argument;
+        },
+    };
+    if (slot.*) |old| r.destroyTexture(old);
+    slot.* = texture;
+    return .ok;
+}
+
+/// Feeds one frame's tracked face landmarks into a web session directly.
+/// There is no internal tracking worker to drive beauty.reshape/
+/// beauty.lipstick/beauty.blusher on web (ck_session_enable_face_
+/// tracking reports unsupported here) - the caller runs its own
+/// tracker (a separate wasm module, most likely) and hands the result
+/// straight in. points holds point_count * 3 floats (x, y in frame
+/// pixels, z in the same scale, matching ck_face_result's own
+/// landmarks convention); point_count must be CK_FACE_LANDMARK_COUNT,
+/// or zero to clear any previously set landmarks (no face this frame).
+/// Unsupported on every other target, where ck_session_track_frame
+/// feeds the same three effects instead.
+pub export fn ck_session_set_face_landmarks(session: ?*Session, points: ?[*]const f32, point_count: u32) Status {
+    if (!is_web) return .unsupported;
+    const s = session orelse return .invalid_argument;
+    if (point_count == 0) {
+        s.web_face_landmarks = null;
+        return .ok;
+    }
+    if (point_count != face.landmark_count) return .invalid_argument;
+    const p = points orelse return .invalid_argument;
+    var landmarks: [face.landmark_count]face.Landmark = undefined;
+    for (&landmarks, 0..) |*landmark, at| {
+        landmark.* = .{ .x = p[at * 3], .y = p[at * 3 + 1], .z = p[at * 3 + 2] };
+    }
+    s.web_face_landmarks = landmarks;
     return .ok;
 }
 
@@ -980,6 +1377,10 @@ fn toTriggerSignals(s: LensSignals) trigger.Signals {
 }
 
 fn applyLensEffects(session: *Session, effects: []const runtime.AppliedEffect) void {
+    if (is_web) {
+        for (effects) |applied| session.web_beauty_amounts[@intFromEnum(applied.effect)] = std.math.clamp(applied.value, 0.0, 1.0);
+        return;
+    }
     const chain = session.beauty_chain orelse return;
     for (effects) |applied| beauty.set(chain, @enumFromInt(@intFromEnum(applied.effect)), applied.value);
 }
