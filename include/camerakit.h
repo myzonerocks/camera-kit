@@ -290,6 +290,39 @@ void ck_session_disable_beauty(ck_session *session);
  * identifiers above. Reports CK_AGAIN until beauty is enabled. */
 ck_status ck_session_set_beauty(ck_session *session, int32_t effect, float value);
 
+/* Graph thread, web only. Uploads one of whiten's four lookup textures -
+ * slot 0 gray, 1 origin, 2 skin, 3 custom. rgba is a caller-decoded
+ * image; whiten stays inert until all four slots are loaded. Reports
+ * CK_UNSUPPORTED on every other target, where whiten runs through the
+ * native beauty engine instead. */
+ck_status ck_session_set_beauty_lut(ck_session *session, int32_t slot, const uint8_t *rgba, uint32_t width, uint32_t height);
+
+/* Graph thread, web only. Uploads lipstick's (CK_BEAUTY_LIPSTICK) or
+ * blush's (CK_BEAUTY_BLUSH) own source image - caller-decoded the same
+ * way ck_session_set_beauty_lut's rgba is. Reports CK_UNSUPPORTED on
+ * every other target. */
+ck_status ck_session_set_beauty_makeup_texture(ck_session *session, int32_t effect, const uint8_t *rgba, uint32_t width, uint32_t height);
+
+/* Graph thread, web only. Feeds one frame's tracked face landmarks into
+ * a session directly - there is no internal tracking worker to drive
+ * CK_BEAUTY_THIN_FACE/CK_BEAUTY_BIG_EYE/CK_BEAUTY_LIPSTICK/CK_BEAUTY_BLUSH
+ * on web (ck_session_enable_face_tracking reports CK_ERROR_UNSUPPORTED
+ * there); the caller runs its own tracker and hands the result straight
+ * in. points holds point_count * 3 floats (x, y in frame pixels, z in
+ * the same scale, matching ck_face_result's own landmarks convention);
+ * point_count must be CK_FACE_LANDMARK_COUNT, or zero to clear any
+ * previously set landmarks (no face this frame). Reports CK_UNSUPPORTED
+ * on every other target, where ck_session_track_frame feeds the same
+ * effects instead. */
+ck_status ck_session_set_face_landmarks(ck_session *session, const float *points, uint32_t point_count);
+
+/* Graph thread. The CPU-copy path for a single-plane BGRA8/RGBA8 frame -
+ * a canvas or video element's own byte buffer, with no native GPU handle
+ * behind it the way ck_session_submit_frame's zero-copy path needs. Same
+ * shape as ck_session_submit_frame_copy, one interleaved plane instead
+ * of NV12's two. */
+ck_status ck_session_submit_frame_rgba_copy(ck_session *session, const ck_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
+
 /* Graph thread. Runs the beauty chain over one RGBA frame on the calling
  * thread, reading the newest tracking result for the landmark driven
  * effects when face tracking is enabled. The stated CPU path; live

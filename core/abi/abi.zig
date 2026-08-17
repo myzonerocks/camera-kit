@@ -253,6 +253,15 @@ pub const Session = struct {
     /// same rule as whiten's four.
     web_beauty_lipstick_texture: ?render.TextureHandle = null,
     web_beauty_blush_texture: ?render.TextureHandle = null,
+    /// beauty.reshape/beauty.lipstick/beauty.blusher's face contour on
+    /// web, set directly by the caller via ck_session_set_face_landmarks
+    /// - the internal tracking worker s.face_tracking drives everywhere
+    /// else is permanently unavailable here (ck_session_enable_face_
+    /// tracking reports unsupported on this target), so there is no
+    /// other way for a landmark-driven web effect to ever see a face.
+    /// Null means no face this frame, the same meaning a zero
+    /// landmark_count carries elsewhere.
+    web_face_landmarks: ?[face.landmark_count]face.Landmark = null,
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
@@ -514,13 +523,10 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
     // four landmark-driven effects are actually active this frame.
     var contour: [face106.point_count * 2]f32 = undefined;
     const has_face = blk: {
-        const worker = s.face_tracking orelse break :blk false;
-        var result: face.Result = undefined;
-        if (!tracking.readResult(worker, &result) or result.landmark_count_out != face.landmark_count or result.presence < 0.5) break :blk false;
-        var landmarks: [face.landmark_count]face.Landmark = undefined;
-        for (&landmarks, 0..) |*landmark, at| {
-            landmark.* = .{ .x = result.landmarks[at * 3], .y = result.landmarks[at * 3 + 1], .z = result.landmarks[at * 3 + 2] };
-        }
+        // Web has no internal tracking worker (ck_session_enable_face_
+        // tracking reports unsupported on this target) - the caller
+        // feeds landmarks directly via ck_session_set_face_landmarks.
+        const landmarks = s.web_face_landmarks orelse break :blk false;
         face106.fill(&landmarks, @floatFromInt(width), @floatFromInt(height), &contour);
         break :blk true;
     };
@@ -1287,6 +1293,34 @@ pub export fn ck_session_set_beauty_makeup_texture(session: ?*Session, effect: i
     };
     if (slot.*) |old| r.destroyTexture(old);
     slot.* = texture;
+    return .ok;
+}
+
+/// Feeds one frame's tracked face landmarks into a web session directly.
+/// There is no internal tracking worker to drive beauty.reshape/
+/// beauty.lipstick/beauty.blusher on web (ck_session_enable_face_
+/// tracking reports unsupported here) - the caller runs its own
+/// tracker (a separate wasm module, most likely) and hands the result
+/// straight in. points holds point_count * 3 floats (x, y in frame
+/// pixels, z in the same scale, matching ck_face_result's own
+/// landmarks convention); point_count must be CK_FACE_LANDMARK_COUNT,
+/// or zero to clear any previously set landmarks (no face this frame).
+/// Unsupported on every other target, where ck_session_track_frame
+/// feeds the same three effects instead.
+pub export fn ck_session_set_face_landmarks(session: ?*Session, points: ?[*]const f32, point_count: u32) Status {
+    if (!is_web) return .unsupported;
+    const s = session orelse return .invalid_argument;
+    if (point_count == 0) {
+        s.web_face_landmarks = null;
+        return .ok;
+    }
+    if (point_count != face.landmark_count) return .invalid_argument;
+    const p = points orelse return .invalid_argument;
+    var landmarks: [face.landmark_count]face.Landmark = undefined;
+    for (&landmarks, 0..) |*landmark, at| {
+        landmark.* = .{ .x = p[at * 3], .y = p[at * 3 + 1], .z = p[at * 3 + 2] };
+    }
+    s.web_face_landmarks = landmarks;
     return .ok;
 }
 
