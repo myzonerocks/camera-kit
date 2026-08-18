@@ -91,6 +91,13 @@ pub fn inputSurfaceNativeTexture(surface: *InputSurface, device: ?*anyopaque, wi
     return null;
 }
 
+pub fn inputSurfaceHardwareBuffer(surface: *InputSurface, width: u32, height: u32) ?*anyopaque {
+    _ = surface;
+    _ = width;
+    _ = height;
+    return null;
+}
+
 pub fn processTexture(surface: *InputSurface, beauty: *Beauty, width: u32, height: u32, result: ?*const face.Result) bool {
     _ = surface;
     _ = beauty;

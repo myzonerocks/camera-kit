@@ -83,6 +83,10 @@ const VkZeroCopy = if (is_android) struct {
     textures: [android_vk.ring_depth]c.bgfx_texture_handle_t = @splat(.{ .idx = invalid_handle }),
     width: u32 = 0,
     height: u32 = 0,
+    /// Beauty compositing's Vulkan-side imports: write side and read
+    /// side.
+    beauty_render_target: android_vk.BeautyRenderTarget = .{},
+    beauty_import: android_vk.BeautyImport = .{},
 } else struct {};
 
 pub const Renderer = struct {
@@ -563,6 +567,32 @@ pub const Renderer = struct {
         return handle;
     }
 
+    /// wrapExternalRenderTarget's Vulkan sibling: override is a no-op on
+    /// that backend, so this creates the texture in one step via
+    /// bgfx_create_texture_2d's own _external parameter instead. RGBA8,
+    /// matching the AHardwareBuffer's real format.
+    pub fn createAndroidBeautyRenderTarget(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?c.bgfx_texture_handle_t {
+        if (!is_android) return null;
+        const zc = if (r.zero_copy) |*z| z else return null;
+        const vk_image = zc.beauty_render_target.importRenderTarget(&zc.converter.ctx, @ptrCast(@alignCast(hardware_buffer)), width, height) catch return null;
+        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | c.BGFX_TEXTURE_RT;
+        const handle = c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, flags, null, vk_image);
+        if (handle.idx == invalid_handle) return null;
+        return handle;
+    }
+
+    /// wrapExternalTexture's Vulkan sibling, same reason as
+    /// createAndroidBeautyRenderTarget above.
+    pub fn wrapAndroidBeautyOutput(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?c.bgfx_texture_handle_t {
+        if (!is_android) return null;
+        const zc = if (r.zero_copy) |*z| z else return null;
+        const vk_image = zc.beauty_import.importRgba(&zc.converter.ctx, @ptrCast(@alignCast(hardware_buffer)), width, height) catch return null;
+        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+        const handle = c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, flags, null, vk_image);
+        if (handle.idx == invalid_handle) return null;
+        return handle;
+    }
+
     pub fn destroyTexture(r: *Renderer, handle: c.bgfx_texture_handle_t) void {
         _ = r;
         if (handle.idx != invalid_handle) c.bgfx_destroy_texture(handle);
@@ -580,6 +610,12 @@ pub const Renderer = struct {
         const data = c.bgfx_get_internal_data();
         if (data == null or data.*.context == null) return null;
         return data.*.context;
+    }
+
+    /// True only once Vulkan actually initialized, not just on Android -
+    /// false on the GLES fallback.
+    pub fn isAndroidVulkan(r: *const Renderer) bool {
+        return is_android and r.zero_copy != null;
     }
 
     /// Uploads a decoded, immutable image (a lens's LUT, say) as a real

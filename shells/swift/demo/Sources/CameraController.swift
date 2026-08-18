@@ -233,7 +233,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             flags: flags,
             timestamp_us: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000)
         )
-        var planes = goss_frame_planes(
+        let planes = goss_frame_planes(
             plane_count: 2,
             reserved: 0,
             planes: (
@@ -242,8 +242,15 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                 0
             )
         )
-        if goss_session_submit_frame(engineSession, &desc, &planes) == GOSS_OK {
-            submittedFrames += 1
+        // bgfx is single-threaded (main thread only, via CADisplayLink) -
+        // hop off this background capture queue for the submit call.
+        DispatchQueue.main.async { [weak self, engineSession] in
+            guard let self else { return }
+            var desc = desc
+            var planes = planes
+            if goss_session_submit_frame(engineSession, &desc, &planes) == GOSS_OK {
+                self.submittedFrames += 1
+            }
         }
 
         // Tracking reads the same frame's planes on the CPU; the worker

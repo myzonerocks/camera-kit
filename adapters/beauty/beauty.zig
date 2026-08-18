@@ -4,8 +4,11 @@
 //! tracked contour when one is provided.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const face = @import("face");
 const face106 = @import("face106");
+
+const is_android = builtin.os.tag == .linux and builtin.abi.isAndroid();
 
 pub const supported = true;
 
@@ -126,6 +129,8 @@ extern fn goss_beauty_input_create() ?*anyopaque;
 extern fn goss_beauty_input_destroy(handle: ?*anyopaque) void;
 extern fn goss_beauty_input_surface(handle: ?*anyopaque, device: ?*anyopaque, width: i32, height: i32) ?*anyopaque;
 extern fn goss_beauty_input_process(input_handle: ?*anyopaque, beauty_handle: ?*anyopaque, width: i32, height: i32, landmarks106: ?[*]const f32) i32;
+// Android/Vulkan only, no Apple sibling.
+extern fn goss_beauty_input_hardware_buffer(handle: ?*anyopaque, width: i32, height: i32) ?*anyopaque;
 
 /// The reverse of Interop: a platform-shared surface bgfx writes the
 /// live preview into zero-copy, that gpupixel then reads zero-copy on
@@ -160,6 +165,13 @@ pub fn inputSurfaceDestroy(gpa: std.mem.Allocator, surface: *InputSurface) void 
 /// the next call that actually resizes, or inputSurfaceDestroy.
 pub fn inputSurfaceNativeTexture(surface: *InputSurface, device: ?*anyopaque, width: u32, height: u32) ?*anyopaque {
     return goss_beauty_input_surface(surface.handle, device, @intCast(width), @intCast(height));
+}
+
+/// Vulkan sibling of inputSurfaceNativeTexture: same surface, returns
+/// the raw AHardwareBuffer* instead of a GLES texture id.
+pub fn inputSurfaceHardwareBuffer(surface: *InputSurface, width: u32, height: u32) ?*anyopaque {
+    if (!is_android) return null;
+    return goss_beauty_input_hardware_buffer(surface.handle, @intCast(width), @intCast(height));
 }
 
 /// Runs the beauty chain over the frame bgfx just wrote into surface,

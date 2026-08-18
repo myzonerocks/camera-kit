@@ -88,6 +88,22 @@ pub const Renderer = struct {
         return null;
     }
 
+    pub fn createAndroidBeautyRenderTarget(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?TextureHandle {
+        _ = r;
+        _ = width;
+        _ = height;
+        _ = hardware_buffer;
+        return null;
+    }
+
+    pub fn wrapAndroidBeautyOutput(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?TextureHandle {
+        _ = r;
+        _ = width;
+        _ = height;
+        _ = hardware_buffer;
+        return null;
+    }
+
     pub fn destroyTexture(r: *Renderer, handle: TextureHandle) void {
         _ = r;
         _ = handle;
@@ -96,6 +112,11 @@ pub const Renderer = struct {
     pub fn nativeDevice(r: *Renderer) ?*anyopaque {
         _ = r;
         return null;
+    }
+
+    pub fn isAndroidVulkan(r: *const Renderer) bool {
+        _ = r;
+        return false;
     }
 
     pub fn createStaticTexture(width: u16, height: u16, rgba: []const u8) TextureHandle {

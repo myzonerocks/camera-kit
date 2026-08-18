@@ -443,14 +443,15 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
         break :blk created;
     };
 
-    // null on backends with no separate device handle to pass (GLES: a
-    // context is implicit and thread-bound, nothing to hand across this
-    // boundary) - inputSurfaceNativeTexture's own platform
-    // implementation decides whether it actually needs one non-null
-    // (Metal does; GLES ignores the argument entirely), so a null
-    // device here is not itself a reason to give up.
+    // null device on GLES: a context is implicit and thread-bound,
+    // nothing to hand across this boundary - Metal needs one, GLES
+    // ignores it.
+    const android_vulkan = r.isAndroidVulkan();
     const device = r.nativeDevice();
-    const native_texture = beauty.inputSurfaceNativeTexture(input_surface, device, width, height) orelse return input_texture;
+    const native_texture = if (android_vulkan)
+        beauty.inputSurfaceHardwareBuffer(input_surface, width, height) orelse return input_texture
+    else
+        beauty.inputSurfaceNativeTexture(input_surface, device, width, height) orelse return input_texture;
 
     const target_has_a_prior_write = s.beauty_input_target != null and s.beauty_input_native == native_texture;
     if (!target_has_a_prior_write) {
@@ -462,7 +463,10 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
         // to actually process yet this frame. Leaving beauty_input_
         // native unset here means the next call retries the whole wrap
         // rather than caching a handle that never resolved.
-        const wrapped = r.wrapExternalRenderTarget(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(native_texture)) orelse return input_texture;
+        const wrapped = if (android_vulkan)
+            r.createAndroidBeautyRenderTarget(width, height, native_texture) orelse return input_texture
+        else
+            r.wrapExternalRenderTarget(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(native_texture)) orelse return input_texture;
         s.beauty_input_target = render.Renderer.createExternalTarget(wrapped) catch {
             r.destroyTexture(wrapped);
             return input_texture;
@@ -481,10 +485,13 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
             if (beauty.composite(interop, chain, width, height)) |composited| {
                 if (s.beauty_output_texture == null or s.beauty_output_native != composited) {
                     if (s.beauty_output_texture) |old| r.destroyTexture(old);
-                    s.beauty_output_texture = r.wrapExternalTexture(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(composited), false);
+                    s.beauty_output_texture = if (android_vulkan)
+                        r.wrapAndroidBeautyOutput(width, height, composited)
+                    else
+                        r.wrapExternalTexture(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(composited), false);
                     s.beauty_output_native = composited;
                 }
-                beautified = s.beauty_output_texture.?;
+                if (s.beauty_output_texture) |output| beautified = output;
             }
         }
     }

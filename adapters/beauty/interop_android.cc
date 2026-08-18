@@ -230,43 +230,17 @@ struct AndroidInputSurface {
     if (buffer) AHardwareBuffer_release(buffer);
   }
 
-  // Runs on bgfx's own thread. (Re)allocates the shared buffer sized to
-  // new_width/new_height and imports bgfx's own write-side EGLImage view
-  // of it - GPU_COLOR_OUTPUT so bgfx can render into it, GPU_SAMPLED_
-  // IMAGE so gpupixel can later read it. Tearing down read_image/
-  // read_texture here too is correct even though this runs on the wrong
-  // thread to touch GL objects gpupixel owns: this only happens on an
-  // actual resize, and EnsureReadSurface below detects a stale buffer by
-  // pointer identity and recreates its own view lazily next time
-  // gpupixel runs, the same contract AppleInputSurface's Metal/GL split
-  // already established.
-  //
-  // The returned GLuint is only meaningful to bgfx's GLES backend -
-  // wrapExternalRenderTarget hands it straight to bgfx_override_
-  // internal_texture_ptr, whose Vulkan-backend implementation expects a
-  // VkImage-derived handle instead, not a small integer reinterpreted as
-  // one. When bgfx runs on Vulkan (device supports it, render.zig chose
-  // that backend at init) there is no current EGL context on this
-  // thread at all, so eglGetCurrentDisplay() below returns EGL_NO_
-  // DISPLAY and this fails cleanly before ever reaching the override
-  // call - the same "unavailable capability holds its default state"
-  // degradation as everywhere else, not a new special case. A real
-  // Vulkan render-target import (a second AHardwareBuffer path through
-  // android_vk.zig, mirroring the read-side import that already exists
-  // for camera ingress) is real, larger, separate work, gated on the
-  // same physical-device requirement first Vulkan/zero-copy execution
-  // already is.
-  bool EnsureWriteSurface(int new_width, int new_height) {
-    if (write_texture != 0 && width == new_width && height == new_height) return true;
-    if (!Extensions().Ready()) return false;
+  // (Re)allocates the shared buffer alone, no GL/EGL touched - shared by
+  // EnsureWriteSurface (GLES) and the Vulkan render-target path, which
+  // never runs EnsureWriteSurface at all.
+  bool EnsureBuffer(int new_width, int new_height) {
+    if (buffer != nullptr && width == new_width && height == new_height) return true;
 
     EGLDisplay display = eglGetCurrentDisplay();
-    if (display == EGL_NO_DISPLAY) return false;
-
     if (write_texture) { glDeleteTextures(1, &write_texture); write_texture = 0; }
-    if (write_image != EGL_NO_IMAGE_KHR) { eglDestroyImageKHR(display, write_image); write_image = EGL_NO_IMAGE_KHR; }
+    if (write_image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY) { eglDestroyImageKHR(display, write_image); write_image = EGL_NO_IMAGE_KHR; }
     if (read_texture) { glDeleteTextures(1, &read_texture); read_texture = 0; }
-    if (read_image != EGL_NO_IMAGE_KHR) { eglDestroyImageKHR(display, read_image); read_image = EGL_NO_IMAGE_KHR; }
+    if (read_image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY) { eglDestroyImageKHR(display, read_image); read_image = EGL_NO_IMAGE_KHR; }
     if (buffer) { AHardwareBuffer_release(buffer); buffer = nullptr; }
 
     AHardwareBuffer_Desc desc = {};
@@ -277,6 +251,20 @@ struct AndroidInputSurface {
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
                  AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
     if (AHardwareBuffer_allocate(&desc, &buffer) != 0) return false;
+
+    width = new_width;
+    height = new_height;
+    return true;
+  }
+
+  bool EnsureWriteSurface(int new_width, int new_height) {
+    const bool resized = width != new_width || height != new_height;
+    if (write_texture != 0 && !resized) return true;
+    if (!Extensions().Ready()) return false;
+    if (!EnsureBuffer(new_width, new_height)) return false;
+
+    EGLDisplay display = eglGetCurrentDisplay();
+    if (display == EGL_NO_DISPLAY) return false;
 
     EGLClientBuffer client_buffer = Extensions().get_native_client_buffer(buffer);
     if (client_buffer == nullptr) return false;
@@ -295,8 +283,6 @@ struct AndroidInputSurface {
     Extensions().egl_image_target_texture_2d(GL_TEXTURE_2D, write_image);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    width = new_width;
-    height = new_height;
     return true;
   }
 
@@ -446,6 +432,15 @@ void* goss_beauty_input_surface(void* handle, void* device, int32_t width, int32
   auto* input = static_cast<AndroidInputSurface*>(handle);
   if (!input->EnsureWriteSurface(width, height)) return nullptr;
   return reinterpret_cast<void*>(static_cast<uintptr_t>(input->write_texture));
+}
+
+// Vulkan-backend sibling of goss_beauty_input_surface above - no GL/EGL
+// context needed, just the shared buffer allocation.
+void* goss_beauty_input_hardware_buffer(void* handle, int32_t width, int32_t height) {
+  if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
+  auto* input = static_cast<AndroidInputSurface*>(handle);
+  if (!input->EnsureBuffer(width, height)) return nullptr;
+  return input->buffer;
 }
 
 // Runs on gpupixel's own GL thread by dispatching through

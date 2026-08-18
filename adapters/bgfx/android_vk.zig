@@ -33,6 +33,8 @@ comptime {
     _ = &Converter.targetImage;
     _ = &BeautyImport.importRgba;
     _ = &BeautyImport.deinit;
+    _ = &BeautyRenderTarget.importRenderTarget;
+    _ = &BeautyRenderTarget.deinit;
 }
 
 pub const Error = error{
@@ -233,6 +235,76 @@ pub const BeautyImport = struct {
         image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
         image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
         image_info.usage = c.VK_IMAGE_USAGE_SAMPLED_BIT;
+        image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        try check(c.vkCreateImage(ctx.device, &image_info, null, &self.image));
+        errdefer {
+            c.vkDestroyImage(ctx.device, self.image, null);
+            self.image = null;
+        }
+
+        var dedicated: c.VkMemoryDedicatedAllocateInfo = std.mem.zeroes(c.VkMemoryDedicatedAllocateInfo);
+        dedicated.sType = c.VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+        dedicated.image = self.image;
+        var import_info: c.VkImportAndroidHardwareBufferInfoANDROID = std.mem.zeroes(c.VkImportAndroidHardwareBufferInfoANDROID);
+        import_info.sType = c.VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+        import_info.pNext = &dedicated;
+        import_info.buffer = hardware_buffer;
+        var alloc: c.VkMemoryAllocateInfo = std.mem.zeroes(c.VkMemoryAllocateInfo);
+        alloc.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc.pNext = &import_info;
+        alloc.allocationSize = properties.allocationSize;
+        alloc.memoryTypeIndex = try ctx.memoryTypeIndex(properties.memoryTypeBits, 0);
+        try check(c.vkAllocateMemory(ctx.device, &alloc, null, &self.memory));
+        try check(c.vkBindImageMemory(ctx.device, self.image, self.memory, 0));
+
+        self.imported_buffer = hardware_buffer;
+        return @intFromPtr(self.image);
+    }
+};
+
+/// BeautyImport's write-side sibling: same import, but as a render
+/// target (COLOR_ATTACHMENT) instead of a sampled image, for bgfx to
+/// render the live preview into.
+pub const BeautyRenderTarget = struct {
+    image: c.VkImage = null,
+    memory: c.VkDeviceMemory = null,
+    imported_buffer: ?*c.AHardwareBuffer = null,
+
+    pub fn deinit(self: *BeautyRenderTarget, device: c.VkDevice) void {
+        if (self.image != null) c.vkDestroyImage(device, self.image, null);
+        if (self.memory != null) c.vkFreeMemory(device, self.memory, null);
+        self.* = .{};
+    }
+
+    /// Imports hardware_buffer unless it's already the one imported;
+    /// returns the VkImage as a u64 for bgfx_create_texture_2d's
+    /// _external parameter.
+    pub fn importRenderTarget(self: *BeautyRenderTarget, ctx: *const Context, hardware_buffer: *c.AHardwareBuffer, width: u32, height: u32) Error!u64 {
+        if (self.imported_buffer == hardware_buffer) return @intFromPtr(self.image);
+        self.deinit(ctx.device);
+
+        var format_properties: c.VkAndroidHardwareBufferFormatPropertiesANDROID = std.mem.zeroes(c.VkAndroidHardwareBufferFormatPropertiesANDROID);
+        format_properties.sType = c.VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
+        var properties: c.VkAndroidHardwareBufferPropertiesANDROID = std.mem.zeroes(c.VkAndroidHardwareBufferPropertiesANDROID);
+        properties.sType = c.VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+        properties.pNext = &format_properties;
+        try check(c.vkGetAndroidHardwareBufferPropertiesANDROID(ctx.device, hardware_buffer, &properties));
+        if (format_properties.format != c.VK_FORMAT_R8G8B8A8_UNORM) return error.UnsupportedFormat;
+
+        var external_info: c.VkExternalMemoryImageCreateInfo = std.mem.zeroes(c.VkExternalMemoryImageCreateInfo);
+        external_info.sType = c.VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        external_info.handleTypes = c.VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+        var image_info: c.VkImageCreateInfo = std.mem.zeroes(c.VkImageCreateInfo);
+        image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.pNext = &external_info;
+        image_info.imageType = c.VK_IMAGE_TYPE_2D;
+        image_info.format = format_properties.format;
+        image_info.extent = .{ .width = width, .height = height, .depth = 1 };
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
+        image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
         try check(c.vkCreateImage(ctx.device, &image_info, null, &self.image));
         errdefer {
