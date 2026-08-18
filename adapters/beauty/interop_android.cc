@@ -28,7 +28,7 @@
 
 #include "core/gpupixel_context.h"
 
-extern "C" int32_t ck_beauty_process_external_texture(void* handle,
+extern "C" int32_t goss_beauty_process_external_texture(void* handle,
                                                        uint32_t gl_texture,
                                                        int32_t sampler_kind,
                                                        int32_t width,
@@ -340,20 +340,20 @@ struct AndroidInputSurface {
 
 extern "C" {
 
-void* ck_beauty_interop_create(void) {
+void* goss_beauty_interop_create(void) {
   return new (std::nothrow) AndroidInterop();
 }
 
-void ck_beauty_interop_destroy(void* handle) {
+void goss_beauty_interop_destroy(void* handle) {
   delete static_cast<AndroidInterop*>(handle);
 }
 
 // Composites source_texture into the shared AHardwareBuffer and returns
 // it, unretained (still owned by this Interop, released on the next
-// composite that changes size or on ck_beauty_interop_destroy): the
+// composite that changes size or on goss_beauty_interop_destroy): the
 // caller imports it into Vulkan (adapters/bgfx/android_vk.zig) rather
 // than freeing it directly.
-void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
+void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
                                   int32_t width, int32_t height) {
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* interop = static_cast<AndroidInterop*>(handle);
@@ -425,11 +425,11 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
   return ok ? interop->buffer : nullptr;
 }
 
-void* ck_beauty_input_create(void) {
+void* goss_beauty_input_create(void) {
   return new (std::nothrow) AndroidInputSurface();
 }
 
-void ck_beauty_input_destroy(void* handle) {
+void goss_beauty_input_destroy(void* handle) {
   delete static_cast<AndroidInputSurface*>(handle);
 }
 
@@ -439,8 +439,8 @@ void ck_beauty_input_destroy(void* handle) {
 // neutral about the parameter. (Re)creates the shared surface and
 // returns the write-side GLuint texture id (cast to a pointer) bgfx can
 // wrap with wrapExternalRenderTarget, unretained: valid until the next
-// call that actually resizes, or ck_beauty_input_destroy.
-void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
+// call that actually resizes, or goss_beauty_input_destroy.
+void* goss_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
   (void)device;
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* input = static_cast<AndroidInputSurface*>(handle);
@@ -450,13 +450,13 @@ void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t
 
 // Runs on gpupixel's own GL thread by dispatching through
 // SyncRunWithContext itself - the caller never needs to know that
-// detail, matching ck_beauty_interop_composite's own contract. Imports
+// detail, matching goss_beauty_interop_composite's own contract. Imports
 // the shared buffer bgfx just wrote into (its own EGLImage/texture
 // sibling, not bgfx's write_texture directly - a GL texture object is
 // per-context) and pushes it through the beauty chain via
-// ck_beauty_process_external_texture (beauty_shim.cc); returns 0 on
-// success, matching ck_beauty_process's own status convention.
-int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
+// goss_beauty_process_external_texture (beauty_shim.cc); returns 0 on
+// success, matching goss_beauty_process's own status convention.
+int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
                                 int32_t width, int32_t height,
                                 const float* landmarks106) {
   if (input_handle == nullptr || beauty_handle == nullptr) return 1;
@@ -472,7 +472,7 @@ int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
     // AndroidInterop's own EGLImage import already uses successfully -
     // GL_OES_EGL_image_external's samplerExternalOES is a different,
     // unrelated extension this bridge never needs.
-    ok = ck_beauty_process_external_texture(beauty_handle, input->read_texture, 0,
+    ok = goss_beauty_process_external_texture(beauty_handle, input->read_texture, 0,
                                             width, height, landmarks106) == 0;
   });
   return ok ? 0 : 1;

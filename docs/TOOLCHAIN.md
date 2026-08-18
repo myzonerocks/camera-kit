@@ -13,7 +13,7 @@ vendor, so bumping the pin moves the whole native toolchain at once.
 
 A weekly job builds everything against Zig master and files an issue when
 something breaks, so a new stable release is a scheduled chore instead of a
-surprise. CK_ALLOW_ZIG_MISMATCH=1 exists for that job alone. When a new
+surprise. GOSS_ALLOW_ZIG_MISMATCH=1 exists for that job alone. When a new
 stable ships, the bump lands within a month with every gate green.
 
 Platform floors are current stable Xcode, current stable Android Gradle

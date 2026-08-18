@@ -1,4 +1,4 @@
-//! Camera Kit math: SIMD-friendly linear algebra with zero dependencies and
+//! Gosslens math: SIMD-friendly linear algebra with zero dependencies and
 //! zero allocations. Vectors are bare `@Vector`s so arithmetic operators
 //! lower to SIMD.
 

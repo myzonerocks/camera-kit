@@ -14,7 +14,7 @@ From the repo root:
     zig build android
     cd shells/kotlin
     ./gradlew :demo:installDebug
-    adb shell am start -n kit.camera.demo/kit.camera.demo.MainActivity
+    adb shell am start -n com.gosslens.demo/com.gosslens.demo.MainActivity
 
 Grant camera permission when the app asks.
 

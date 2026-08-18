@@ -11,6 +11,6 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "camerakit"
-include(":camerakit")
+rootProject.name = "gosslens"
+include(":gosslens")
 include(":demo")

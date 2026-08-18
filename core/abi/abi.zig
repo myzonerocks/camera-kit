@@ -1,5 +1,5 @@
-//! The ck_ export layer: the only file that exports symbols. Everything here
-//! mirrors include/camerakit.h exactly; layouts are frozen and asserted at
+//! The goss_ export layer: the only file that exports symbols. Everything here
+//! mirrors include/gosslens.h exactly; layouts are frozen and asserted at
 //! compile time, and the abi gate diffs the surface on every change.
 //!
 //! Exports delegate to internal functions that take an allocator, so tests
@@ -34,7 +34,7 @@ const face106 = @import("face106");
 const is_web = builtin.os.tag == .emscripten;
 
 // A directory-based lens activation needs to read files (manifest.json,
-// compiled shader bytecode) from within an exported ck_ function, which
+// compiled shader bytecode) from within an exported goss_ function, which
 // no shell hands an Io instance into - this library owns one blocking
 // implementation for that, single-threaded since it's only ever
 // occasional small reads at lens activation, never the frame path.
@@ -118,7 +118,7 @@ pub const FramePlanes = extern struct {
 };
 
 /// The live signals a tick evaluates a lens's compiled triggers against -
-/// blendshapes mirrors ck_face_result's own inline-array
+/// blendshapes mirrors goss_face_result's own inline-array
 /// convention rather than a pointer, so a caller reading a face result
 /// can pass its blendshapes straight through. has_face false means no
 /// face-driven signal (present or any blendshape) reads as true.
@@ -173,7 +173,7 @@ pub const Engine = struct {
     chain_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
     chain_width: u16 = 0,
     chain_height: u16 = 0,
-    /// Dedicated target for ck_engine_capture_frame - separate from
+    /// Dedicated target for goss_engine_capture_frame - separate from
     /// chain_targets, which ping-pong and get overwritten mid-chain, so
     /// this one alone always holds the true final composited image
     /// after a capture-requested frame renders.
@@ -194,7 +194,7 @@ pub const Session = struct {
     current: ?CurrentFrame = null,
     copied_frames: u64 = 0,
     /// Set for exactly one renderCompositeChain call by
-    /// ck_engine_capture_frame, then cleared - redirects the chain's
+    /// goss_engine_capture_frame, then cleared - redirects the chain's
     /// true final stage into engine.capture_target instead of the swap
     /// chain directly, with an extra blit afterward so the swap chain
     /// still gets the same frame a normal render would have produced.
@@ -255,22 +255,22 @@ pub const Session = struct {
     web_beauty_targets_height: u16 = 0,
     /// beauty.face's whiten effect reads these four - gray, origin,
     /// skin, and custom, matching gpupixel's own beauty_face_unit_
-    /// filter.cc lookup set. Uploaded via ck_session_set_beauty_lut, a
+    /// filter.cc lookup set. Uploaded via goss_session_set_beauty_lut, a
     /// caller's own PNG decode (a browser's native one, most likely -
     /// there is no decoder wired into this build for web) handed in as
     /// raw RGBA; whiten stays inert until all four are loaded.
     web_beauty_lut_textures: [4]?render.TextureHandle = @splat(null),
     /// beauty.lipstick/beauty.blusher's own source images (gpupixel's
-    /// mouth.png/blusher.png) - uploaded via ck_session_set_beauty_
+    /// mouth.png/blusher.png) - uploaded via goss_session_set_beauty_
     /// makeup_texture the same caller-decodes-the-PNG way the whiten
     /// LUTs are. An effect stays inert until its own texture loads,
     /// same rule as whiten's four.
     web_beauty_lipstick_texture: ?render.TextureHandle = null,
     web_beauty_blush_texture: ?render.TextureHandle = null,
     /// beauty.reshape/beauty.lipstick/beauty.blusher's face contour on
-    /// web, set directly by the caller via ck_session_set_face_landmarks
+    /// web, set directly by the caller via goss_session_set_face_landmarks
     /// - the internal tracking worker s.face_tracking drives everywhere
-    /// else is permanently unavailable here (ck_session_enable_face_
+    /// else is permanently unavailable here (goss_session_enable_face_
     /// tracking reports unsupported on this target), so there is no
     /// other way for a landmark-driven web effect to ever see a face.
     /// Null means no face this frame, the same meaning a zero
@@ -280,7 +280,7 @@ pub const Session = struct {
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
     /// One bgfx program per currently-spliced shader.pass node, keyed by
-    /// its graph index. Created at activation (ck_session_activate_lens_
+    /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
     /// to read compiled shaders from), destroyed on deactivation.
     shader_programs: std.AutoHashMapUnmanaged(graph.NodeIndex, u16) = .empty,
@@ -295,7 +295,7 @@ pub const Session = struct {
     /// One background loader per currently-spliced lut.pass node still
     /// waiting on its LUT image, keyed by graph index. Started at
     /// activation (directory-based only, same reason as shader_programs
-    /// above), removed once ck_engine_render_frame's poll turns its
+    /// above), removed once goss_engine_render_frame's poll turns its
     /// result into a real texture or observes it failed.
     lut_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     /// One bgfx texture per lut.pass node whose asset finished loading.
@@ -410,16 +410,16 @@ fn beautyActive(s: *const Session) bool {
 /// call to read - one frame of latency, and the reason this is
 /// structured read-then-write rather than write-then-read. bgfx only
 /// actually executes a queued draw (the write below) when this frame's
-/// own bgfx_frame() call runs, at the end of ck_engine_render_frame,
+/// own bgfx_frame() call runs, at the end of goss_engine_render_frame,
 /// strictly after this function returns; reading the surface for
 /// content this same call just queued would race a Metal write that has
 /// not happened on the GPU yet. Reading what a fully-executed PRIOR
 /// frame wrote is what makes the cross-API bridge (Metal write, GL
 /// read) correct without forcing a synchronous GPU stall every frame -
-/// the CPU roundtrip ck_session_beautify_frame already accepts a much
+/// the CPU roundtrip goss_session_beautify_frame already accepts a much
 /// larger per-frame cost than one frame of latency ever could.
 ///
-/// The live-preview integration ck_session_beautify_frame's own doc
+/// The live-preview integration goss_session_beautify_frame's own doc
 /// comment names as this row's device-side counterpart. Draws into its
 /// own dedicated, platform-shared target rather than the ping-pong pair
 /// the rest of the chain shares, since that target has to stay backed
@@ -499,7 +499,7 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
 
 /// Whether beauty.face or beauty.reshape has anything to actually draw
 /// this frame on web - whiten alone only counts once its four LUT
-/// textures have loaded (ck_session_set_beauty_lut), lipstick/blush
+/// textures have loaded (goss_session_set_beauty_lut), lipstick/blush
 /// aren't wired (a mesh draw, not a full-screen pass like these two).
 fn webBeautyActive(s: *const Session) bool {
     if (!is_web) return false;
@@ -518,7 +518,7 @@ fn webBeautyActive(s: *const Session) bool {
 
 /// The one beauty-active check every caller should reach through -
 /// native's gpupixel chain on every other target, web_beauty_amounts
-/// here. ck_engine_render_frame's own fast-path gate and
+/// here. goss_engine_render_frame's own fast-path gate and
 /// renderCompositeChain's chain dispatch both need this, and both once
 /// called beautyActive() directly - a real bug, not hypothetical: with
 /// no lens active (chain_order empty), render_frame's own gate skipped
@@ -564,9 +564,9 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
     // four landmark-driven effects are actually active this frame.
     var contour: [face106.point_count * 2]f32 = undefined;
     const has_face = blk: {
-        // Web has no internal tracking worker (ck_session_enable_face_
+        // Web has no internal tracking worker (goss_session_enable_face_
         // tracking reports unsupported on this target) - the caller
-        // feeds landmarks directly via ck_session_set_face_landmarks.
+        // feeds landmarks directly via goss_session_set_face_landmarks.
         const landmarks = s.web_face_landmarks orelse break :blk false;
         face106.fill(&landmarks, @floatFromInt(width), @floatFromInt(height), &contour);
         break :blk true;
@@ -589,7 +589,7 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
         if (slot == null) break false;
     } else true;
     // Whiten renders inert until all four LUT textures load on web
-    // (ck_session_set_beauty_lut) - the amount the caller actually
+    // (goss_session_set_beauty_lut) - the amount the caller actually
     // requested still gets tracked either way, just not applied yet.
     const whiten = if (luts_loaded) whiten_requested else 0.0;
     if (smooth > 0.0 or whiten > 0.0) {
@@ -847,7 +847,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
 }
 
 /// The composite chain's true final-stage target: the swap chain
-/// directly, or - for exactly the one frame ck_engine_capture_frame
+/// directly, or - for exactly the one frame goss_engine_capture_frame
 /// requested - the dedicated capture target instead, so the chain's
 /// real output lands somewhere bgfx_read_texture can read it back from
 /// after the frame completes.
@@ -916,7 +916,7 @@ pub fn destroySession(session: *Session) void {
 
 /// Tears down the GPU beauty compositing bridge's platform surfaces -
 /// safe to call whether or not they were ever actually created (both
-/// ck_session_disable_beauty and destroySession reach this unconditionally).
+/// goss_session_disable_beauty and destroySession reach this unconditionally).
 fn destroyBeautyCompositing(session: *Session) void {
     if (session.beauty_input_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.beauty_input_target = null;
@@ -989,24 +989,24 @@ fn thermalFromC(value: c_int) graph.degrade.ThermalState {
 
 /// Allocates from the engine allocator for embedders that cannot address
 /// module memory themselves, the wasm host being the one that matters.
-/// Pair every allocation with ck_free of the same size.
-pub export fn ck_alloc(size: usize) ?[*]u8 {
+/// Pair every allocation with goss_free of the same size.
+pub export fn goss_alloc(size: usize) ?[*]u8 {
     if (size == 0) return null;
     const slice = abiAllocator().alloc(u8, size) catch return null;
     return slice.ptr;
 }
 
-pub export fn ck_free(ptr: ?[*]u8, size: usize) void {
+pub export fn goss_free(ptr: ?[*]u8, size: usize) void {
     const p = ptr orelse return;
     if (size == 0) return;
     abiAllocator().free(p[0..size]);
 }
 
-pub export fn ck_abi_version() u32 {
+pub export fn goss_abi_version() u32 {
     return (@as(u32, abi_major) << 16) | abi_minor;
 }
 
-pub export fn ck_engine_create(config: ?*const EngineConfig, out_engine: ?**Engine) Status {
+pub export fn goss_engine_create(config: ?*const EngineConfig, out_engine: ?**Engine) Status {
     const out = out_engine orelse return .invalid_argument;
     const cfg: EngineConfig = if (config) |c| c.* else .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 };
     const engine = createEngine(abiAllocator(), cfg) catch return .out_of_memory;
@@ -1014,11 +1014,11 @@ pub export fn ck_engine_create(config: ?*const EngineConfig, out_engine: ?**Engi
     return .ok;
 }
 
-pub export fn ck_engine_destroy(engine: ?*Engine) void {
+pub export fn goss_engine_destroy(engine: ?*Engine) void {
     destroyEngine(engine orelse return);
 }
 
-pub export fn ck_engine_init_renderer(engine: ?*Engine, desc: ?*const RendererDesc) Status {
+pub export fn goss_engine_init_renderer(engine: ?*Engine, desc: ?*const RendererDesc) Status {
     const e = engine orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     if (e.renderer != null) return .invalid_argument;
@@ -1030,7 +1030,7 @@ pub export fn ck_engine_init_renderer(engine: ?*Engine, desc: ?*const RendererDe
     return .ok;
 }
 
-pub export fn ck_engine_resize(engine: ?*Engine, width: u32, height: u32) void {
+pub export fn goss_engine_resize(engine: ?*Engine, width: u32, height: u32) void {
     const e = engine orelse return;
     if (e.renderer) |*r| r.resize(width, height);
 }
@@ -1043,7 +1043,7 @@ const screenshot_path_max = 480;
 /// here so a real shell target - the ios simulator conformance run this
 /// exists for - can trigger it too). Debug/test tooling only; no shell
 /// ships this behind a user-facing control.
-pub export fn ck_engine_request_screenshot(engine: ?*Engine, path: ?[*]const u8, path_len: usize) Status {
+pub export fn goss_engine_request_screenshot(engine: ?*Engine, path: ?[*]const u8, path_len: usize) Status {
     const e = engine orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
     const p = path orelse return .invalid_argument;
@@ -1056,7 +1056,7 @@ pub export fn ck_engine_request_screenshot(engine: ?*Engine, path: ?[*]const u8,
     return .ok;
 }
 
-pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Status {
+pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Status {
     const e = engine orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
     if (session) |s| {
@@ -1097,7 +1097,7 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
     return .ok;
 }
 
-/// Renders one frame the same way ck_engine_render_frame does, and also
+/// Renders one frame the same way goss_engine_render_frame does, and also
 /// reads its composited output back into out_data as RGBA8, row 0
 /// first. The WebGPU render path's own equivalent to what a WebGL2
 /// canvas's readPixels already gives a caller directly - WebGPU has no
@@ -1112,7 +1112,7 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
 /// buffer is safe to read, backend-dependent and not always the same
 /// small number of extra calls, so this loops on frame()'s own return
 /// value rather than assuming a fixed count.
-pub export fn ck_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
+pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
@@ -1150,7 +1150,7 @@ pub export fn ck_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_
     return .ok;
 }
 
-pub export fn ck_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
+pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
     const out = out_session orelse return .invalid_argument;
     const parent = engine orelse return .invalid_argument;
     const cfg: SessionConfig = if (config) |c| c.* else .{ .frame_budget_us = 0, .reserved = 0 };
@@ -1159,11 +1159,11 @@ pub export fn ck_session_create(engine: ?*Engine, config: ?*const SessionConfig,
     return .ok;
 }
 
-pub export fn ck_session_destroy(session: ?*Session) void {
+pub export fn goss_session_destroy(session: ?*Session) void {
     destroySession(session orelse return);
 }
 
-pub export fn ck_session_submit_frame(session: ?*Session, desc: ?*const FrameDesc, planes: ?*const FramePlanes) Status {
+pub export fn goss_session_submit_frame(session: ?*Session, desc: ?*const FrameDesc, planes: ?*const FramePlanes) Status {
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const p = planes orelse return .invalid_argument;
@@ -1202,7 +1202,7 @@ pub export fn ck_session_submit_frame(session: ?*Session, desc: ?*const FrameDes
 /// column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).xyz. Shells
 /// that own their GPU pipeline, the web shell today, get their color math
 /// from the core instead of hardcoding it.
-pub export fn ck_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_matrix: ?*[16]f32) Status {
+pub export fn goss_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_matrix: ?*[16]f32) Status {
     const out = out_matrix orelse return .invalid_argument;
     const standard: math.color.Standard = switch (color_standard) {
         0 => .bt601,
@@ -1229,7 +1229,7 @@ pub export fn ck_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_mat
 /// Copies NV12 planes into pooled textures. The stated CPU path: a shell
 /// uses it only where the zero-copy import is not wired yet, and the copy
 /// is counted so the budget report shows it.
-pub export fn ck_session_submit_frame_copy(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
+pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const y_ptr = y orelse return .invalid_argument;
@@ -1263,10 +1263,10 @@ pub export fn ck_session_submit_frame_copy(session: ?*Session, desc: ?*const Fra
 
 /// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a canvas or
 /// video element's own byte buffer, most likely, with no native GPU
-/// handle behind it the way ck_session_submit_frame's zero-copy path
-/// needs. Same shape as ck_session_submit_frame_copy above, just a
+/// handle behind it the way goss_session_submit_frame's zero-copy path
+/// needs. Same shape as goss_session_submit_frame_copy above, just a
 /// single interleaved plane instead of NV12's two.
-pub export fn ck_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
+pub export fn goss_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const rgba_ptr = rgba orelse return .invalid_argument;
@@ -1284,7 +1284,7 @@ pub export fn ck_session_submit_frame_rgba_copy(session: ?*Session, desc: ?*cons
 /// Zero-copy camera submission for platforms delivering hardware buffers.
 /// The render adapter converts on the gpu; a status other than ok means the
 /// caller falls back to the declared copy path for this stream.
-pub export fn ck_session_submit_hardware_buffer(session: ?*Session, desc: ?*const FrameDesc, hardware_buffer: ?*anyopaque) Status {
+pub export fn goss_session_submit_hardware_buffer(session: ?*Session, desc: ?*const FrameDesc, hardware_buffer: ?*anyopaque) Status {
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const buffer = hardware_buffer orelse return .invalid_argument;
@@ -1305,13 +1305,13 @@ pub export fn ck_session_submit_hardware_buffer(session: ?*Session, desc: ?*cons
     return .ok;
 }
 
-pub export fn ck_session_report_frame(session: ?*Session, frame_time_us: u32, thermal: c_int) c_int {
+pub export fn goss_session_report_frame(session: ?*Session, frame_time_us: u32, thermal: c_int) c_int {
     const s = session orelse return 0;
     _ = s.controller.step(.{ .frame_time_us = frame_time_us, .thermal = thermalFromC(thermal) });
     return @intFromEnum(s.controller.level);
 }
 
-pub export fn ck_session_degrade_level(session: ?*const Session) c_int {
+pub export fn goss_session_degrade_level(session: ?*const Session) c_int {
     const s = session orelse return 0;
     return @intFromEnum(s.controller.level);
 }
@@ -1319,7 +1319,7 @@ pub export fn ck_session_degrade_level(session: ?*const Session) c_int {
 /// Stands the face tracking worker up from a model bundle. The bundle
 /// bytes are copied; the caller may release them on return. On platforms
 /// built without the inference stack this reports unsupported.
-pub export fn ck_session_enable_face_tracking(session: ?*Session, task_bytes: ?[*]const u8, task_len: usize, threads: i32) Status {
+pub export fn goss_session_enable_face_tracking(session: ?*Session, task_bytes: ?[*]const u8, task_len: usize, threads: i32) Status {
     const s = session orelse return .invalid_argument;
     const bytes = task_bytes orelse return .invalid_argument;
     if (task_len == 0) return .invalid_argument;
@@ -1333,7 +1333,7 @@ pub export fn ck_session_enable_face_tracking(session: ?*Session, task_bytes: ?[
     return .ok;
 }
 
-pub export fn ck_session_disable_face_tracking(session: ?*Session) void {
+pub export fn goss_session_disable_face_tracking(session: ?*Session) void {
     const s = session orelse return;
     if (s.face_tracking) |worker| tracking.destroy(worker);
     s.face_tracking = null;
@@ -1343,7 +1343,7 @@ pub export fn ck_session_disable_face_tracking(session: ?*Session) void {
 /// segmenter, not bundled the way face_landmarker.task is). The model
 /// bytes are copied; the caller may release them on return. On platforms
 /// built without the inference stack this reports unsupported.
-pub export fn ck_session_enable_segmentation(session: ?*Session, model_bytes: ?[*]const u8, model_len: usize, threads: i32) Status {
+pub export fn goss_session_enable_segmentation(session: ?*Session, model_bytes: ?[*]const u8, model_len: usize, threads: i32) Status {
     const s = session orelse return .invalid_argument;
     const bytes = model_bytes orelse return .invalid_argument;
     if (model_len == 0) return .invalid_argument;
@@ -1357,7 +1357,7 @@ pub export fn ck_session_enable_segmentation(session: ?*Session, model_bytes: ?[
     return .ok;
 }
 
-pub export fn ck_session_disable_segmentation(session: ?*Session) void {
+pub export fn goss_session_disable_segmentation(session: ?*Session) void {
     const s = session orelse return;
     if (s.segmentation_worker) |worker| segmentation.destroy(worker);
     s.segmentation_worker = null;
@@ -1367,7 +1367,7 @@ pub export fn ck_session_disable_segmentation(session: ?*Session) void {
 /// Feeds one NV12 frame to the tracking worker. The planes are CPU
 /// addresses valid for the duration of the call; the worker copies and
 /// returns immediately, dropping stale frames in favor of this one.
-pub export fn ck_session_track_frame(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
+pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
@@ -1394,7 +1394,7 @@ pub export fn ck_session_track_frame(session: ?*Session, desc: ?*const FrameDesc
 
 /// Reads the newest tracking result into caller memory. Reports again
 /// until the worker has published its first result.
-pub export fn ck_session_face_result(session: ?*Session, out_result: ?*face.Result) Status {
+pub export fn goss_session_face_result(session: ?*Session, out_result: ?*face.Result) Status {
     const s = session orelse return .invalid_argument;
     const out = out_result orelse return .invalid_argument;
     const worker = s.face_tracking orelse return .again;
@@ -1405,7 +1405,7 @@ pub export fn ck_session_face_result(session: ?*Session, out_result: ?*face.Resu
 /// Stands the beauty chain up for a session. The resource path names the
 /// directory holding the effect engine's shader and image assets; builds
 /// without the effects engine report unsupported.
-pub export fn ck_session_enable_beauty(session: ?*Session, resource_path: ?[*:0]const u8) Status {
+pub export fn goss_session_enable_beauty(session: ?*Session, resource_path: ?[*:0]const u8) Status {
     const s = session orelse return .invalid_argument;
     const path = resource_path orelse return .invalid_argument;
     if (s.beauty_chain != null) return .ok;
@@ -1416,7 +1416,7 @@ pub export fn ck_session_enable_beauty(session: ?*Session, resource_path: ?[*:0]
     return .ok;
 }
 
-pub export fn ck_session_disable_beauty(session: ?*Session) void {
+pub export fn goss_session_disable_beauty(session: ?*Session) void {
     const s = session orelse return;
     if (s.beauty_chain) |chain| beauty.destroy(s.engine.gpa, chain);
     s.beauty_chain = null;
@@ -1431,9 +1431,9 @@ pub export fn ck_session_disable_beauty(session: ?*Session) void {
 /// eye, lipstick, blush. Values clamp to zero and one; zero disables the
 /// effect. On web this writes web_beauty_amounts directly rather than a
 /// gpupixel chain (there is no chain on this target, so it works
-/// regardless of ck_session_enable_beauty's own result - that call
+/// regardless of goss_session_enable_beauty's own result - that call
 /// still goes through the native/stub beauty module unchanged).
-pub export fn ck_session_set_beauty(session: ?*Session, effect: i32, value: f32) Status {
+pub export fn goss_session_set_beauty(session: ?*Session, effect: i32, value: f32) Status {
     const s = session orelse return .invalid_argument;
     if (effect < 0 or effect > 5) return .invalid_argument;
     if (is_web) {
@@ -1452,7 +1452,7 @@ pub export fn ck_session_set_beauty(session: ?*Session, effect: i32, value: f32)
 /// for web); whiten renders inert until all four slots are loaded.
 /// Unsupported on every other target - native's whiten runs through
 /// adapters/beauty.zig's own gpupixel chain, not this texture set.
-pub export fn ck_session_set_beauty_lut(session: ?*Session, slot: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
+pub export fn goss_session_set_beauty_lut(session: ?*Session, slot: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
     if (!is_web) return .unsupported;
     const s = session orelse return .invalid_argument;
     if (slot < 0 or slot > 3) return .invalid_argument;
@@ -1468,10 +1468,10 @@ pub export fn ck_session_set_beauty_lut(session: ?*Session, slot: i32, rgba: ?[*
 
 /// Uploads beauty.lipstick's (effect 0) or beauty.blusher's (effect 1)
 /// own source image on web - gpupixel's mouth.png/blusher.png,
-/// caller-decoded the same way ck_session_set_beauty_lut's rgba is.
+/// caller-decoded the same way goss_session_set_beauty_lut's rgba is.
 /// Unsupported on every other target - native's lipstick/blush run
 /// through adapters/beauty.zig's own gpupixel chain.
-pub export fn ck_session_set_beauty_makeup_texture(session: ?*Session, effect: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
+pub export fn goss_session_set_beauty_makeup_texture(session: ?*Session, effect: i32, rgba: ?[*]const u8, width: u32, height: u32) Status {
     if (!is_web) return .unsupported;
     const s = session orelse return .invalid_argument;
     const bytes = rgba orelse return .invalid_argument;
@@ -1493,16 +1493,16 @@ pub export fn ck_session_set_beauty_makeup_texture(session: ?*Session, effect: i
 
 /// Feeds one frame's tracked face landmarks into a web session directly.
 /// There is no internal tracking worker to drive beauty.reshape/
-/// beauty.lipstick/beauty.blusher on web (ck_session_enable_face_
+/// beauty.lipstick/beauty.blusher on web (goss_session_enable_face_
 /// tracking reports unsupported here) - the caller runs its own
 /// tracker (a separate wasm module, most likely) and hands the result
 /// straight in. points holds point_count * 3 floats (x, y in frame
-/// pixels, z in the same scale, matching ck_face_result's own
-/// landmarks convention); point_count must be CK_FACE_LANDMARK_COUNT,
+/// pixels, z in the same scale, matching goss_face_result's own
+/// landmarks convention); point_count must be GOSS_FACE_LANDMARK_COUNT,
 /// or zero to clear any previously set landmarks (no face this frame).
-/// Unsupported on every other target, where ck_session_track_frame
+/// Unsupported on every other target, where goss_session_track_frame
 /// feeds the same three effects instead.
-pub export fn ck_session_set_face_landmarks(session: ?*Session, points: ?[*]const f32, point_count: u32) Status {
+pub export fn goss_session_set_face_landmarks(session: ?*Session, points: ?[*]const f32, point_count: u32) Status {
     if (!is_web) return .unsupported;
     const s = session orelse return .invalid_argument;
     if (point_count == 0) {
@@ -1523,7 +1523,7 @@ pub export fn ck_session_set_face_landmarks(session: ?*Session, points: ?[*]cons
 /// reading the newest tracking result for the landmark driven effects
 /// when face tracking is enabled. The stated CPU path: live preview
 /// integration on the render thread is the device side of this row.
-pub export fn ck_session_beautify_frame(session: ?*Session, rgba_in: ?[*]const u8, width: u32, height: u32, rgba_out: ?[*]u8) Status {
+pub export fn goss_session_beautify_frame(session: ?*Session, rgba_in: ?[*]const u8, width: u32, height: u32, rgba_out: ?[*]u8) Status {
     const s = session orelse return .invalid_argument;
     const source = rgba_in orelse return .invalid_argument;
     const destination = rgba_out orelse return .invalid_argument;
@@ -1542,7 +1542,7 @@ pub export fn ck_session_beautify_frame(session: ?*Session, rgba_in: ?[*]const u
 /// Takes s by pointer, not value: the returned Signals borrows
 /// &s.blendshapes directly, and a by-value parameter's address does not
 /// outlive this call - the caller's own LensSignals storage (guaranteed
-/// live for the whole ABI call per ck_session_tick_lens's own contract)
+/// live for the whole ABI call per goss_session_tick_lens's own contract)
 /// is what the borrow must point into instead.
 fn toTriggerSignals(s: *const LensSignals) trigger.Signals {
     return .{
@@ -1586,7 +1586,7 @@ fn destroySegmentationTexture(session: *Session) void {
 }
 
 /// Turns the newest published mask into a real GPU texture - runs every
-/// frame from ck_engine_render_frame since texture creation belongs on
+/// frame from goss_engine_render_frame since texture creation belongs on
 /// the render thread, mirroring pollLutLoaders. Replaces the previous
 /// texture outright since bgfx's static textures are immutable; nothing
 /// consumes segmentation_texture yet (background-swap compositing is
@@ -1672,7 +1672,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     applyLensEffects(session, effects);
 }
 
-pub export fn ck_session_activate_lens(session: ?*Session, manifest_json: ?[*]const u8, manifest_len: usize) Status {
+pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]const u8, manifest_len: usize) Status {
     const s = session orelse return .invalid_argument;
     const bytes = manifest_json orelse return .invalid_argument;
     if (manifest_len == 0) return .invalid_argument;
@@ -1739,7 +1739,7 @@ fn createLutLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []co
 
 /// Turns every LUT load that finished (or failed) since the last frame
 /// into a real texture (or drops it) - runs every frame from
-/// ck_engine_render_frame since texture creation belongs on the render
+/// goss_engine_render_frame since texture creation belongs on the render
 /// thread, but each loader is otherwise untouched here except the one
 /// frame its result actually lands on.
 fn pollLutLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
@@ -1870,7 +1870,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
 /// Activates the lens bundle at bundle_path (bundle_path/manifest.json),
 /// then creates a bgfx program for every shader.pass node it spliced
 /// and starts a background load for every lut.pass node's LUT image.
-/// Additive alongside ck_session_activate_lens rather than a new
+/// Additive alongside goss_session_activate_lens rather than a new
 /// parameter on it: that function's signature is frozen the moment it
 /// shipped, and only a bundle directory - not raw manifest bytes - can
 /// name where a shader.pass node's compiled bytecode or a lut.pass
@@ -1878,7 +1878,7 @@ fn pollModelLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
 // Explicit anyerror, not inferred: the has_file_io branch below prunes
 // away entirely on wasm, which would otherwise narrow the inferred
 // error set to just Unsupported there and break the OutOfMemory arm
-// ck_session_activate_lens_from_directory's catch already handles for
+// goss_session_activate_lens_from_directory's catch already handles for
 // every other target.
 fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) anyerror!void {
     if (comptime !has_file_io) return error.Unsupported;
@@ -1894,7 +1894,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try buildChainOrder(session, gpa);
 }
 
-pub export fn ck_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
+pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
     const s = session orelse return .invalid_argument;
     const path = bundle_path orelse return .invalid_argument;
     if (bundle_path_len == 0) return .invalid_argument;
@@ -1906,7 +1906,7 @@ pub export fn ck_session_activate_lens_from_directory(session: ?*Session, bundle
     return .ok;
 }
 
-pub export fn ck_session_deactivate_lens(session: ?*Session) void {
+pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     const s = session orelse return;
     destroyShaderPrograms(s);
     destroyLutState(s);
@@ -1919,9 +1919,9 @@ pub export fn ck_session_deactivate_lens(session: ?*Session) void {
 
 /// Advances the active lens by dt_us of real time and applies every
 /// effect value its triggers/ramps changed to the beauty chain, if one
-/// is enabled. Reports CK_AGAIN with no active lens, matching the
-/// no-chain-yet convention ck_session_set_beauty already uses.
-pub export fn ck_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
+/// is enabled. Reports GOSS_AGAIN with no active lens, matching the
+/// no-chain-yet convention goss_session_set_beauty already uses.
+pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
     if (s.active_lens == null) return .again;
@@ -1934,16 +1934,16 @@ pub export fn ck_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*co
 const t = std.testing;
 
 test "alloc and free round-trip through the abi allocator" {
-    const p = ck_alloc(64) orelse return error.TestUnexpectedResult;
+    const p = goss_alloc(64) orelse return error.TestUnexpectedResult;
     p[0] = 0xa5;
     p[63] = 0x5a;
-    ck_free(p, 64);
-    try t.expect(ck_alloc(0) == null);
-    ck_free(null, 16);
+    goss_free(p, 64);
+    try t.expect(goss_alloc(0) == null);
+    goss_free(null, 16);
 }
 
 test "abi version packs major and minor" {
-    try t.expectEqual((@as(u32, abi_major) << 16) | abi_minor, ck_abi_version());
+    try t.expectEqual((@as(u32, abi_major) << 16) | abi_minor, goss_abi_version());
 }
 
 test "engine and session lifecycle is leak-free" {
@@ -1962,24 +1962,24 @@ test "report frame walks the ladder like the controller" {
     const session = try createSession(engine, .{ .frame_budget_us = 16_000, .reserved = 0 });
     defer destroySession(session);
 
-    try t.expectEqual(@as(c_int, 0), ck_session_degrade_level(session));
+    try t.expectEqual(@as(c_int, 0), goss_session_degrade_level(session));
     var level: c_int = 0;
-    for (0..64) |_| level = ck_session_report_frame(session, 40_000, 0);
+    for (0..64) |_| level = goss_session_report_frame(session, 40_000, 0);
     try t.expect(level > 0);
-    try t.expectEqual(level, ck_session_degrade_level(session));
+    try t.expectEqual(level, goss_session_degrade_level(session));
 
-    const jumped = ck_session_report_frame(session, 8_000, 3);
+    const jumped = goss_session_report_frame(session, 8_000, 3);
     try t.expectEqual(@as(c_int, 4), jumped);
 }
 
 test "null arguments are rejected without crashing" {
-    try t.expectEqual(Status.invalid_argument, ck_engine_create(null, null));
-    try t.expectEqual(Status.invalid_argument, ck_session_create(null, null, null));
-    ck_engine_destroy(null);
-    ck_session_destroy(null);
-    try t.expectEqual(@as(c_int, 0), ck_session_degrade_level(null));
-    try t.expectEqual(Status.invalid_argument, ck_engine_init_renderer(null, null));
-    try t.expectEqual(Status.invalid_argument, ck_engine_render_frame(null, null));
+    try t.expectEqual(Status.invalid_argument, goss_engine_create(null, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_create(null, null, null));
+    goss_engine_destroy(null);
+    goss_session_destroy(null);
+    try t.expectEqual(@as(c_int, 0), goss_session_degrade_level(null));
+    try t.expectEqual(Status.invalid_argument, goss_engine_init_renderer(null, null));
+    try t.expectEqual(Status.invalid_argument, goss_engine_render_frame(null, null));
 }
 
 test "frame submission without a renderer reports it" {
@@ -1998,18 +1998,18 @@ test "frame submission without a renderer reports it" {
         .timestamp_us = 0,
     };
     const planes: FramePlanes = .{ .plane_count = 2, .reserved = 0, .planes = .{ 1, 2, 0 } };
-    try t.expectEqual(Status.renderer_unavailable, ck_session_submit_frame(session, &desc, &planes));
-    try t.expectEqual(Status.renderer_unavailable, ck_engine_render_frame(engine, session));
+    try t.expectEqual(Status.renderer_unavailable, goss_session_submit_frame(session, &desc, &planes));
+    try t.expectEqual(Status.renderer_unavailable, goss_engine_render_frame(engine, session));
 }
 
 test "color conversion export writes the homogeneous matrix" {
     var out: [16]f32 = undefined;
-    try t.expectEqual(Status.ok, ck_color_yuv_to_rgb(1, 0, &out));
+    try t.expectEqual(Status.ok, goss_color_yuv_to_rgb(1, 0, &out));
     const direct = math.color.yuvToRgb(.bt709, .video).homogeneous();
     try t.expectEqual(direct.cols[0][0], out[0]);
     try t.expectEqual(direct.cols[3][2], out[14]);
-    try t.expectEqual(Status.invalid_argument, ck_color_yuv_to_rgb(9, 0, &out));
-    try t.expectEqual(Status.invalid_argument, ck_color_yuv_to_rgb(0, 9, null));
+    try t.expectEqual(Status.invalid_argument, goss_color_yuv_to_rgb(9, 0, &out));
+    try t.expectEqual(Status.invalid_argument, goss_color_yuv_to_rgb(0, 9, null));
 }
 
 test "rotation and mirror decode from the flags field" {
@@ -2025,14 +2025,14 @@ test "face tracking on a build without the inference stack refuses" {
     defer destroySession(session);
 
     const bytes = [_]u8{ 1, 2, 3 };
-    try t.expectEqual(Status.unsupported, ck_session_enable_face_tracking(session, &bytes, bytes.len, 0));
+    try t.expectEqual(Status.unsupported, goss_session_enable_face_tracking(session, &bytes, bytes.len, 0));
     var result: FaceResult = undefined;
-    try t.expectEqual(Status.again, ck_session_face_result(session, &result));
+    try t.expectEqual(Status.again, goss_session_face_result(session, &result));
     const desc: FrameDesc = .{ .width = 2, .height = 2, .pixel_format = 0, .color_standard = 0, .color_range = 0, .flags = 0, .timestamp_us = 0 };
     const planes = [_]u8{0} ** 8;
-    try t.expectEqual(Status.again, ck_session_track_frame(session, &desc, &planes, 2, &planes, 2));
-    ck_session_disable_face_tracking(session);
-    try t.expectEqual(Status.invalid_argument, ck_session_face_result(session, null));
+    try t.expectEqual(Status.again, goss_session_track_frame(session, &desc, &planes, 2, &planes, 2));
+    goss_session_disable_face_tracking(session);
+    try t.expectEqual(Status.invalid_argument, goss_session_face_result(session, null));
 }
 
 test "beauty on a build without the effects engine refuses" {
@@ -2041,11 +2041,11 @@ test "beauty on a build without the effects engine refuses" {
     const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer destroySession(session);
 
-    try t.expectEqual(Status.unsupported, ck_session_enable_beauty(session, "res"));
-    try t.expectEqual(Status.again, ck_session_set_beauty(session, 0, 0.5));
+    try t.expectEqual(Status.unsupported, goss_session_enable_beauty(session, "res"));
+    try t.expectEqual(Status.again, goss_session_set_beauty(session, 0, 0.5));
     var pixels = [_]u8{0} ** 16;
-    try t.expectEqual(Status.again, ck_session_beautify_frame(session, &pixels, 2, 2, &pixels));
-    ck_session_disable_beauty(session);
+    try t.expectEqual(Status.again, goss_session_beautify_frame(session, &pixels, 2, 2, &pixels));
+    goss_session_disable_beauty(session);
 }
 
 const test_lens_manifest =
@@ -2070,14 +2070,14 @@ test "activating a lens splices its nodes and applies its default effect values"
     const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer destroySession(session);
 
-    try t.expectEqual(Status.ok, ck_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
     try t.expect(session.active_lens != null);
     try t.expectEqual(@as(usize, 1), session.active_lens.?.nodes.len);
     try t.expectEqual(@as(f32, 0.25), session.active_lens.?.param_values[0]);
     // No beauty chain enabled: applying effect values is a silent no-op,
     // not an error - activation still succeeds.
 
-    ck_session_deactivate_lens(session);
+    goss_session_deactivate_lens(session);
     try t.expect(session.active_lens == null);
     // Only the camera source remains scheduled - the lens node was
     // unspliced, not just detached.
@@ -2090,20 +2090,20 @@ test "activating a second lens replaces the first, and invalid input is rejected
     const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer destroySession(session);
 
-    try t.expectEqual(Status.ok, ck_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
-    try t.expectEqual(Status.ok, ck_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
     try t.expectEqual(@as(usize, 1), session.active_lens.?.nodes.len);
 
     const garbage = "not a manifest";
-    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens(session, garbage.ptr, garbage.len));
+    try t.expectEqual(Status.invalid_argument, goss_session_activate_lens(session, garbage.ptr, garbage.len));
     // A failed activation does not disturb the previously active lens.
     try t.expect(session.active_lens != null);
 
-    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens(null, garbage.ptr, garbage.len));
-    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens(session, null, 0));
+    try t.expectEqual(Status.invalid_argument, goss_session_activate_lens(null, garbage.ptr, garbage.len));
+    try t.expectEqual(Status.invalid_argument, goss_session_activate_lens(session, null, 0));
 
-    ck_session_deactivate_lens(session);
-    ck_session_deactivate_lens(session); // idempotent
+    goss_session_deactivate_lens(session);
+    goss_session_deactivate_lens(session); // idempotent
 }
 
 test "ticking with no active lens reports again; ticking a firing trigger advances its ramp" {
@@ -2113,20 +2113,20 @@ test "ticking with no active lens reports again; ticking a firing trigger advanc
     defer destroySession(session);
 
     var closed_signals = std.mem.zeroes(LensSignals);
-    try t.expectEqual(Status.again, ck_session_tick_lens(session, 8_333, &closed_signals));
+    try t.expectEqual(Status.again, goss_session_tick_lens(session, 8_333, &closed_signals));
 
-    try t.expectEqual(Status.ok, ck_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, test_lens_manifest.ptr, test_lens_manifest.len));
 
     var open_signals = std.mem.zeroes(LensSignals);
     open_signals.has_face = true;
     const jaw_open = face.blendshapeIndex("jawOpen").?;
     open_signals.blendshapes[jaw_open] = 0.9;
 
-    try t.expectEqual(Status.ok, ck_session_tick_lens(session, 8_333, &open_signals));
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 8_333, &open_signals));
     try t.expect(session.active_lens.?.param_values[0] > 0.25);
     try t.expect(session.active_lens.?.param_values[0] < 1.0);
 
-    try t.expectEqual(Status.invalid_argument, ck_session_tick_lens(session, 8_333, null));
+    try t.expectEqual(Status.invalid_argument, goss_session_tick_lens(session, 8_333, null));
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {
@@ -2136,13 +2136,13 @@ test "activating a lens from a real bundle directory splices it, and a build wit
     defer destroySession(session);
 
     const bundle_path = "lenses/reference/shader-tint";
-    try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(Status.ok, goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
     try t.expect(session.active_lens != null);
     try t.expectEqual(@as(usize, 1), session.active_lens.?.nodes.len);
     // This build has no compiled render stack (the stub always reports
     // RendererUnavailable) - the lens still activates cleanly, its
     // shader.pass node just has no program, exactly the degradation
-    // ck_session_set_beauty already establishes for a missing engine.
+    // goss_session_set_beauty already establishes for a missing engine.
     try t.expectEqual(@as(usize, 0), session.shader_programs.count());
     // The chain's structure is still known even though nothing in it
     // has a resource yet - that's what lets a lut.pass node's load
@@ -2150,14 +2150,14 @@ test "activating a lens from a real bundle directory splices it, and a build wit
     try t.expectEqual(@as(usize, 1), session.chain_order.len);
     try t.expectEqual(runtime.PassKind.shader, session.chain_order[0].kind);
 
-    ck_session_deactivate_lens(session);
+    goss_session_deactivate_lens(session);
     try t.expect(session.active_lens == null);
     try t.expectEqual(@as(usize, 0), session.shader_programs.count());
     try t.expectEqual(@as(usize, 0), session.chain_order.len);
 
-    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(null, bundle_path.ptr, bundle_path.len));
-    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(session, null, 0));
-    try t.expectEqual(Status.invalid_argument, ck_session_activate_lens_from_directory(session, bundle_path.ptr, 0));
+    try t.expectEqual(Status.invalid_argument, goss_session_activate_lens_from_directory(null, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(Status.invalid_argument, goss_session_activate_lens_from_directory(session, null, 0));
+    try t.expectEqual(Status.invalid_argument, goss_session_activate_lens_from_directory(session, bundle_path.ptr, 0));
 }
 
 const lut_pass_bundle_manifest =
@@ -2194,7 +2194,7 @@ test "activating a lens with a lut.pass node loads its LUT image for real, off t
     var path_buf: [64]u8 = undefined;
     const bundle_path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
 
-    try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(Status.ok, goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
     try t.expectEqual(@as(usize, 1), session.lut_loaders.count());
     try t.expectEqual(@as(usize, 1), session.chain_order.len);
     try t.expectEqual(runtime.PassKind.lut, session.chain_order[0].kind);
@@ -2214,10 +2214,10 @@ test "activating a lens with a lut.pass node loads its LUT image for real, off t
     try t.expect(!loader.hasFailed());
 
     // A load that finished but was never polled through
-    // ck_engine_render_frame (this build has no compiled render stack)
+    // goss_engine_render_frame (this build has no compiled render stack)
     // is still cleaned up correctly on deactivation, not leaked or
     // double-freed.
-    ck_session_deactivate_lens(session);
+    goss_session_deactivate_lens(session);
     try t.expectEqual(@as(usize, 0), session.lut_loaders.count());
 }
 
@@ -2243,7 +2243,7 @@ test "activating a lens with a blend.pass node loads its background image for re
     var path_buf: [64]u8 = undefined;
     const bundle_path = std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}) catch unreachable;
 
-    try t.expectEqual(Status.ok, ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
+    try t.expectEqual(Status.ok, goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len));
     try t.expectEqual(@as(usize, 1), session.blend_loaders.count());
     try t.expectEqual(@as(usize, 1), session.chain_order.len);
     try t.expectEqual(runtime.PassKind.blend, session.chain_order[0].kind);
@@ -2262,6 +2262,6 @@ test "activating a lens with a blend.pass node loads its background image for re
     try t.expectEqual(@as(u32, 8), got.height);
     try t.expect(!loader.hasFailed());
 
-    ck_session_deactivate_lens(session);
+    goss_session_deactivate_lens(session);
     try t.expectEqual(@as(usize, 0), session.blend_loaders.count());
 }

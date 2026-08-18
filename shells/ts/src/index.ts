@@ -1,4 +1,4 @@
-// The web shell over camerakit_web, the real bgfx-backed engine every
+// The web shell over gosslens_web, the real bgfx-backed engine every
 // other shell already runs (Swift/Kotlin call the exact same frozen ABI
 // through their own thin platform glue). This shell owns only what the
 // browser forces on it - camera capture through getUserMedia, decoding
@@ -6,7 +6,7 @@
 // everything else (the frame graph, all six beauty effects, mirror and
 // rotation) straight to the engine.
 
-export const CK_OK = 0;
+export const GOSS_OK = 0;
 
 export const enum DegradeLevel {
   Full = 0,
@@ -91,7 +91,7 @@ async function decodeImageRgba(
   return { data: image.data, width, height };
 }
 
-/// Chooses which camerakit_web.js build to load: the WebGPU one (bgfx's
+/// Chooses which gosslens_web.js build to load: the WebGPU one (bgfx's
 /// WebGPU backend, Asyncify linked in) or the WebGL2 one (no Asyncify).
 /// Two separate artifacts rather than a runtime toggle, since Asyncify
 /// taxes the whole per-frame path, not just init. Checks for a real
@@ -129,10 +129,10 @@ export class PreviewSession {
   /// mechanism every other shell uses for sensor orientation - not a
   /// CSS or texture-upload workaround.
   private videoFlipped = false;
-  /// ck_engine_capture_frame on the WebGPU build runs as an async
+  /// goss_engine_capture_frame on the WebGPU build runs as an async
   /// (Asyncify-suspending) ccall - while it's suspended, the rAF-driven
   /// tick() below would otherwise keep firing and reenter the wasm
-  /// module with a plain synchronous ck_engine_render_frame call, which
+  /// module with a plain synchronous goss_engine_render_frame call, which
   /// Emscripten's Asyncify does not support while a call is already
   /// suspended. tick() checks this and skips its own render call until
   /// the capture completes.
@@ -158,23 +158,22 @@ export class PreviewSession {
     private canvas: HTMLCanvasElement,
     /// Only set on the WebGL2 build - bgfx's WebGPU backend binds the
     /// canvas to a 'webgpu' context instead, and a canvas can only ever
-    /// bind one context type for its lifetime. readPixels-based readback
-    /// (captureFrame/readCenterPixel/readFrameSum) needs this; it isn't
-    /// available on the WebGPU build yet.
+    /// bind one context type for its lifetime. capturePixels() branches
+    /// on this: readPixels when set, goss_engine_capture_frame otherwise.
     private gl: WebGL2RenderingContext | null,
     private events: SessionEvents,
     readonly abiVersion: number,
   ) {
     this.scratchCtx = this.scratchCanvas.getContext("2d", { willReadFrequently: true })!;
-    this.frameDescPtr = mod.ccall("ck_alloc", "number", ["number"], [32]);
-    this.landmarksPtr = mod.ccall("ck_alloc", "number", ["number"], [FACE_LANDMARK_COUNT * 3 * 4]);
+    this.frameDescPtr = mod.ccall("goss_alloc", "number", ["number"], [32]);
+    this.landmarksPtr = mod.ccall("goss_alloc", "number", ["number"], [FACE_LANDMARK_COUNT * 3 * 4]);
   }
 
-  /// Loads camerakit_web.js (a real ES module - see build.zig) and
+  /// Loads gosslens_web.js (a real ES module - see build.zig) and
   /// stands up the engine, renderer, and session against canvas. A
   /// dynamic import, not a static one: bun's bundler would otherwise
   /// try to inline/transform this file, which would break Emscripten's
-  /// own import.meta.url-relative fetch of camerakit_web.wasm sitting
+  /// own import.meta.url-relative fetch of gosslens_web.wasm sitting
   /// next to it.
   static async create(canvas: HTMLCanvasElement, wasmJsUrl: string | URL, events: SessionEvents = {}): Promise<PreviewSession> {
     if (!canvas.id) throw new Error("canvas needs a stable id for bgfx's own selector lookup");
@@ -190,33 +189,33 @@ export class PreviewSession {
     // around it by reading immediately after a fresh render instead.
     const mod = await imported.default({ canvas });
 
-    const version = mod.ccall("ck_abi_version", "number", [], []) >>> 0;
-    if (version >> 16 !== 0) throw new Error(`camerakit abi major mismatch: ${version >> 16}`);
+    const version = mod.ccall("goss_abi_version", "number", [], []) >>> 0;
+    if (version >> 16 !== 0) throw new Error(`gosslens abi major mismatch: ${version >> 16}`);
 
-    const engineOut = mod.ccall("ck_alloc", "number", ["number"], [4]);
-    const engineStatus = mod.ccall("ck_engine_create", "number", ["number", "number"], [0, engineOut]);
+    const engineOut = mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const engineStatus = mod.ccall("goss_engine_create", "number", ["number", "number"], [0, engineOut]);
     const engine = mod.getValue(engineOut, "i32");
-    mod.ccall("ck_free", null, ["number", "number"], [engineOut, 4]);
-    if (engineStatus !== CK_OK) throw new Error(`engine create failed: ${engineStatus}`);
+    mod.ccall("goss_free", null, ["number", "number"], [engineOut, 4]);
+    if (engineStatus !== GOSS_OK) throw new Error(`engine create failed: ${engineStatus}`);
 
     // bgfx's HTML5 backend resolves its own canvas via this selector
     // string (glcontext_html5.cpp, not documented in the C header) -
     // Module.canvas above is Emscripten's own, separate mechanism for
     // the same canvas; both need to agree.
     const selectorPtr = mod.stringToNewUTF8(`#${canvas.id}`);
-    const rendererDescPtr = mod.ccall("ck_alloc", "number", ["number"], [12]);
+    const rendererDescPtr = mod.ccall("goss_alloc", "number", ["number"], [12]);
     mod.setValue(rendererDescPtr, selectorPtr, "i32");
     mod.setValue(rendererDescPtr + 4, canvas.width, "i32");
     mod.setValue(rendererDescPtr + 8, canvas.height, "i32");
-    const rendererStatus = await mod.ccall("ck_engine_init_renderer", "number", ["number", "number"], [engine, rendererDescPtr], { async: true });
-    mod.ccall("ck_free", null, ["number", "number"], [rendererDescPtr, 12]);
-    if (rendererStatus !== CK_OK) throw new Error(`renderer init failed: ${rendererStatus}`);
+    const rendererStatus = await mod.ccall("goss_engine_init_renderer", "number", ["number", "number"], [engine, rendererDescPtr], { async: true });
+    mod.ccall("goss_free", null, ["number", "number"], [rendererDescPtr, 12]);
+    if (rendererStatus !== GOSS_OK) throw new Error(`renderer init failed: ${rendererStatus}`);
 
-    const sessionOut = mod.ccall("ck_alloc", "number", ["number"], [4]);
-    const sessionStatus = mod.ccall("ck_session_create", "number", ["number", "number", "number"], [engine, 0, sessionOut]);
+    const sessionOut = mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const sessionStatus = mod.ccall("goss_session_create", "number", ["number", "number", "number"], [engine, 0, sessionOut]);
     const session = mod.getValue(sessionOut, "i32");
-    mod.ccall("ck_free", null, ["number", "number"], [sessionOut, 4]);
-    if (sessionStatus !== CK_OK) throw new Error(`session create failed: ${sessionStatus}`);
+    mod.ccall("goss_free", null, ["number", "number"], [sessionOut, 4]);
+    if (sessionStatus !== GOSS_OK) throw new Error(`session create failed: ${sessionStatus}`);
 
     // The same canvas Emscripten's C++ side just created its own
     // rendering context on - browsers return the existing context for
@@ -260,13 +259,13 @@ export class PreviewSession {
   }
 
   private setBeauty(effect: BeautyEffect, amount: number): void {
-    this.mod.ccall("ck_session_set_beauty", "number", ["number", "number", "number"], [this.session, effect, amount]);
+    this.mod.ccall("goss_session_set_beauty", "number", ["number", "number", "number"], [this.session, effect, amount]);
   }
 
-  /// Activates a lens from its manifest JSON directly (ck_session_
+  /// Activates a lens from its manifest JSON directly (goss_session_
   /// activate_lens, not the directory-based variant) - the only
   /// activation path this build actually supports: has_file_io is
-  /// comptime-false for every wasm target, so ck_session_activate_lens_
+  /// comptime-false for every wasm target, so goss_session_activate_lens_
   /// from_directory always reports unsupported here, and shader.pass/
   /// lut.pass/blend.pass nodes need compiled resources a bundle
   /// directory would provide that this shell has no way to supply yet.
@@ -275,14 +274,14 @@ export class PreviewSession {
   /// applyWebBeautyChain's own embedded shaders, not a per-lens one.
   activateLens(manifestJson: string): void {
     const bytes = new TextEncoder().encode(manifestJson);
-    const ptr = this.mod.ccall("ck_alloc", "number", ["number"], [bytes.length]);
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]);
     this.mod.HEAPU8.set(bytes, ptr);
-    this.mod.ccall("ck_session_activate_lens", "number", ["number", "number", "number"], [this.session, ptr, bytes.length]);
-    this.mod.ccall("ck_free", null, ["number", "number"], [ptr, bytes.length]);
+    this.mod.ccall("goss_session_activate_lens", "number", ["number", "number", "number"], [this.session, ptr, bytes.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
   }
 
   deactivateLens(): void {
-    this.mod.ccall("ck_session_deactivate_lens", null, ["number"], [this.session]);
+    this.mod.ccall("goss_session_deactivate_lens", null, ["number"], [this.session]);
   }
 
   /// Advances the active lens's triggers/param ramps by dtUs. No face/
@@ -292,10 +291,10 @@ export class PreviewSession {
   /// future work; this is enough to prove a lens activates and ticks
   /// deterministically at all.
   tickLens(dtUs: number): void {
-    const signalsPtr = this.mod.ccall("ck_alloc", "number", ["number"], [232]);
+    const signalsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [232]);
     this.mod.HEAPU8.fill(0, signalsPtr, signalsPtr + 232);
-    this.mod.ccall("ck_session_tick_lens", "number", ["number", "number", "number"], [this.session, dtUs, signalsPtr]);
-    this.mod.ccall("ck_free", null, ["number", "number"], [signalsPtr, 232]);
+    this.mod.ccall("goss_session_tick_lens", "number", ["number", "number", "number"], [this.session, dtUs, signalsPtr]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [signalsPtr, 232]);
   }
 
   setVideoFlip(enabled: boolean): void {
@@ -310,14 +309,14 @@ export class PreviewSession {
   /// pixels (whatever resolution the caller's own tracking pass ran
   /// at, which need not match the live video's own resolution), z in
   /// the same relative scale, three floats per point, matching
-  /// ck_face_result's own convention. Scaled here to the frame
+  /// goss_face_result's own convention. Scaled here to the frame
   /// currently being rendered - the engine's own contour math expects
   /// "frame pixels" of the frame it's compositing, not of whatever
   /// analysis resolution tracking happened to use. Null clears
   /// tracking (no face this frame).
   setFaceLandmarks(landmarks: Float32Array | null, sourceWidth: number, sourceHeight: number): void {
     if (!landmarks || landmarks.length === 0 || this.frameWidth === 0) {
-      this.mod.ccall("ck_session_set_face_landmarks", "number", ["number", "number", "number"], [this.session, 0, 0]);
+      this.mod.ccall("goss_session_set_face_landmarks", "number", ["number", "number", "number"], [this.session, 0, 0]);
       return;
     }
     const scaleX = this.frameWidth / sourceWidth;
@@ -330,7 +329,7 @@ export class PreviewSession {
       this.mod.HEAPF32[base + at * 3 + 2] = landmarks[at * 3 + 2]!;
     }
     this.mod.ccall(
-      "ck_session_set_face_landmarks",
+      "goss_session_set_face_landmarks",
       "number",
       ["number", "number", "number"],
       [this.session, this.landmarksPtr, pointCount],
@@ -346,15 +345,15 @@ export class PreviewSession {
       names.map((name) => fetch(new URL(`${name}.png`, lutBaseUrl)).then((r) => r.blob()).then(decodeImageRgba)),
     );
     images.forEach((image, slot) => {
-      const ptr = this.mod.ccall("ck_alloc", "number", ["number"], [image.data.length]);
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [image.data.length]);
       this.mod.HEAPU8.set(image.data, ptr);
       this.mod.ccall(
-        "ck_session_set_beauty_lut",
+        "goss_session_set_beauty_lut",
         "number",
         ["number", "number", "number", "number", "number"],
         [this.session, slot, ptr, image.width, image.height],
       );
-      this.mod.ccall("ck_free", null, ["number", "number"], [ptr, image.data.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, image.data.length]);
       this.whitenLutsLoaded += 1;
     });
   }
@@ -370,15 +369,15 @@ export class PreviewSession {
       [BeautyEffect.Lipstick, mouth],
       [BeautyEffect.Blush, blusher],
     ] as const) {
-      const ptr = this.mod.ccall("ck_alloc", "number", ["number"], [image.data.length]);
+      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [image.data.length]);
       this.mod.HEAPU8.set(image.data, ptr);
       this.mod.ccall(
-        "ck_session_set_beauty_makeup_texture",
+        "goss_session_set_beauty_makeup_texture",
         "number",
         ["number", "number", "number", "number", "number"],
         [this.session, effect, ptr, image.width, image.height],
       );
-      this.mod.ccall("ck_free", null, ["number", "number"], [ptr, image.data.length]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, image.data.length]);
     }
     this.lipstickTextureLoaded = true;
     this.blushTextureLoaded = true;
@@ -403,8 +402,8 @@ export class PreviewSession {
 
   private ensureFramePixels(byteLength: number): void {
     if (this.framePixelsCapacity >= byteLength) return;
-    if (this.framePixelsPtr !== 0) this.mod.ccall("ck_free", null, ["number", "number"], [this.framePixelsPtr, this.framePixelsCapacity]);
-    this.framePixelsPtr = this.mod.ccall("ck_alloc", "number", ["number"], [byteLength]);
+    if (this.framePixelsPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.framePixelsPtr, this.framePixelsCapacity]);
+    this.framePixelsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLength]);
     this.framePixelsCapacity = byteLength;
   }
 
@@ -428,7 +427,7 @@ export class PreviewSession {
     this.mod.setValue(this.frameDescPtr + 28, Math.floor(timestampUs / 4294967296), "i32");
 
     this.mod.ccall(
-      "ck_session_submit_frame_rgba_copy",
+      "goss_session_submit_frame_rgba_copy",
       "number",
       ["number", "number", "number", "number"],
       [this.session, this.frameDescPtr, this.framePixelsPtr, width * 4],
@@ -473,7 +472,7 @@ export class PreviewSession {
     const now = performance.now();
     const frameTimeUs = Math.max(0, Math.round((now - this.lastTick) * 1000));
     this.lastTick = now;
-    this.mod.ccall("ck_session_report_frame", "number", ["number", "number", "number"], [this.session, frameTimeUs, 0]);
+    this.mod.ccall("goss_session_report_frame", "number", ["number", "number", "number"], [this.session, frameTimeUs, 0]);
 
     if (this.video.readyState >= 2 && this.video.currentTime !== this.lastVideoTime) {
       this.lastVideoTime = this.video.currentTime;
@@ -491,8 +490,8 @@ export class PreviewSession {
       this.submitRgbaFrame(pixels.data, width, height, false);
     }
 
-    const status = this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
-    if (status === CK_OK) {
+    const status = this.mod.ccall("goss_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
+    if (status === GOSS_OK) {
       this.renderedFrames += 1;
       this.fpsWindowFrames += 1;
     }
@@ -508,13 +507,13 @@ export class PreviewSession {
   /// The two ways this shell reads pixels back: bgfx's own WebGL2
   /// context (see create() above) never preserves its drawing buffer,
   /// so readPixels has to run right after a fresh render. WebGPU has
-  /// no synchronous readPixels equivalent - ck_engine_capture_frame is
+  /// no synchronous readPixels equivalent - goss_engine_capture_frame is
   /// the native-side path for that backend, and needs {async: true}
   /// since its internal bgfx_read_texture call maps a GPU buffer.
   private async capturePixels(): Promise<{ pixels: Uint8Array; width: number; height: number }> {
     if (this.gl) {
       const gl = this.gl;
-      this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
+      this.mod.ccall("goss_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
       const width = this.canvas.width;
       const height = this.canvas.height;
       const pixels = new Uint8Array(width * height * 4);
@@ -523,28 +522,28 @@ export class PreviewSession {
     }
 
     const capacity = this.canvas.width * this.canvas.height * 4;
-    const dataPtr = this.mod.ccall("ck_alloc", "number", ["number"], [capacity]);
-    const outWidthPtr = this.mod.ccall("ck_alloc", "number", ["number"], [4]);
-    const outHeightPtr = this.mod.ccall("ck_alloc", "number", ["number"], [4]);
+    const dataPtr = this.mod.ccall("goss_alloc", "number", ["number"], [capacity]);
+    const outWidthPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const outHeightPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
     this.captureInFlight = true;
     try {
       const status = await this.mod.ccall(
-        "ck_engine_capture_frame",
+        "goss_engine_capture_frame",
         "number",
         ["number", "number", "number", "number", "number", "number"],
         [this.engine, this.session, dataPtr, capacity, outWidthPtr, outHeightPtr],
         { async: true },
       );
-      if (status !== CK_OK) throw new Error(`ck_engine_capture_frame failed: status ${status}`);
+      if (status !== GOSS_OK) throw new Error(`goss_engine_capture_frame failed: status ${status}`);
       const width = this.mod.getValue(outWidthPtr, "i32");
       const height = this.mod.getValue(outHeightPtr, "i32");
       const pixels = this.mod.HEAPU8.slice(dataPtr, dataPtr + width * height * 4);
       return { pixels, width, height };
     } finally {
       this.captureInFlight = false;
-      this.mod.ccall("ck_free", null, ["number", "number"], [dataPtr, capacity]);
-      this.mod.ccall("ck_free", null, ["number", "number"], [outWidthPtr, 4]);
-      this.mod.ccall("ck_free", null, ["number", "number"], [outHeightPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [dataPtr, capacity]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [outWidthPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [outHeightPtr, 4]);
     }
   }
 
@@ -579,7 +578,7 @@ export class PreviewSession {
   }
 
   degradeLevel(): DegradeLevel {
-    return this.mod.ccall("ck_session_degrade_level", "number", ["number"], [this.session]);
+    return this.mod.ccall("goss_session_degrade_level", "number", ["number"], [this.session]);
   }
 
   /// Sums every RGBA byte over the whole canvas - a courser but far more

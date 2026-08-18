@@ -9,7 +9,7 @@ const c = render.c;
 // header) only resolves against a real DOM canvas, so this reports
 // bgfx_init's result rather than asserting it - false here just means
 // no browser canvas was present, not a build failure.
-export fn ck_core_smoke_probe() i32 {
+export fn goss_core_smoke_probe() i32 {
     // std.heap.c_allocator, not wasm_allocator: wasm_allocator grows
     // memory through a raw wasm instruction Emscripten's own JS-side
     // heap-view tracking never sees, leaving a caller's cached HEAP32/
@@ -28,7 +28,7 @@ export fn ck_core_smoke_probe() i32 {
 /// submitPreview path - the same program-loading/full-screen-quad/
 /// submit sequence a real session runs. Writes the active renderer's
 /// name into out_name/out_name_cap so the caller can assert on it.
-export fn ck_core_smoke_render_frame(out_name: [*]u8, out_name_cap: i32) i32 {
+export fn goss_core_smoke_render_frame(out_name: [*]u8, out_name_cap: i32) i32 {
     var renderer = render.Renderer.init(std.heap.c_allocator, .{
         .native_window_handle = @ptrCast(@constCast("#canvas")),
         .width = 640,
@@ -61,7 +61,7 @@ export fn ck_core_smoke_render_frame(out_name: [*]u8, out_name_cap: i32) i32 {
 /// contract, not a fixed number of extra calls. Packs the first
 /// read-back pixel's RGBA into the return value (8 bits each) so a
 /// caller can inspect the real bytes.
-export fn ck_core_smoke_read_texture() i32 {
+export fn goss_core_smoke_read_texture() i32 {
     var renderer = render.Renderer.init(std.heap.c_allocator, .{
         .native_window_handle = @ptrCast(@constCast("#canvas")),
         .width = 640,

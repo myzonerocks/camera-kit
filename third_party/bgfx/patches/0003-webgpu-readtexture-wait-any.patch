@@ -18,7 +18,7 @@
 -				}) );
 -
 -			while (!s_done)
-+			// camera-kit patch: AllowProcessEvents + a bare
++			// gosslens patch: AllowProcessEvents + a bare
 +			// wgpuInstanceProcessEvents pump never resolves under
 +			// Emscripten's emdawnwebgpu port - the real browser
 +			// GPUBuffer.mapAsync() promise needs an actual yield back
@@ -32,7 +32,7 @@
  			{
 -				wgpuInstanceProcessEvents(m_instance);
 -			}
-+				.future = WGPU_CHECK(wgpuBufferMapAsync(
++				.future = wgpuBufferMapAsync(
 +					  readTextureBuffer
 +					, WGPUMapMode_Read
 +					, 0
@@ -43,7 +43,7 @@
 +						.callback    = readTextureCb,
 +						.userdata1   = &readTexture,
 +						.userdata2   = &s_done,
-+					}) ),
++					}),
 +				.completed = false,
 +			};
 +			waitForFuture(fwi);

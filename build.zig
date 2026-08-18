@@ -77,12 +77,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const camerakit_lib = b.addLibrary(.{
-        .name = "camerakit",
+    const gosslens_lib = b.addLibrary(.{
+        .name = "gosslens",
         .linkage = .static,
         .root_module = abi_module,
     });
-    b.installArtifact(camerakit_lib);
+    b.installArtifact(gosslens_lib);
 
     const abi_dump_module = b.createModule(.{
         .root_source_file = b.path("tools/abi_dump.zig"),
@@ -90,9 +90,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "abi", .module = abi_module }},
     });
-    const camerakit_header_text = b.build_root.handle.readFileAlloc(b.graph.io, "include/camerakit.h", b.allocator, .limited(1 << 20)) catch @panic("include/camerakit.h unreadable");
+    const gosslens_header_text = b.build_root.handle.readFileAlloc(b.graph.io, "include/gosslens.h", b.allocator, .limited(1 << 20)) catch @panic("include/gosslens.h unreadable");
     const abi_dump_options = b.addOptions();
-    abi_dump_options.addOption([]const u8, "camerakit_header", camerakit_header_text);
+    abi_dump_options.addOption([]const u8, "gosslens_header", gosslens_header_text);
     abi_dump_module.addOptions("build_options", abi_dump_options);
     const abi_dump_exe = b.addExecutable(.{
         .name = "abi_dump",
@@ -110,7 +110,7 @@ pub fn build(b: *std.Build) void {
     // A bare header is not a translation unit, so the compile check goes
     // through a generated file that includes it. C99 proves the header stays
     // C99-clean; C11 activates the static asserts on the frozen layouts.
-    const header_tu = b.addWriteFiles().add("camerakit_header_check.c", "#include <camerakit.h>\n");
+    const header_tu = b.addWriteFiles().add("gosslens_header_check.c", "#include <gosslens.h>\n");
     for ([_][]const u8{ "c99", "c11" }) |std_name| {
         const header_module = b.createModule(.{ .target = target, .optimize = optimize });
         header_module.addCSourceFile(.{
@@ -119,7 +119,7 @@ pub fn build(b: *std.Build) void {
         });
         header_module.addIncludePath(b.path("include"));
         const header_object = b.addObject(.{
-            .name = b.fmt("camerakit_header_{s}", .{std_name}),
+            .name = b.fmt("gosslens_header_{s}", .{std_name}),
             .root_module = header_module,
         });
         abi_step.dependOn(&header_object.step);
@@ -332,7 +332,7 @@ pub fn build(b: *std.Build) void {
     const gltf_module: ?*std.Build.Module = if (have_cgltf)
         gltfModule(b, target, optimize, math_module)
     else blk: {
-        const missing = b.addFail("camera-kit: .vendor/cgltf missing, run zig build vendor-sync");
+        const missing = b.addFail("gosslens: .vendor/cgltf missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
         break :blk null;
     };
@@ -350,7 +350,7 @@ pub fn build(b: *std.Build) void {
         break :blk true;
     };
     const host_asset: ?AssetModules = if (have_lodepng) realAssetModules(b, target, optimize, gltf_module) else blk: {
-        const missing = b.addFail("camera-kit: .vendor/bimg missing, run zig build vendor-sync");
+        const missing = b.addFail("gosslens: .vendor/bimg missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
         break :blk null;
     };
@@ -528,7 +528,7 @@ pub fn build(b: *std.Build) void {
         // too, wired in below as tracking_module's "transpose_conv_bias"
         // import.
         // The export layer instance under real tracking: the harness drives
-        // the same ck_ surface a shell uses, worker thread and all.
+        // the same goss_ surface a shell uses, worker thread and all.
         const tracking_real_module = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/tracking.zig"),
             .target = target,
@@ -687,7 +687,7 @@ pub fn build(b: *std.Build) void {
         exports_wasi.linkLibrary(buildFlatbuffersLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildFft2dLib(b, wasi_target, wasi_optimize, null));
         exports_wasi.linkLibrary(buildPthreadpoolLib(b, wasi_target, wasi_optimize, null));
-        const tracking_wasm = b.addExecutable(.{ .name = "camerakit_tracking", .root_module = exports_wasi });
+        const tracking_wasm = b.addExecutable(.{ .name = "gosslens_tracking", .root_module = exports_wasi });
         tracking_wasm.entry = .disabled;
         tracking_wasm.rdynamic = true;
         tracking_wasm_step.dependOn(&b.addInstallArtifact(tracking_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
@@ -714,13 +714,13 @@ pub fn build(b: *std.Build) void {
     addWasmEmscriptenCoreSmokeStep(b, wasm_emscripten_core_smoke_step, shaderc_exe, false);
     // The decisive end-to-end WGSL/WebGPU proof target: same render.zig,
     // same shader toolchain, bgfx compiled with WebGPU + Asyncify - real
-    // composited draw through ck_core_smoke_render_frame, not just init.
+    // composited draw through goss_core_smoke_render_frame, not just init.
     const wasm_emscripten_core_smoke_webgpu_step = b.step("wasm-emscripten-core-smoke-webgpu", "Compile+link render.zig for wasm32-emscripten against real bgfx WebGPU, render one real composited frame (needs emscripten vendors synced)");
     addWasmEmscriptenCoreSmokeStep(b, wasm_emscripten_core_smoke_webgpu_step, shaderc_exe, true);
 
-    // The web core: the same export layer compiled to wasm32 with every ck_
+    // The web core: the same export layer compiled to wasm32 with every goss_
     // symbol visible to the embedder.
-    const wasm_step = b.step("wasm", "Build the camerakit core for the web");
+    const wasm_step = b.step("wasm", "Build the gosslens core for the web");
     {
         const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
         const math_wasm = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = wasm_target, .optimize = .ReleaseSmall });
@@ -787,10 +787,10 @@ pub fn build(b: *std.Build) void {
         const gltf_stub_wasm = gltfStubModule(b, wasm_target, .ReleaseSmall, math_wasm);
         abi_wasm.addImport("asset", assetStubModule(b, wasm_target, .ReleaseSmall, image_wasm, gltf_stub_wasm));
         abi_wasm.addImport("gltf", gltf_stub_wasm);
-        const camerakit_wasm = b.addExecutable(.{ .name = "camerakit", .root_module = abi_wasm });
-        camerakit_wasm.entry = .disabled;
-        camerakit_wasm.rdynamic = true;
-        wasm_step.dependOn(&b.addInstallArtifact(camerakit_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
+        const gosslens_wasm = b.addExecutable(.{ .name = "gosslens", .root_module = abi_wasm });
+        gosslens_wasm.entry = .disabled;
+        gosslens_wasm.rdynamic = true;
+        wasm_step.dependOn(&b.addInstallArtifact(gosslens_wasm, .{ .dest_dir = .{ .override = .{ .custom = "wasm" } } }).step);
     }
 
     // The render-capable half of the web core, real bgfx underneath
@@ -808,9 +808,9 @@ pub fn build(b: *std.Build) void {
     // below is unchanged; wasm-emscripten-webgpu is the new artifact
     // the TS shell fetches only after confirming a
     // real WebGPU adapter.
-    const wasm_emscripten_step = b.step("wasm-emscripten", "Build the camerakit core for the web with a real bgfx renderer (needs emscripten vendors synced)");
+    const wasm_emscripten_step = b.step("wasm-emscripten", "Build the gosslens core for the web with a real bgfx renderer (needs emscripten vendors synced)");
     addWasmEmscriptenStep(b, wasm_emscripten_step, shaderc_exe, false);
-    const wasm_emscripten_webgpu_step = b.step("wasm-emscripten-webgpu", "Build the camerakit core for the web with bgfx's real WebGPU renderer + Asyncify (needs emscripten vendors synced)");
+    const wasm_emscripten_webgpu_step = b.step("wasm-emscripten-webgpu", "Build the gosslens core for the web with bgfx's real WebGPU renderer + Asyncify (needs emscripten vendors synced)");
     addWasmEmscriptenStep(b, wasm_emscripten_webgpu_step, shaderc_exe, true);
 
     const harness_step = b.step("harness", "Build and run the desktop harness (draws through the graph on screen)");
@@ -1027,7 +1027,7 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run_conformance.addArgs(args);
         conformance_step.dependOn(&run_conformance.step);
     } else {
-        const missing = b.addFail("camera-kit: harness needs macos and synced render vendors, run zig build vendor-sync");
+        const missing = b.addFail("gosslens: harness needs macos and synced render vendors, run zig build vendor-sync");
         harness_step.dependOn(&missing.step);
         conformance_step.dependOn(&missing.step);
     }
@@ -1050,13 +1050,13 @@ fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8) vo
 }
 
 fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
-    const android_step = b.step("android", "Build libcamerakit.so for android arm64-v8a");
+    const android_step = b.step("android", "Build libgosslens.so for android arm64-v8a");
     const shaderc_tool = shaderc_exe orelse {
-        android_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        android_step.dependOn(&b.addFail("gosslens: shader compiler unavailable, run zig build vendor-sync").step);
         return;
     };
     const sysroot = ndkSysroot(b) orelse {
-        const missing = b.addFail("camera-kit: ndk 29.0.14206865 not installed under ~/Library/Android/sdk/ndk");
+        const missing = b.addFail("gosslens: ndk 29.0.14206865 not installed under ~/Library/Android/sdk/ndk");
         android_step.dependOn(&missing.step);
         return;
     };
@@ -1252,7 +1252,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
 
     const bgfx_android = buildBgfxAndroid(b, android_target, optimize, sysroot);
     bgfx_android.setLibCFile(libc_txt);
-    const so = b.addLibrary(.{ .name = "camerakit", .linkage = .dynamic, .root_module = jni_module });
+    const so = b.addLibrary(.{ .name = "gosslens", .linkage = .dynamic, .root_module = jni_module });
     so.setLibCFile(libc_txt);
     jni_module.linkLibrary(bgfx_android);
     for ([_][]const u8{ "android", "log", "EGL", "GLESv3", "vulkan" }) |lib| {
@@ -2506,7 +2506,7 @@ fn listReferenceLenses(b: *std.Build) [][]const u8 {
 // The pinned toolchain is the only toolchain: .zigversion is the single place
 // the version is written, and a mismatching compiler fails closed here. The
 // shadow lane (weekly build against Zig master) is the one sanctioned bypass,
-// via CK_ALLOW_ZIG_MISMATCH=1.
+// via GOSS_ALLOW_ZIG_MISMATCH=1.
 fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
     addIosStepImpl(b, optimize, shaderc_exe, flatc_exe, .{
         .abi = .none,
@@ -2515,7 +2515,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
         .xcrun_sdk = "iphoneos",
         .install_dir = "ios",
         .step_name = "ios",
-        .step_description = "Build camerakit and bgfx static libraries for iOS devices",
+        .step_description = "Build gosslens and bgfx static libraries for iOS devices",
     });
 }
 
@@ -2536,7 +2536,7 @@ fn addIosSimulatorStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shader
         .xcrun_sdk = "iphonesimulator",
         .install_dir = "ios-simulator",
         .step_name = "ios-simulator",
-        .step_description = "Build camerakit and bgfx static libraries for the iOS Simulator",
+        .step_description = "Build gosslens and bgfx static libraries for the iOS Simulator",
     });
 }
 
@@ -2553,14 +2553,14 @@ const IosStepConfig = struct {
 fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile, config: IosStepConfig) void {
     const ios_step = b.step(config.step_name, config.step_description);
     const shaderc_tool = shaderc_exe orelse {
-        ios_step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        ios_step.dependOn(&b.addFail("gosslens: shader compiler unavailable, run zig build vendor-sync").step);
         return;
     };
     apple_sdk = b.option([]const u8, config.sdk_option_name, b.fmt("Path to the {s} SDK", .{config.sdk_name})) orelse
         (if (config.abi == .none) b.sysroot else null);
     if (apple_sdk == null) {
         const missing = b.addFail(b.fmt(
-            "camera-kit: run zig build {s} -D{s}=\"$(xcrun --sdk {s} --show-sdk-path)\"",
+            "gosslens: run zig build {s} -D{s}=\"$(xcrun --sdk {s} --show-sdk-path)\"",
             .{ config.step_name, config.sdk_option_name, config.xcrun_sdk },
         ));
         ios_step.dependOn(&missing.step);
@@ -2608,7 +2608,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         // Zig's own panic backtrace symbolizer needs a dyld introspection
         // symbol iphoneos's SDK stub never exports (device dyld has it,
         // the link-time TBD doesn't); stripped, the library never reaches
-        // for it. The ABI reports failures through ck_status, not panics.
+        // for it. The ABI reports failures through goss_status, not panics.
         .strip = true,
         .imports = &.{
             .{ .name = "graph", .module = graph_ios },
@@ -2757,14 +2757,14 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("image", ios_asset.image);
     abi_ios.addImport("asset", ios_asset.asset);
     if (gltf_ios) |gm| abi_ios.addImport("gltf", gm);
-    const camerakit_ios = b.addLibrary(.{
-        .name = "camerakit",
+    const gosslens_ios = b.addLibrary(.{
+        .name = "gosslens",
         .linkage = .static,
         .root_module = abi_ios,
     });
     const bgfx_ios = buildBgfxLib(b, ios_target, optimize);
     var device_libs: std.ArrayList(*std.Build.Step.Compile) = .empty;
-    device_libs.appendSlice(b.allocator, &.{ camerakit_ios, bgfx_ios }) catch @panic("oom");
+    device_libs.appendSlice(b.allocator, &.{ gosslens_ios, bgfx_ios }) catch @panic("oom");
     device_libs.appendSlice(b.allocator, inference_libs.items) catch @panic("oom");
     // Apple's linker requires 8-byte archive member alignment; the system
     // ranlib rewrites zig's archives into the accepted layout.
@@ -2783,7 +2783,7 @@ fn addShadercTool(b: *std.Build, optimize: std.builtin.OptimizeMode) ?*std.Build
     _ = optimize;
     const step = b.step("shaderc", "Build the shader compiler from the vendored bgfx tree");
     b.build_root.handle.access(b.graph.io, ".vendor/bgfx/tools/shaderc/shaderc.cpp", .{}) catch {
-        step.dependOn(&b.addFail("camera-kit: .vendor/bgfx missing, run zig build vendor-sync").step);
+        step.dependOn(&b.addFail("gosslens: .vendor/bgfx missing, run zig build vendor-sync").step);
         return null;
     };
     const target = b.graph.host;
@@ -3087,11 +3087,11 @@ fn addBgfxWasmObjects(b: *std.Build, em: EmToolchain, extra_sources: []const []c
 fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*std.Build.Step.Compile, webgpu: bool) void {
     const em = emscriptenToolchain(b);
     if (em == null) {
-        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        step.dependOn(&b.addFail("gosslens: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
         return;
     }
     if (shaderc_exe == null) {
-        step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        step.dependOn(&b.addFail("gosslens: shader compiler unavailable, run zig build vendor-sync").step);
         return;
     }
     const em_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .emscripten });
@@ -3173,11 +3173,11 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("asset", assetStubModule(b, em_target, .ReleaseSmall, image_em, gltf_stub_em));
     abi_em.addImport("gltf", gltf_stub_em);
 
-    const camerakit_em_obj = b.addObject(.{ .name = "camerakit_web", .root_module = abi_em });
+    const gosslens_em_obj = b.addObject(.{ .name = "gosslens_web", .root_module = abi_em });
     const bgfx_objects = addBgfxWasmObjects(b, em.?, &.{}, webgpu);
     const link = b.addSystemCommand(&.{em.?.em_plus_plus});
     setEmEnv(link, em.?);
-    link.addFileArg(camerakit_em_obj.getEmittedBin());
+    link.addFileArg(gosslens_em_obj.getEmittedBin());
     for (bgfx_objects.items) |obj| link.addFileArg(obj);
     if (webgpu) {
         // emdawnwebgpu is this pinned Emscripten's WebGPU port
@@ -3193,7 +3193,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // 256MB up front. 64MB (comfortably past what session/
         // engine creation and a frame or two of textures need)
         // was enough until the ts shell started submitting real
-        // RGBA frames through ck_session_submit_frame_rgba_copy
+        // RGBA frames through goss_session_submit_frame_rgba_copy
         // - a single still test photo at 2400x3000 is 28.8MB by
         // itself, on top of live 1280x720 camera frames, LUT/
         // makeup textures, and bgfx's own state. Raised as a
@@ -3204,19 +3204,19 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // is close enough to the old budget to be worth the
         // headroom.
         "-sINITIAL_MEMORY=268435456",
-        // Every ck_* entry point is a real call site the TS
+        // Every goss_* entry point is a real call site the TS
         // shell reaches dynamically, so EXPORT_ALL keeps them all
         // reachable rather than hand-listing EXPORTED_FUNCTIONS.
-        // LINKABLE is also required, or every ck_* export comes
+        // LINKABLE is also required, or every goss_* export comes
         // back undefined - deprecated upstream but still needed as
         // of this emscripten pin.
         "-sEXPORT_ALL=1",
         "-sLINKABLE=1",
         "-sMODULARIZE=1",
-        "-sEXPORT_NAME=CameraKitWebModule",
+        "-sEXPORT_NAME=GosslensWebModule",
         "-sEXPORTED_RUNTIME_METHODS=ccall,cwrap,stringToNewUTF8,UTF8ToString,getValue,setValue",
-        // A real ES module (import CameraKitWebModule from
-        // "./camerakit_web.js") rather than a plain-global
+        // A real ES module (import GosslensWebModule from
+        // "./gosslens_web.js") rather than a plain-global
         // factory function a <script> tag would have to expose -
         // the ts shell's whole build (bun, ESM throughout)
         // already assumes every dependency is import-able.
@@ -3224,7 +3224,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         "-sUSE_ES6_IMPORT_META=1",
     });
     link.addArg("-o");
-    const js_out = link.addOutputFileArg("camerakit_web.js");
+    const js_out = link.addOutputFileArg("gosslens_web.js");
 
     const install = b.addInstallDirectory(.{
         .source_dir = js_out.dirname(),
@@ -3238,11 +3238,11 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     // always rooted at the install prefix), so this step's own build
     // output is the demo's actual input, keeping it from silently
     // testing a stale binary a manual `cp` forgot to re-run.
-    const wasm_out = js_out.dirname().path(b, "camerakit_web.wasm");
+    const wasm_out = js_out.dirname().path(b, "gosslens_web.wasm");
     const demo_subdir = if (webgpu) "shells/ts/demo/webgpu/" else "shells/ts/demo/";
     const demo_copy = b.addUpdateSourceFiles();
-    demo_copy.addCopyFileToSource(js_out, b.fmt("{s}camerakit_web.js", .{demo_subdir}));
-    demo_copy.addCopyFileToSource(wasm_out, b.fmt("{s}camerakit_web.wasm", .{demo_subdir}));
+    demo_copy.addCopyFileToSource(js_out, b.fmt("{s}gosslens_web.js", .{demo_subdir}));
+    demo_copy.addCopyFileToSource(wasm_out, b.fmt("{s}gosslens_web.wasm", .{demo_subdir}));
     step.dependOn(&demo_copy.step);
 }
 
@@ -3252,7 +3252,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
 // break the build.
 fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
     const em = emscriptenToolchain(b) orelse {
-        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        step.dependOn(&b.addFail("gosslens: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
         return;
     };
     const objects = addBgfxWasmObjects(b, em, &.{"adapters/bgfx/wasm_bgfx_smoke_driver.cpp"}, false);
@@ -3282,7 +3282,7 @@ fn addWasmBgfxSmokeStep(b: *std.Build, step: *std.Build.Step) void {
 // compile machinery.
 fn addWasmWebgpuSmokeStep(b: *std.Build, step: *std.Build.Step) void {
     const em = emscriptenToolchain(b) orelse {
-        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        step.dependOn(&b.addFail("gosslens: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
         return;
     };
     const objects = addBgfxWasmObjects(b, em, &.{"adapters/bgfx/wasm_webgpu_smoke_driver.cpp"}, true);
@@ -3311,11 +3311,11 @@ fn addWasmWebgpuSmokeStep(b: *std.Build, step: *std.Build.Step) void {
 // into one wasm module by em++ alone.
 fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*std.Build.Step.Compile, webgpu: bool) void {
     const em = emscriptenToolchain(b) orelse {
-        step.dependOn(&b.addFail("camera-kit: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
+        step.dependOn(&b.addFail("gosslens: emscripten vendors not synced; run: zig build vendor-sync -- --only emscripten && zig build vendor-sync -- --only emscripten-python").step);
         return;
     };
     const shaderc_tool = shaderc_exe orelse {
-        step.dependOn(&b.addFail("camera-kit: shader compiler unavailable, run zig build vendor-sync").step);
+        step.dependOn(&b.addFail("gosslens: shader compiler unavailable, run zig build vendor-sync").step);
         return;
     };
 
@@ -3489,12 +3489,12 @@ fn addCxxDir(b: *std.Build, module: *std.Build.Module, dir: []const u8, flags: [
 
 fn enforcePinnedZig(b: *std.Build) void {
     const raw = b.build_root.handle.readFileAlloc(b.graph.io, ".zigversion", b.allocator, .limited(128)) catch |err|
-        std.process.fatal("camera-kit: cannot read .zigversion: {t}", .{err});
+        std.process.fatal("gosslens: cannot read .zigversion: {t}", .{err});
     const pinned = std.mem.trim(u8, raw, " \t\r\n");
     if (std.mem.eql(u8, pinned, builtin.zig_version_string)) return;
-    if (b.graph.environ_map.get("CK_ALLOW_ZIG_MISMATCH") != null) {
-        std.debug.print("camera-kit: shadow lane: building with Zig {s} against pin {s}\n", .{ builtin.zig_version_string, pinned });
+    if (b.graph.environ_map.get("GOSS_ALLOW_ZIG_MISMATCH") != null) {
+        std.debug.print("gosslens: shadow lane: building with Zig {s} against pin {s}\n", .{ builtin.zig_version_string, pinned });
         return;
     }
-    std.process.fatal("camera-kit: expected Zig {s}, found {s}, run tools/toolchain-sync", .{ pinned, builtin.zig_version_string });
+    std.process.fatal("gosslens: expected Zig {s}, found {s}, run tools/toolchain-sync", .{ pinned, builtin.zig_version_string });
 }

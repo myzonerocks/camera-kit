@@ -1,10 +1,10 @@
 # The goss lens format (GLF)
 
 GLF is the bundle format for a lens: a declarative package of parameters,
-triggers, shaders, and assets that the camera kit's lens runtime splices
+triggers, shaders, and assets that the engine's lens runtime splices
 into a session's frame graph. This document is the format's spec, versioned
-independently of the kit itself. The kit's lens runtime is one conforming
-implementation; the validator (`lenses/validator`) is the reference
+independently of the engine itself. The engine's lens runtime is one
+conforming implementation; the validator (`lenses/validator`) is the reference
 implementation of validation. Anything a conforming runtime does with a
 `.glens` bundle, this document defines — if the runtime's behavior and this
 document disagree, this document is right and the runtime has a bug.
@@ -66,7 +66,7 @@ Top level, all fields required unless marked optional:
   "id": "com.example.mylens",      // reverse-DNS style, stable identity
   "version": "1.2.0",              // semver, the lens's own version
   "display_name": "My Lens",
-  "engine_compat": ">=0.5 <1.0",   // range against the kit's ck_abi_version
+  "engine_compat": ">=0.5 <1.0",   // range against the engine's goss_abi_version
   "capabilities": ["face"],        // see 3
   "parameters": [ /* see 4 */ ],
   "nodes": [ /* see 5 */ ],
@@ -75,7 +75,7 @@ Top level, all fields required unless marked optional:
 ```
 
 `engine_compat` is a range expression over the ABI's `major.minor`
-(`ck_abi_version`), checked at load time against the running engine; a
+(`goss_abi_version`), checked at load time against the running engine; a
 bundle whose range excludes the running engine fails validation closed
 before any node, shader, or asset is touched.
 
@@ -131,7 +131,7 @@ other nodes in the same list by their `id`:
 }
 ```
 
-The set of known `type` values is closed and versioned with the *kit*, not
+The set of known `type` values is closed and versioned with the *engine*, not
 the format — GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
 passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing).
@@ -201,21 +201,21 @@ Every file in `shaders/` is a fragment shader for a full-screen pass over
 the current frame — a lens does not author its own vertex stage. The
 runtime supplies one fixed vertex contract, `lenses/shaders/varying.def.sc`,
 shared by every lens shader pass: `a_position`/`a_texcoord0` in,
-`v_texcoord0` out, the same shape as the kit's own preview passes. A lens
+`v_texcoord0` out, the same shape as the engine's own preview passes. A lens
 fragment shader is GLSL source written to that contract (bgfx's shader
 dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`).
 
-Compilation happens at package time, not on the device: the kit's pinned
+Compilation happens at package time, not on the device: the engine's pinned
 shader toolchain runs wherever a bundle is built or validated, producing
 compiled bytecode for every platform profile a conforming runtime ships
-(Metal / SPIR-V / ESSL), under the same resource limits the kit's own
+(Metal / SPIR-V / ESSL), under the same resource limits the engine's own
 shaders compile under (Part 1.4/14 of the engineering history — bounded
 compile time, no toolchain escape hatches, compiler diagnostics surfaced
 as validation errors naming the source file and line). A shader that
 fails to compile fails the bundle's validation; there is no partial
 lens. The runtime never compiles GLSL — it loads whichever precompiled
 profile matches its own active graphics backend and hands the bytes
-straight to its shader loader, the same call the kit's own built-in
+straight to its shader loader, the same call the engine's own built-in
 passes already go through. This is deliberate, not a shortcut: nothing
 else in the engine compiles a shader on the device, a mobile app has no
 business carrying a C++ shader compiler toolchain just to run
@@ -223,10 +223,10 @@ user-authored effects, and a bundle that fails to compile is caught at
 package time by the same validator a lens author already runs, not
 discovered by an end user's device.
 
-glTF/GLB assets bind through the kit's existing cgltf adapter — same
+glTF/GLB assets bind through the engine's existing cgltf adapter — same
 allocator-bridged parse, same refusal of external file references (a glTF
 asset inside a bundle may not reference textures or buffers outside that
-bundle). Textures and LUTs are plain image files decoded through the kit's
+bundle). Textures and LUTs are plain image files decoded through the engine's
 existing image decode path, bounded by the per-file size limit in 1.1.
 
 ## 8. Validation and the error model

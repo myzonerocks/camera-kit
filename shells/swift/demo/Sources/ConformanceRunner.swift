@@ -7,15 +7,15 @@ import os
 /// reference lens, the same corpus frame, rendered twice through the
 /// real ABI, byte-identical screenshots) but driven from a real Swift
 /// shell instead of a desktop GLFW window - the same real
-/// ck_engine_init_renderer/ck_session_activate_lens_from_directory/
-/// ck_engine_render_frame path the live demo already runs, just fed a
+/// goss_engine_init_renderer/goss_session_activate_lens_from_directory/
+/// goss_engine_render_frame path the live demo already runs, just fed a
 /// fixed frame instead of the camera. Reached only behind the
-/// -CKConformance launch argument; a normal launch never touches this
+/// -GossConformance launch argument; a normal launch never touches this
 /// file. Simulator output is a dev signal, not a substitute for a run
 /// on real hardware.
 ///
 /// Proves shader-tint, not beauty-baseline: GPUPixelContext's EAGLContext
-/// creation fails cleanly (ck_session_enable_beauty returns unsupported,
+/// creation fails cleanly (goss_session_enable_beauty returns unsupported,
 /// nothing crashes) on the iOS Simulator - a real platform limitation,
 /// not a bug here. Recent iOS Simulator runtimes on Apple Silicon do not
 /// back a real OpenGL ES driver the way a physical device does; gpupixel
@@ -27,7 +27,7 @@ import os
 /// devices/GLES only, left open here rather than chased further; a real
 /// device run is the next escalation, not a simulator workaround.
 enum ConformanceRunner {
-    private static let log = Logger(subsystem: "kit.camera.demo", category: "conformance")
+    private static let log = Logger(subsystem: "com.gosslens.demo", category: "conformance")
 
     // Plain stdout, not os.Logger: a driving script captures this over
     // simctl launch --console-pty, which streams the process's own
@@ -43,23 +43,23 @@ enum ConformanceRunner {
     static func run(metalLayer: CAMetalLayer, width: UInt32, height: UInt32) {
         defer { exit(0) }
         guard let corpus = loadCorpusNV12() else {
-            report("CKCONFORMANCE FAIL: corpus frame missing or undecodable")
+            report("GOSSCONFORMANCE FAIL: corpus frame missing or undecodable")
             return
         }
         let pathA = NSTemporaryDirectory() + "ckconformance-a"
         let pathB = NSTemporaryDirectory() + "ckconformance-b"
         guard let hashA = renderOnce(metalLayer: metalLayer, width: width, height: height, corpus: corpus, outPath: pathA) else {
-            report("CKCONFORMANCE FAIL: first render failed")
+            report("GOSSCONFORMANCE FAIL: first render failed")
             return
         }
         guard let hashB = renderOnce(metalLayer: metalLayer, width: width, height: height, corpus: corpus, outPath: pathB) else {
-            report("CKCONFORMANCE FAIL: second render failed")
+            report("GOSSCONFORMANCE FAIL: second render failed")
             return
         }
         if hashA == hashB {
-            report("CKCONFORMANCE PROOF shader-tint bit-stable sha256 \(hashA)")
+            report("GOSSCONFORMANCE PROOF shader-tint bit-stable sha256 \(hashA)")
         } else {
-            report("CKCONFORMANCE FAIL non-deterministic: \(hashA) vs \(hashB)")
+            report("GOSSCONFORMANCE FAIL non-deterministic: \(hashA) vs \(hashB)")
         }
     }
 
@@ -154,51 +154,51 @@ enum ConformanceRunner {
     /// that would make a second run trivially match the first.
     private static func renderOnce(metalLayer: CAMetalLayer, width: UInt32, height: UInt32, corpus: Nv12Corpus, outPath: String) -> String? {
         var engineOut: OpaquePointer?
-        guard ck_engine_create(nil, &engineOut) == CK_OK, let engine = engineOut else { return nil }
-        defer { ck_engine_destroy(engine) }
+        guard goss_engine_create(nil, &engineOut) == GOSS_OK, let engine = engineOut else { return nil }
+        defer { goss_engine_destroy(engine) }
 
-        var rendererDesc = ck_renderer_desc(
+        var rendererDesc = goss_renderer_desc(
             native_window_handle: Unmanaged.passUnretained(metalLayer).toOpaque(),
             width: width,
             height: height
         )
-        guard ck_engine_init_renderer(engine, &rendererDesc) == CK_OK else { return nil }
+        guard goss_engine_init_renderer(engine, &rendererDesc) == GOSS_OK else { return nil }
 
         var sessionOut: OpaquePointer?
-        guard ck_session_create(engine, nil, &sessionOut) == CK_OK, let session = sessionOut else { return nil }
-        defer { ck_session_destroy(session) }
+        guard goss_session_create(engine, nil, &sessionOut) == GOSS_OK, let session = sessionOut else { return nil }
+        defer { goss_session_destroy(session) }
 
         guard let lensManifestURL = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "shader-tint") else { return nil }
         let lensDir = Array(lensManifestURL.deletingLastPathComponent().path.utf8)
         let activated = lensDir.withUnsafeBufferPointer { buf in
-            ck_session_activate_lens_from_directory(session, buf.baseAddress, buf.count)
+            goss_session_activate_lens_from_directory(session, buf.baseAddress, buf.count)
         }
-        guard activated == CK_OK else { return nil }
+        guard activated == GOSS_OK else { return nil }
 
-        var frameDesc = ck_frame_desc(
+        var frameDesc = goss_frame_desc(
             width: corpus.width,
             height: corpus.height,
-            pixel_format: CK_PIXEL_NV12.rawValue,
-            color_standard: CK_COLOR_BT601.rawValue,
-            color_range: CK_COLOR_RANGE_FULL.rawValue,
+            pixel_format: GOSS_PIXEL_NV12.rawValue,
+            color_standard: GOSS_COLOR_BT601.rawValue,
+            color_range: GOSS_COLOR_RANGE_FULL.rawValue,
             flags: 0,
             timestamp_us: 1000
         )
         let uvStride = UInt32((corpus.width + 1) / 2) * 2
         let submitted = corpus.y.withUnsafeBufferPointer { yBuf in
             corpus.uv.withUnsafeBufferPointer { uvBuf in
-                ck_session_submit_frame_copy(session, &frameDesc, yBuf.baseAddress, corpus.width, uvBuf.baseAddress, uvStride)
+                goss_session_submit_frame_copy(session, &frameDesc, yBuf.baseAddress, corpus.width, uvBuf.baseAddress, uvStride)
             }
         }
-        guard submitted == CK_OK else { return nil }
+        guard submitted == GOSS_OK else { return nil }
 
-        for _ in 0 ..< 5 { _ = ck_engine_render_frame(engine, session) }
+        for _ in 0 ..< 5 { _ = goss_engine_render_frame(engine, session) }
         let pathBytes = Array(outPath.utf8)
         let requested = pathBytes.withUnsafeBufferPointer { buf in
-            ck_engine_request_screenshot(engine, buf.baseAddress, buf.count)
+            goss_engine_request_screenshot(engine, buf.baseAddress, buf.count)
         }
-        guard requested == CK_OK else { return nil }
-        for _ in 0 ..< 5 { _ = ck_engine_render_frame(engine, session) }
+        guard requested == GOSS_OK else { return nil }
+        for _ in 0 ..< 5 { _ = goss_engine_render_frame(engine, session) }
 
         guard let shot = try? Data(contentsOf: URL(fileURLWithPath: outPath + ".tga")) else { return nil }
         return SHA256.hash(data: shot).map { String(format: "%02x", $0) }.joined()

@@ -13,7 +13,7 @@ const chrome = Bun.spawn(
     "--use-fake-ui-for-media-stream",
     "--use-fake-device-for-media-stream",
     "--autoplay-policy=no-user-gesture-required",
-    `--user-data-dir=/tmp/camerakit-chrome-${Date.now()}`,
+    `--user-data-dir=/tmp/gosslens-chrome-${Date.now()}`,
     "about:blank",
   ],
   { stdout: "ignore", stderr: "ignore" },
@@ -64,7 +64,7 @@ for (let waited = 0; waited < 30_000; waited += 1000) {
     returnByValue: true,
   })) as { result?: { value?: string } };
   const title = result.result?.value ?? "";
-  if (title.includes("CKWEB preview active")) {
+  if (title.includes("GOSSWEB preview active")) {
     proof = title;
     break;
   }
@@ -101,7 +101,7 @@ for (let waited = 0; waited < 30_000; waited += 500) {
   const after = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
   const delta = before !== undefined && after !== undefined ? Math.abs(after - before) : -1;
   if (before !== undefined && after !== undefined && delta > 0) {
-    whiten = `CKWEB whiten: frame sum ${before} -> ${after}, delta ${delta}`;
+    whiten = `GOSSWEB whiten: frame sum ${before} -> ${after}, delta ${delta}`;
   } else {
     whiten = `FAIL whiten: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
   }
@@ -129,7 +129,7 @@ let smooth = "";
   const after = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
   const delta = before !== undefined && after !== undefined ? Math.abs(after - before) : -1;
   if (before !== undefined && after !== undefined && delta > 0) {
-    smooth = `CKWEB smooth: frame sum ${before} -> ${after}, delta ${delta}`;
+    smooth = `GOSSWEB smooth: frame sum ${before} -> ${after}, delta ${delta}`;
   } else {
     smooth = `FAIL smooth: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
   }
@@ -162,7 +162,7 @@ let reshape = "";
   const after = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
   const delta = before !== undefined && after !== undefined ? Math.abs(after - before) : -1;
   if (before !== undefined && after !== undefined && delta > 0) {
-    reshape = `CKWEB reshape: frame sum ${before} -> ${after}, delta ${delta}`;
+    reshape = `GOSSWEB reshape: frame sum ${before} -> ${after}, delta ${delta}`;
   } else {
     reshape = `FAIL reshape: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
   }
@@ -197,7 +197,7 @@ let makeup = "";
   const after = (await evaluate("window.readFrameSum()")).result?.value as number | undefined;
   const delta = before !== undefined && after !== undefined ? Math.abs(after - before) : -1;
   if (before !== undefined && after !== undefined && delta > 0) {
-    makeup = `CKWEB makeup: frame sum ${before} -> ${after}, delta ${delta}`;
+    makeup = `GOSSWEB makeup: frame sum ${before} -> ${after}, delta ${delta}`;
   } else {
     makeup = `FAIL makeup: before ${JSON.stringify(before)} after ${JSON.stringify(after)}`;
   }
@@ -207,7 +207,7 @@ let makeup = "";
 }
 
 // Lens activation is the real conformance bar: a lens is a manifest, not a
-// param setter, so this proves the bytes-based ck_session_activate_lens
+// param setter, so this proves the bytes-based goss_session_activate_lens
 // path end to end (parse, node graph, default params) and checks the same
 // harness/conformance.zig bar the native engine already holds itself to -
 // the same fixed input rendered twice after activation must be
@@ -237,7 +237,7 @@ let lens = "";
   const delta = before !== undefined && after1 !== undefined ? Math.abs(after1 - before) : -1;
   const deterministic = after1 !== undefined && after1 === after2;
   if (activateOutcome === "ok" && delta > 0 && deterministic) {
-    lens = `CKWEB lens: activate ${activateOutcome}, frame sum ${before} -> ${after1}, delta ${delta}, deterministic ${deterministic}`;
+    lens = `GOSSWEB lens: activate ${activateOutcome}, frame sum ${before} -> ${after1}, delta ${delta}, deterministic ${deterministic}`;
   } else {
     lens = `FAIL lens: activate ${activateOutcome}, before ${JSON.stringify(before)} after1 ${JSON.stringify(after1)} after2 ${JSON.stringify(after2)} deterministic ${deterministic}`;
   }
@@ -275,7 +275,7 @@ for (let waited = 0; waited < 300_000; waited += 1000) {
       faceResult.landmarkCount === faceResult.expected &&
       controlResult.landmarkCount === 0
     ) {
-      tracking = `CKWEB tracking: portrait presence ${faceResult.presence.toFixed(3)} with ${faceResult.landmarkCount} landmarks, control frame ${controlResult.landmarkCount}`;
+      tracking = `GOSSWEB tracking: portrait presence ${faceResult.presence.toFixed(3)} with ${faceResult.landmarkCount} landmarks, control frame ${controlResult.landmarkCount}`;
     } else {
       tracking = `FAIL tracking: face ${face.result?.value} control ${control.result?.value}`;
     }

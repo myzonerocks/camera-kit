@@ -253,7 +253,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "camera-kit harness", null, null) orelse return error.WindowCreate;
+    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "gosslens harness", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
 
     var init: c.bgfx_init_t = undefined;
@@ -337,7 +337,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     // chain every frame: the same quad scene captured into an offscreen
     // target, then a full-screen pass reading that target through this
     // program and writing the swap chain - the same sequence
-    // ck_engine_render_frame drives for an active lens with shader
+    // goss_engine_render_frame drives for an active lens with shader
     // passes, proven here against a real Metal-backed renderer the
     // headless tracking harness cannot provide.
     const shader_tag = try render.Renderer.currentShaderProfileTag();
@@ -355,7 +355,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     // A lut.pass node's asset loader hands the render thread decoded
     // RGBA bytes (adapters/asset, off the calling thread) and this is
     // the call that turns them into the real GPU texture
-    // ck_engine_render_frame's own poll makes: reusing the checker
+    // goss_engine_render_frame's own poll makes: reusing the checker
     // image already decoded above rather than a second asset, since
     // the point here is proving createStaticTexture itself, not the
     // decode path adapters/image already has its own tests for.

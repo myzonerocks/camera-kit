@@ -47,7 +47,7 @@ class TextureTapSink : public gpupixel::Sink {
 
 // GL_TEXTURE_RECTANGLE has no equivalent in GLES, so the constant only
 // exists to compile against on macOS - the only platform whose sampler_
-// kind (see ck_beauty_process_external_texture) can ever select it.
+// kind (see goss_beauty_process_external_texture) can ever select it.
 #if defined(GPUPIXEL_MAC)
 constexpr uint32_t kRectangleTextureTarget = GL_TEXTURE_RECTANGLE_ARB;
 #else
@@ -204,7 +204,7 @@ void ApplyLandmarks(BeautyContext* context, const float* landmarks106) {
 
 extern "C" {
 
-void* ck_beauty_create(const char* resource_path) {
+void* goss_beauty_create(const char* resource_path) {
   if (resource_path != nullptr) {
     gpupixel::GPUPixel::SetResourcePath(resource_path);
   }
@@ -240,15 +240,15 @@ void* ck_beauty_create(const char* resource_path) {
   return context;
 }
 
-void ck_beauty_destroy(void* handle) {
+void goss_beauty_destroy(void* handle) {
   delete static_cast<BeautyContext*>(handle);
 }
 
 /// The beauty chain's own GL output texture (a normal GL_TEXTURE_2D
-/// gpupixel owns), valid after ck_beauty_process has run at least once.
+/// gpupixel owns), valid after goss_beauty_process has run at least once.
 /// The GPU compositing path blits from this rather than reading the CPU
 /// buffer back; ownership stays with gpupixel, never freed by the caller.
-uint32_t ck_beauty_output_texture(void* handle) {
+uint32_t goss_beauty_output_texture(void* handle) {
   auto* context = static_cast<BeautyContext*>(handle);
   if (context == nullptr) return 0;
   return context->texture_tap->captured_texture;
@@ -257,7 +257,7 @@ uint32_t ck_beauty_output_texture(void* handle) {
 /// Parameters are zero to one; zero leaves the frame untouched for that
 /// effect. Identifier order: smooth, whiten, thin face, big eye, lipstick,
 /// blush.
-void ck_beauty_set(void* handle, int32_t effect, float value) {
+void goss_beauty_set(void* handle, int32_t effect, float value) {
   auto* context = static_cast<BeautyContext*>(handle);
   if (context == nullptr) {
     return;
@@ -289,7 +289,7 @@ void ck_beauty_set(void* handle, int32_t effect, float value) {
 /// Landmarks are the engine's contour layout, x then y per point
 /// normalized to the frame, or null while no face holds; the landmark
 /// driven effects pass through untouched without them.
-int32_t ck_beauty_process(void* handle,
+int32_t goss_beauty_process(void* handle,
                           const uint8_t* rgba_in,
                           int32_t width,
                           int32_t height,
@@ -314,14 +314,14 @@ int32_t ck_beauty_process(void* handle,
   return 0;
 }
 
-/// The GPU-input mirror of ck_beauty_process: gl_texture is already
+/// The GPU-input mirror of goss_beauty_process: gl_texture is already
 /// live on whatever GL context is current on the calling thread (the
 /// platform interop layer guarantees that before calling this, the same
-/// way it guarantees a current context for ck_beauty_interop_composite).
+/// way it guarantees a current context for goss_beauty_interop_composite).
 /// sampler_kind: 0 = GL_TEXTURE_2D, 1 = GL_TEXTURE_RECTANGLE (macOS
-/// only). Pulls the result back out through ck_beauty_output_texture,
+/// only). Pulls the result back out through goss_beauty_output_texture,
 /// same as the CPU path's own chain.
-int32_t ck_beauty_process_external_texture(void* handle,
+int32_t goss_beauty_process_external_texture(void* handle,
                                            uint32_t gl_texture,
                                            int32_t sampler_kind,
                                            int32_t width,
@@ -344,33 +344,33 @@ int32_t ck_beauty_process_external_texture(void* handle,
 // linked at all) it stays an explicit refusal, rather than an undefined
 // symbol at link time.
 #if !defined(__APPLE__) && !defined(__ANDROID__)
-void* ck_beauty_interop_create() {
+void* goss_beauty_interop_create() {
   return nullptr;
 }
-void ck_beauty_interop_destroy(void* handle) {
+void goss_beauty_interop_destroy(void* handle) {
   (void)handle;
 }
-void* ck_beauty_interop_composite(void* handle, uint32_t source_texture, int32_t width, int32_t height) {
+void* goss_beauty_interop_composite(void* handle, uint32_t source_texture, int32_t width, int32_t height) {
   (void)handle;
   (void)source_texture;
   (void)width;
   (void)height;
   return nullptr;
 }
-void* ck_beauty_input_create() {
+void* goss_beauty_input_create() {
   return nullptr;
 }
-void ck_beauty_input_destroy(void* handle) {
+void goss_beauty_input_destroy(void* handle) {
   (void)handle;
 }
-void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
+void* goss_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
   (void)handle;
   (void)device;
   (void)width;
   (void)height;
   return nullptr;
 }
-int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle, int32_t width, int32_t height, const float* landmarks106) {
+int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle, int32_t width, int32_t height, const float* landmarks106) {
   (void)input_handle;
   (void)beauty_handle;
   (void)width;

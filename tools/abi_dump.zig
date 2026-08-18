@@ -14,42 +14,42 @@ const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.Session
 // Exported functions with their frozen C signatures. Kept next to the type
 // manifest so a new export without a manifest entry is caught in review.
 const abi_functions = [_][]const u8{
-    "uint32_t ck_abi_version(void)",
-    "void *ck_alloc(size_t size)",
-    "void ck_free(void *ptr, size_t size)",
-    "ck_status ck_engine_create(const ck_engine_config *config, ck_engine **out_engine)",
-    "void ck_engine_destroy(ck_engine *engine)",
-    "ck_status ck_session_create(ck_engine *engine, const ck_session_config *config, ck_session **out_session)",
-    "void ck_session_destroy(ck_session *session)",
-    "ck_status ck_engine_init_renderer(ck_engine *engine, const ck_renderer_desc *desc)",
-    "void ck_engine_resize(ck_engine *engine, uint32_t width, uint32_t height)",
-    "ck_status ck_engine_render_frame(ck_engine *engine, ck_session *session)",
-    "ck_status ck_engine_request_screenshot(ck_engine *engine, const uint8_t *path, size_t path_len)",
-    "ck_status ck_engine_capture_frame(ck_engine *engine, ck_session *session, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
-    "ck_status ck_session_submit_frame(ck_session *session, const ck_frame_desc *desc, const ck_frame_planes *planes)",
-    "ck_status ck_session_submit_hardware_buffer(ck_session *session, const ck_frame_desc *desc, void *hardware_buffer)",
-    "ck_status ck_session_submit_frame_copy(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
-    "ck_degrade_level ck_session_report_frame(ck_session *session, uint32_t frame_time_us, ck_thermal thermal)",
-    "ck_degrade_level ck_session_degrade_level(const ck_session *session)",
-    "ck_status ck_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix)",
-    "ck_status ck_session_enable_face_tracking(ck_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
-    "void ck_session_disable_face_tracking(ck_session *session)",
-    "ck_status ck_session_enable_segmentation(ck_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
-    "void ck_session_disable_segmentation(ck_session *session)",
-    "ck_status ck_session_track_frame(ck_session *session, const ck_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
-    "ck_status ck_session_face_result(ck_session *session, ck_face_result *out_result)",
-    "ck_status ck_session_enable_beauty(ck_session *session, const char *resource_path)",
-    "void ck_session_disable_beauty(ck_session *session)",
-    "ck_status ck_session_set_beauty(ck_session *session, int32_t effect, float value)",
-    "ck_status ck_session_set_beauty_lut(ck_session *session, int32_t slot, const uint8_t *rgba, uint32_t width, uint32_t height)",
-    "ck_status ck_session_set_beauty_makeup_texture(ck_session *session, int32_t effect, const uint8_t *rgba, uint32_t width, uint32_t height)",
-    "ck_status ck_session_set_face_landmarks(ck_session *session, const float *points, uint32_t point_count)",
-    "ck_status ck_session_submit_frame_rgba_copy(ck_session *session, const ck_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
-    "ck_status ck_session_beautify_frame(ck_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
-    "ck_status ck_session_activate_lens(ck_session *session, const uint8_t *manifest_json, size_t manifest_len)",
-    "ck_status ck_session_activate_lens_from_directory(ck_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
-    "void ck_session_deactivate_lens(ck_session *session)",
-    "ck_status ck_session_tick_lens(ck_session *session, uint32_t dt_us, const ck_lens_signals *signals)",
+    "uint32_t goss_abi_version(void)",
+    "void *goss_alloc(size_t size)",
+    "void goss_free(void *ptr, size_t size)",
+    "goss_status goss_engine_create(const goss_engine_config *config, goss_engine **out_engine)",
+    "void goss_engine_destroy(goss_engine *engine)",
+    "goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session)",
+    "void goss_session_destroy(goss_session *session)",
+    "goss_status goss_engine_init_renderer(goss_engine *engine, const goss_renderer_desc *desc)",
+    "void goss_engine_resize(goss_engine *engine, uint32_t width, uint32_t height)",
+    "goss_status goss_engine_render_frame(goss_engine *engine, goss_session *session)",
+    "goss_status goss_engine_request_screenshot(goss_engine *engine, const uint8_t *path, size_t path_len)",
+    "goss_status goss_engine_capture_frame(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height)",
+    "goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)",
+    "goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)",
+    "goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
+    "goss_degrade_level goss_session_report_frame(goss_session *session, uint32_t frame_time_us, goss_thermal thermal)",
+    "goss_degrade_level goss_session_degrade_level(const goss_session *session)",
+    "goss_status goss_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix)",
+    "goss_status goss_session_enable_face_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
+    "void goss_session_disable_face_tracking(goss_session *session)",
+    "goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
+    "void goss_session_disable_segmentation(goss_session *session)",
+    "goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",
+    "goss_status goss_session_face_result(goss_session *session, goss_face_result *out_result)",
+    "goss_status goss_session_enable_beauty(goss_session *session, const char *resource_path)",
+    "void goss_session_disable_beauty(goss_session *session)",
+    "goss_status goss_session_set_beauty(goss_session *session, int32_t effect, float value)",
+    "goss_status goss_session_set_beauty_lut(goss_session *session, int32_t slot, const uint8_t *rgba, uint32_t width, uint32_t height)",
+    "goss_status goss_session_set_beauty_makeup_texture(goss_session *session, int32_t effect, const uint8_t *rgba, uint32_t width, uint32_t height)",
+    "goss_status goss_session_set_face_landmarks(goss_session *session, const float *points, uint32_t point_count)",
+    "goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
+    "goss_status goss_session_beautify_frame(goss_session *session, const uint8_t *rgba_in, uint32_t width, uint32_t height, uint8_t *rgba_out)",
+    "goss_status goss_session_activate_lens(goss_session *session, const uint8_t *manifest_json, size_t manifest_len)",
+    "goss_status goss_session_activate_lens_from_directory(goss_session *session, const uint8_t *bundle_path, size_t bundle_path_len)",
+    "void goss_session_deactivate_lens(goss_session *session)",
+    "goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, const goss_lens_signals *signals)",
 };
 
 fn writeSurface(w: anytype) !void {
@@ -108,7 +108,7 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 const build_options = @import("build_options");
-const header_text = build_options.camerakit_header;
+const header_text = build_options.gosslens_header;
 
 // The manifest above is hand-maintained next to the frozen header on
 // purpose (a symbol only in one of the two is a build break, not a silent
@@ -125,7 +125,7 @@ test "every exported function is declared in the frozen public header" {
     for (abi_functions) |f| {
         const name = functionName(f);
         if (std.mem.indexOf(u8, header_text, name) == null) {
-            std.debug.print("abi_dump: {s} is exported but not declared in include/camerakit.h\n", .{name});
+            std.debug.print("abi_dump: {s} is exported but not declared in include/gosslens.h\n", .{name});
             return error.TestUnexpectedResult;
         }
     }
@@ -141,5 +141,5 @@ test "surface text is deterministic and complete" {
 
     try std.testing.expectEqualStrings(first.writer.buffered(), second.writer.buffered());
     try std.testing.expect(std.mem.indexOf(u8, first.writer.buffered(), "type") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first.writer.buffered(), "ck_abi_version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.writer.buffered(), "goss_abi_version") != null);
 }

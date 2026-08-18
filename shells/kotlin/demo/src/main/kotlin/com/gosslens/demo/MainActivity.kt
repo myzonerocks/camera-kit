@@ -1,4 +1,4 @@
-package kit.camera.demo
+package com.gosslens.demo
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -19,10 +19,10 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import kit.camera.Engine
-import kit.camera.FaceResult
-import kit.camera.LensSignals
-import kit.camera.Session
+import com.gosslens.Engine
+import com.gosslens.FaceResult
+import com.gosslens.LensSignals
+import com.gosslens.Session
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
@@ -31,7 +31,7 @@ import java.util.concurrent.Executors
 // hardware buffer import lands; the frames, states, and fps in the log are
 // the acceptance surface.
 class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
-    private val tag = "CKDROID"
+    private val tag = "GOSSDROID"
     private lateinit var surfaceView: SurfaceView
     private lateinit var overlay: FaceOverlayView
     private var engine: Engine? = null
@@ -56,13 +56,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
 
     // The conformance run reuses this same real window/renderer setup,
     // just feeding a fixed corpus frame instead of live camera - see
-    // ConformanceRunner. Set via `am start --ez CKConformance true`, the
-    // direct equivalent of the ios shell's -CKConformance launch argument.
+    // ConformanceRunner. Set via `am start --ez GossConformance true`, the
+    // direct equivalent of the ios shell's -GossConformance launch argument.
     private var conformanceMode = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        conformanceMode = intent.getBooleanExtra("CKConformance", false)
+        conformanceMode = intent.getBooleanExtra("GossConformance", false)
         val root = FrameLayout(this)
         surfaceView = SurfaceView(this)
         overlay = FaceOverlayView(this)
@@ -232,7 +232,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.i(tag, "fps %.1f rendered %d camera %d".format(fps, renderedFrames, cameraFrames))
             if (!proofLogged && cameraFrames > 30 && fps > 20) {
                 proofLogged = true
-                Log.i(tag, "CKDROID preview active: $cameraFrames camera frames rendered at %.1f fps".format(fps))
+                Log.i(tag, "GOSSDROID preview active: $cameraFrames camera frames rendered at %.1f fps".format(fps))
             }
             fpsWindowStart = now
             fpsWindowFrames = 0

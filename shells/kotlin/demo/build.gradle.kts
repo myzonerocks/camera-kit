@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "kit.camera.demo"
+    namespace = "com.gosslens.demo"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "kit.camera.demo"
+        applicationId = "com.gosslens.demo"
         minSdk = 29
         targetSdk = 36
         versionCode = 1
@@ -25,7 +25,7 @@ android {
 }
 
 dependencies {
-    implementation(project(":camerakit"))
+    implementation(project(":gosslens"))
     implementation("androidx.camera:camera-core:1.4.2")
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
@@ -60,8 +60,8 @@ tasks.named("preBuild") { dependsOn(syncReferenceLens) }
 
 // Row 8's conformance corpus frame, synced from the fetched model set -
 // ConformanceRunner feeds this through the real ABI in place of live
-// capture, behind the CKConformance intent extra a normal launch never
-// sets.
+// capture, behind the GossConformance intent extra a normal launch
+// never sets.
 val syncConformanceCorpus by tasks.registering(Copy::class) {
     from(rootProject.projectDir.resolve("../../.models/corpus/face_frontal_b.jpg"))
     into(layout.projectDirectory.dir("src/main/assets"))

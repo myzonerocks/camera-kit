@@ -27,14 +27,14 @@ const beauty_available = builtin.os.tag == .macos;
 
 const stb = @cImport(@cInclude("stb_image.h"));
 
-extern fn ck_beauty_create(resource_path: ?[*:0]const u8) ?*anyopaque;
-extern fn ck_beauty_destroy(handle: ?*anyopaque) void;
-extern fn ck_beauty_set(handle: ?*anyopaque, effect: i32, value: f32) void;
-extern fn ck_beauty_process(handle: ?*anyopaque, rgba_in: [*]const u8, width: i32, height: i32, landmarks106: ?[*]const f32, rgba_out: [*]u8) i32;
-extern fn ck_beauty_output_texture(handle: ?*anyopaque) u32;
-extern fn ck_beauty_interop_create() ?*anyopaque;
-extern fn ck_beauty_interop_destroy(handle: ?*anyopaque) void;
-extern fn ck_beauty_interop_composite(handle: ?*anyopaque, source_texture: u32, width: i32, height: i32) ?*anyopaque;
+extern fn goss_beauty_create(resource_path: ?[*:0]const u8) ?*anyopaque;
+extern fn goss_beauty_destroy(handle: ?*anyopaque) void;
+extern fn goss_beauty_set(handle: ?*anyopaque, effect: i32, value: f32) void;
+extern fn goss_beauty_process(handle: ?*anyopaque, rgba_in: [*]const u8, width: i32, height: i32, landmarks106: ?[*]const f32, rgba_out: [*]u8) i32;
+extern fn goss_beauty_output_texture(handle: ?*anyopaque) u32;
+extern fn goss_beauty_interop_create() ?*anyopaque;
+extern fn goss_beauty_interop_destroy(handle: ?*anyopaque) void;
+extern fn goss_beauty_interop_composite(handle: ?*anyopaque, source_texture: u32, width: i32, height: i32) ?*anyopaque;
 
 // CoreVideo's C ABI, called directly rather than through an objc++ shim:
 // the harness only needs to read back what the GPU compositing path wrote,
@@ -390,7 +390,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
         defer abi.destroySession(session);
 
-        const enable = abi.ck_session_enable_face_tracking(session, task_bytes.ptr, task_bytes.len, 2);
+        const enable = abi.goss_session_enable_face_tracking(session, task_bytes.ptr, task_bytes.len, 2);
         if (enable != .ok) {
             try out.print("abi enable face tracking: {s}\n", .{@tagName(enable)});
             try out.flush();
@@ -411,12 +411,12 @@ pub fn main(init_args: std.process.Init) !u8 {
             .flags = 0,
             .timestamp_us = 1000,
         };
-        const feed = abi.ck_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2);
+        const feed = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2);
         if (feed != .ok) return 1;
 
         var result: face.Result = undefined;
         var polls: usize = 0;
-        while (abi.ck_session_face_result(session, &result) == .again) {
+        while (abi.goss_session_face_result(session, &result) == .again) {
             std.Thread.yield() catch {};
             polls += 1;
             if (polls > 100_000_000) {
@@ -435,7 +435,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (result.timestamp_us != 1000) return 1;
 
         // Segmentation through the same public surface: one session, one
-        // enable call, the same NV12 frame ck_session_track_frame already
+        // enable call, the same NV12 frame goss_session_track_frame already
         // fed to face tracking above now reaches the segmentation worker
         // too - proving the ABI wrapper itself (Status translation,
         // Session lifecycle), not just the worker adapter underneath it
@@ -449,14 +449,14 @@ pub fn main(init_args: std.process.Init) !u8 {
             );
             defer gpa.free(segment_bytes);
 
-            const enable_seg = abi.ck_session_enable_segmentation(session, segment_bytes.ptr, segment_bytes.len, 2);
+            const enable_seg = abi.goss_session_enable_segmentation(session, segment_bytes.ptr, segment_bytes.len, 2);
             if (enable_seg != .ok) {
                 try out.print("abi enable segmentation: {s}\n", .{@tagName(enable_seg)});
                 try out.flush();
                 return 1;
             }
 
-            const feed_seg = abi.ck_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2);
+            const feed_seg = abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2);
             if (feed_seg != .ok) return 1;
 
             const worker = session.segmentation_worker orelse return 1;
@@ -560,17 +560,17 @@ pub fn main(init_args: std.process.Init) !u8 {
             try out.flush();
             return 0;
         }
-        if (abi.ck_session_enable_beauty(session, ".vendor/gpupixel/src") != .ok) {
+        if (abi.goss_session_enable_beauty(session, ".vendor/gpupixel/src") != .ok) {
             try out.print("abi beauty enable refused\n", .{});
             try out.flush();
             return 1;
         }
-        _ = abi.ck_session_set_beauty(session, 0, 0.9);
-        _ = abi.ck_session_set_beauty(session, 1, 0.5);
+        _ = abi.goss_session_set_beauty(session, 0, 0.9);
+        _ = abi.goss_session_set_beauty(session, 1, 0.5);
         const beauty_pixels = @as(usize, corpus.frame.width) * corpus.frame.height * 4;
         const beautified = try gpa.alloc(u8, beauty_pixels);
         defer gpa.free(beautified);
-        if (abi.ck_session_beautify_frame(session, corpus.frame.pixels.rgba8.ptr, corpus.frame.width, corpus.frame.height, beautified.ptr) != .ok) {
+        if (abi.goss_session_beautify_frame(session, corpus.frame.pixels.rgba8.ptr, corpus.frame.width, corpus.frame.height, beautified.ptr) != .ok) {
             try out.print("abi beautify refused\n", .{});
             try out.flush();
             return 1;
@@ -591,7 +591,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         // sourced from this same session's real tracked result, and
         // ramps over 300ms; ticking it out settles the ramp, proving
         // activate/tick/dispatch land on the same beauty chain
-        // ck_session_beautify_frame reads, with real inference data
+        // goss_session_beautify_frame reads, with real inference data
         // driving a real shipped bundle end to end.
         const lens_manifest = try std.Io.Dir.cwd().readFileAlloc(
             harness_io,
@@ -600,7 +600,7 @@ pub fn main(init_args: std.process.Init) !u8 {
             .limited(256 * 1024),
         );
         defer gpa.free(lens_manifest);
-        if (abi.ck_session_activate_lens(session, lens_manifest.ptr, lens_manifest.len) != .ok) {
+        if (abi.goss_session_activate_lens(session, lens_manifest.ptr, lens_manifest.len) != .ok) {
             try out.print("abi lens: activate refused\n", .{});
             try out.flush();
             return 1;
@@ -610,7 +610,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         signals.blendshapes = result.blendshapes;
         var settle: usize = 0;
         while (settle < 40) : (settle += 1) {
-            if (abi.ck_session_tick_lens(session, 8_333, &signals) != .ok) {
+            if (abi.goss_session_tick_lens(session, 8_333, &signals) != .ok) {
                 try out.print("abi lens: tick refused\n", .{});
                 try out.flush();
                 return 1;
@@ -618,7 +618,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         }
         const lens_beautified = try gpa.alloc(u8, beauty_pixels);
         defer gpa.free(lens_beautified);
-        if (abi.ck_session_beautify_frame(session, corpus.frame.pixels.rgba8.ptr, corpus.frame.width, corpus.frame.height, lens_beautified.ptr) != .ok) {
+        if (abi.goss_session_beautify_frame(session, corpus.frame.pixels.rgba8.ptr, corpus.frame.width, corpus.frame.height, lens_beautified.ptr) != .ok) {
             try out.print("abi lens: beautify refused\n", .{});
             try out.flush();
             return 1;
@@ -631,7 +631,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         try out.print("abi lens: mean delta {d:.3}\n", .{lens_mean});
         try out.flush();
         if (lens_mean <= 0.5) return 1;
-        abi.ck_session_deactivate_lens(session);
+        abi.goss_session_deactivate_lens(session);
     }
 
 
@@ -665,14 +665,14 @@ pub fn main(init_args: std.process.Init) !u8 {
         var contour: [face106.point_count * 2]f32 = undefined;
         face106.fill(&landmarks, @floatFromInt(image.width), @floatFromInt(image.height), &contour);
 
-        const beauty = ck_beauty_create(".vendor/gpupixel/src") orelse return 1;
-        defer ck_beauty_destroy(beauty);
+        const beauty = goss_beauty_create(".vendor/gpupixel/src") orelse return 1;
+        defer goss_beauty_destroy(beauty);
         const pixel_count = @as(usize, image.width) * image.height * 4;
         const out_a = try gpa.alloc(u8, pixel_count);
         defer gpa.free(out_a);
         const source_pixels = image.pixels.rgba8;
 
-        if (ck_beauty_process(beauty, source_pixels.ptr, @intCast(image.width), @intCast(image.height), &contour, out_a.ptr) != 0) {
+        if (goss_beauty_process(beauty, source_pixels.ptr, @intCast(image.width), @intCast(image.height), &contour, out_a.ptr) != 0) {
             try out.print("beauty: identity process refused\n", .{});
             try out.flush();
             return 1;
@@ -683,11 +683,11 @@ pub fn main(init_args: std.process.Init) !u8 {
         }
         const identity_mean = @as(f64, @floatFromInt(identity_delta)) / @as(f64, @floatFromInt(pixel_count));
 
-        ck_beauty_set(beauty, 0, 0.9);
-        ck_beauty_set(beauty, 1, 0.5);
+        goss_beauty_set(beauty, 0, 0.9);
+        goss_beauty_set(beauty, 1, 0.5);
         const out_b = try gpa.alloc(u8, pixel_count);
         defer gpa.free(out_b);
-        if (ck_beauty_process(beauty, source_pixels.ptr, @intCast(image.width), @intCast(image.height), &contour, out_b.ptr) != 0) {
+        if (goss_beauty_process(beauty, source_pixels.ptr, @intCast(image.width), @intCast(image.height), &contour, out_b.ptr) != 0) {
             try out.print("beauty: effect process refused\n", .{});
             try out.flush();
             return 1;
@@ -707,15 +707,15 @@ pub fn main(init_args: std.process.Init) !u8 {
         // chain's live output texture into the shared surface and reads
         // that back instead, proving the two paths agree on real pixels
         // rather than just on the fact that a pointer came back non-null.
-        const interop = ck_beauty_interop_create() orelse return 1;
-        defer ck_beauty_interop_destroy(interop);
-        const texture = ck_beauty_output_texture(beauty);
+        const interop = goss_beauty_interop_create() orelse return 1;
+        defer goss_beauty_interop_destroy(interop);
+        const texture = goss_beauty_output_texture(beauty);
         if (texture == 0) {
             try out.print("beauty interop: no output texture\n", .{});
             try out.flush();
             return 1;
         }
-        const surface = ck_beauty_interop_composite(interop, texture, @intCast(image.width), @intCast(image.height)) orelse {
+        const surface = goss_beauty_interop_composite(interop, texture, @intCast(image.width), @intCast(image.height)) orelse {
             try out.print("beauty interop: composite refused\n", .{});
             try out.flush();
             return 1;
