@@ -1,11 +1,11 @@
 .{
     .name = "flatbuffers",
     .repo = "https://github.com/google/flatbuffers",
-    .version = "v25.9.23",
-    .commit = "v25.9.23",
-    .archive_sha256 = "9102253214dea6ae10c2ac966ea1ed2155d22202390b532d1dea64935c518ada",
+    .version = "v25.12.19",
+    .commit = "v25.12.19",
+    .archive_sha256 = "f81c3162b1046fe8b84b9a0dbdd383e24fdbcf88583b9cb6028f90d04d90696a",
     .license = "Apache-2.0",
     .license_file = "LICENSE",
     .license_sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-    .archive_url = "https://github.com/google/flatbuffers/archive/refs/tags/v25.9.23.tar.gz",
+    .archive_url = "https://github.com/google/flatbuffers/archive/refs/tags/v25.12.19.tar.gz",
 }

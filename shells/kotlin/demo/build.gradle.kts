@@ -1,26 +1,22 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "com.gosslens.demo"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.gosslens.demo"
         minSdk = 29
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "0.1"
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 }
 
@@ -34,7 +30,7 @@ dependencies {
 
 // The face model bundle ships as an app asset, synced from the repo's
 // fetched model set so the apk always carries the pinned bytes.
-val syncFaceModel by tasks.registering(Copy::class) {
+val syncFaceModel = tasks.register<Copy>("syncFaceModel") {
     from(rootProject.projectDir.resolve("../../.models/face_landmarker.task"))
     into(layout.projectDirectory.dir("src/main/assets"))
 }
@@ -44,7 +40,7 @@ tasks.named("preBuild") { dependsOn(syncFaceModel) }
 // vendor tree. Assets ship read-only inside the apk; the app extracts
 // them to a real path at first run since the effects engine opens them
 // with plain file i/o, not the asset manager.
-val syncBeautyRes by tasks.registering(Copy::class) {
+val syncBeautyRes = tasks.register<Copy>("syncBeautyRes") {
     from(rootProject.projectDir.resolve("../../.vendor/gpupixel/src/res"))
     into(layout.projectDirectory.dir("src/main/assets/res"))
 }
@@ -52,7 +48,7 @@ tasks.named("preBuild") { dependsOn(syncBeautyRes) }
 
 // The beauty-baseline reference lens, synced straight from the tracked
 // bundle so the demo always ships exactly what the validator checked.
-val syncReferenceLens by tasks.registering(Copy::class) {
+val syncReferenceLens = tasks.register<Copy>("syncReferenceLens") {
     from(rootProject.projectDir.resolve("../../lenses/reference/beauty-baseline"))
     into(layout.projectDirectory.dir("src/main/assets/lenses/beauty-baseline"))
 }
@@ -62,7 +58,7 @@ tasks.named("preBuild") { dependsOn(syncReferenceLens) }
 // ConformanceRunner feeds this through the real ABI in place of live
 // capture, behind the GossConformance intent extra a normal launch
 // never sets.
-val syncConformanceCorpus by tasks.registering(Copy::class) {
+val syncConformanceCorpus = tasks.register<Copy>("syncConformanceCorpus") {
     from(rootProject.projectDir.resolve("../../.models/corpus/face_frontal_b.jpg"))
     into(layout.projectDirectory.dir("src/main/assets"))
 }
