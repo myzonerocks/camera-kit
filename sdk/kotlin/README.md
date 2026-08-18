@@ -13,15 +13,19 @@ and stay identical across every platform.
 ## Install
 
 ```kotlin
+repositories {
+    maven { url = uri("https://jitpack.io") }
+}
+
 dependencies {
     implementation("com.myzonerocks:gosslens:0.1.0")
 }
 ```
 
-Resolved via [JitPack](https://jitpack.io), the same as depending straight
-on a git repository rather than a formal registry. A consuming app
-building against a checkout of this repository takes it as an included
-build instead:
+[JitPack](https://jitpack.io) builds this straight from the repository at
+a tagged commit, no formal registry publish needed - see
+[`jitpack.yml`](../../jitpack.yml). A consuming app building against a
+checkout of this repository takes it as an included build instead:
 
 ```kotlin
 dependencies {

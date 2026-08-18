@@ -50,11 +50,14 @@ a.out
 sdk/swift/**/*.xcodeproj/
 sdk/swift/demo/Sources/Info.plist
 sdk/swift/**/xcuserdata/
-sdk/swift/**/.build/
 sdk/swift/**/DerivedData/
 sdk/kotlin/.gradle/
 sdk/kotlin/**/build/
 sdk/kotlin/gradle/
+# The root Package.swift manifest builds under a root-level .build/ and
+# .swiftpm/, the same as sdk/swift/'s own manifest does under its own.
+.build/
+.swiftpm/
 sdk/kotlin/gradlew
 sdk/kotlin/local.properties
 sdk/ts/node_modules/

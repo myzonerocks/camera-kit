@@ -28,6 +28,11 @@ Then depend on `Gosslens`:
 import Gosslens
 ```
 
+Resolved from the root [`Package.swift`](../../Package.swift), which
+mirrors this SDK's own manifest so SwiftPM finds it at the repository
+root; `cd sdk/swift && swift build` still uses this directory's manifest
+directly for development.
+
 ## Bring up an engine and a session
 
 ```swift
