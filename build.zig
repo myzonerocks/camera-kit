@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     const run_gate = b.addRunArtifact(gate_exe);
     run_gate.setCwd(b.path("."));
     if (b.args) |args| run_gate.addArgs(args);
-    const gate_step = b.step("gate", "Run the source-tracked gate (-- --staged | --tree | --commit-msg <file> | --log <range>)");
+    const gate_step = b.step("gate", "Run the source-tracked gate (-- --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-body <file>)");
     gate_step.dependOn(&run_gate.step);
 
     // The authoritative gate suite runs locally: hosted runners are not

@@ -23,6 +23,12 @@ jobs:
         run: |
           tools/toolchain-sync
           echo "$PWD/.local/zig/current" >> "$GITHUB_PATH"
+      - name: pr body shape
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr_body.txt"
+          zig build gate -- --pr-body "$RUNNER_TEMP/pr_body.txt"
       - uses: actions/cache@v4
         with:
           path: |
