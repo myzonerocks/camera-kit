@@ -161,8 +161,12 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         NotificationCenter.default.addObserver(self, selector: #selector(interruptionEnded), name: AVCaptureSession.interruptionEndedNotification, object: captureSession)
         NotificationCenter.default.addObserver(self, selector: #selector(runtimeError), name: AVCaptureSession.runtimeErrorNotification, object: captureSession)
 
-        // Sensor sits landscape; one quarter turn shows portrait upright.
-        rotationQuarterTurns = 1
+        // Rear sensor's raw buffer needs a 90-degree clockwise turn to
+        // read upright; rotationZ's positive angle is counter-clockwise,
+        // so that's 3 quarter-turns here, not 1 - using 1 rotates the
+        // wrong way, landing 180 degrees off (upside down and mirrored
+        // at once, since a half-turn is both at the same time).
+        rotationQuarterTurns = 3
 
         outputQueue.async {
             self.captureSession.startRunning()
