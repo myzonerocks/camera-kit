@@ -110,7 +110,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             val bundle = ByteBuffer.allocateDirect(bytes.size)
             bundle.put(bytes)
             bundle.flip()
-            if (createdSession.enableFaceTracking(bundle)) {
+            if (createdSession.enableFaceTracking(bundle, 0)) {
                 Log.i(tag, "face tracking up")
             } else {
                 Log.i(tag, "face tracking unavailable in this build")
@@ -259,11 +259,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 image.use {
                     val session = session ?: return@use
 
-                    // bgfx is single-threaded (main thread only, driven by
-                    // Choreographer in renderTick) - every submit call below
-                    // hops there, each keeping its own frame data alive
-                    // across the hop instead of relying on anything this
-                    // analyzer callback recycles once it returns.
+                    // bgfx runs on the main thread only; every submit below
+                    // hops there, keeping its own frame data alive across
+                    // the hop instead of relying on this analyzer callback's
+                    // own buffers, which recycle once it returns.
                     var zeroCopyAttempted = false
                     if (!zeroCopyRefused && android.os.Build.VERSION.SDK_INT >= 28) {
                         val hardwareBuffer = it.image?.hardwareBuffer

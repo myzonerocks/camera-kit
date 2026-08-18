@@ -200,8 +200,8 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
     fun reportFrame(frameTimeUs: Int, thermal: Int): Int =
         Gosslens.nativeReportFrame(handle, frameTimeUs, thermal)
 
-    fun enableFaceTracking(taskBundle: ByteBuffer): Boolean =
-        Gosslens.nativeEnableFaceTracking(handle, taskBundle, taskBundle.remaining(), 0) == 0
+    fun enableFaceTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
+        Gosslens.nativeEnableFaceTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
 
     fun disableFaceTracking() = Gosslens.nativeDisableFaceTracking(handle)
 
@@ -232,8 +232,15 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
 
     /** Effects in order: smooth 0, whiten 1, thin face 2, big eye 3,
      * lipstick 4, blush 5; values clamp to zero and one. */
-    fun setBeauty(effect: Int, value: Float): Boolean =
-        Gosslens.nativeSetBeauty(handle, effect, value) == 0
+    fun setBeauty(effect: Int, amount: Float): Boolean =
+        Gosslens.nativeSetBeauty(handle, effect, amount) == 0
+
+    fun setSmooth(amount: Float) = setBeauty(0, amount)
+    fun setWhiten(amount: Float) = setBeauty(1, amount)
+    fun setThinFace(amount: Float) = setBeauty(2, amount)
+    fun setBigEye(amount: Float) = setBeauty(3, amount)
+    fun setLipstick(amount: Float) = setBeauty(4, amount)
+    fun setBlush(amount: Float) = setBeauty(5, amount)
 
     fun beautifyFrame(rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Boolean =
         Gosslens.nativeBeautifyFrame(handle, rgbaIn, rgbaOut, width, height) == 0
