@@ -1,0 +1,20 @@
+--- a/src/core/gpupixel_program.cc
++++ b/src/core/gpupixel_program.cc
+@@ -93,7 +93,16 @@
+ 
+   uint32_t frag_shader;
+   GL_CALL(frag_shader = glCreateShader(GL_FRAGMENT_SHADER));
+-  const char* fragment_shader_source_str = fragment_shader_source.c_str();
++  // GLSL ES gives fragment shaders no default float precision (unlike
++  // vertex shaders); these source strings were never written with one,
++  // relying on drivers that supplied a default anyway. ANGLE's own
++  // translator enforces the real spec and rejects them outright.
++  std::string fragment_shader_source_precise = fragment_shader_source;
++  if (fragment_shader_source.find("precision") == std::string::npos) {
++    fragment_shader_source_precise =
++        "precision mediump float;\n" + fragment_shader_source;
++  }
++  const char* fragment_shader_source_str = fragment_shader_source_precise.c_str();
+   GL_CALL(glShaderSource(frag_shader, 1, &fragment_shader_source_str, NULL));
+   GL_CALL(glCompileShader(frag_shader));
+ 

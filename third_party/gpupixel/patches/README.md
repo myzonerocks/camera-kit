@@ -22,3 +22,14 @@ which returns nil once this patch lands, since ANGLE never creates a
 real EAGLContext. That bridge is rewired separately (not part of this
 patch, since it's this project's own code, not gpupixel's) onto
 ANGLE's EGL_IOSURFACE_ANGLE client-buffer surface instead.
+
+0002-fragment-shader-precision.patch
+Confirmed on real hardware, not assumed: ANGLE's GLSL ES translator
+rejected gpupixel's own filter fragment shaders with "No precision
+specified for (float)". GLSL ES gives fragment shaders no default
+float precision (vertex shaders get an implicit highp), and these
+shader strings were never written with one - whatever GL driver
+compiled them before tolerated the gap and supplied a default anyway.
+Fixed once in GPUPixelGLProgram::InitWithShaderString, which every
+filter's shader compiles through, rather than editing each of the
+~40 filter source files individually.
