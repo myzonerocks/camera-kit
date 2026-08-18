@@ -12,10 +12,16 @@ and stay identical across every platform.
 
 ## Install
 
-No tagged release yet, so add the package by local path:
+Add the package to `Package.swift`:
 
 ```swift
-.package(path: "../gosslens/sdk/swift"),
+.package(url: "https://github.com/myzonerocks/gosslens", branch: "main"),
+```
+
+Then depend on `Gosslens`:
+
+```swift
+.product(name: "Gosslens", package: "gosslens"),
 ```
 
 ```swift
@@ -74,8 +80,8 @@ See [`demo/README.md`](demo/README.md).
 
 ## TODO
 
-- Publish a tagged release. The install instructions above assume a local
-  path dependency until then.
+- Tag a real release. The install instructions above pin to `main`, which
+  works but drifts; a consumer wanting a stable pin needs a tag.
 - Add a `Tests/` target. Conformance today runs through the demo app's
   `-GossConformance` launch argument and the headless harness in
   [`harness/`](../../harness/), not a SwiftPM test suite.

@@ -12,8 +12,16 @@ and stay identical across every platform.
 
 ## Install
 
-This module is this Gradle project's own root, so a build that includes
-the repository depends on it directly:
+```kotlin
+dependencies {
+    implementation("com.myzonerocks:gosslens:0.1.0")
+}
+```
+
+Resolved via [JitPack](https://jitpack.io), the same as depending straight
+on a git repository rather than a formal registry. A consuming app
+building against a checkout of this repository takes it as an included
+build instead:
 
 ```kotlin
 dependencies {
@@ -71,9 +79,9 @@ SDK. See [`demo/README.md`](demo/README.md).
 
 ## TODO
 
-- Publish to a Maven coordinate consumers can depend on without including
-  this repository. The install instructions above assume an included
-  build until then.
+- Tag a real `0.1.0` release. The build script publishes this module and
+  JitPack resolves any tagged commit, but no tag exists yet and this repo
+  is private, which JitPack's free tier doesn't build from.
 - Add a `src/test/` suite. Conformance today runs through the demo app's
   `ConformanceRunner` and the headless harness in
   [`harness/`](../../harness/), not a Gradle test task.
