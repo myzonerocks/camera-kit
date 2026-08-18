@@ -173,6 +173,13 @@ pub const Engine = struct {
     chain_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
     chain_width: u16 = 0,
     chain_height: u16 = 0,
+    /// Dedicated target for ck_engine_capture_frame - separate from
+    /// chain_targets, which ping-pong and get overwritten mid-chain, so
+    /// this one alone always holds the true final composited image
+    /// after a capture-requested frame renders.
+    capture_target: ?render.Renderer.OffscreenTarget = null,
+    capture_width: u16 = 0,
+    capture_height: u16 = 0,
 };
 
 const CurrentFrame = struct {
@@ -186,6 +193,12 @@ pub const Session = struct {
     controller: graph.DegradeController,
     current: ?CurrentFrame = null,
     copied_frames: u64 = 0,
+    /// Set for exactly one renderCompositeChain call by
+    /// ck_engine_capture_frame, then cleared - redirects the chain's
+    /// true final stage into engine.capture_target instead of the swap
+    /// chain directly, with an extra blit afterward so the swap chain
+    /// still gets the same frame a normal render would have produced.
+    capture_requested: bool = false,
     face_tracking: ?*tracking.Tracking = null,
     segmentation_worker: ?*segmentation.Segmentation = null,
     /// The most recent mask, uploaded as a real GPU texture the same way
@@ -352,6 +365,7 @@ pub fn destroyEngine(engine: *Engine) void {
     for (engine.chain_targets) |slot| {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
     }
+    if (engine.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (engine.renderer) |*r| r.deinit();
     engine.texture_pool.deinit();
     engine.staging_pool.deinit();
@@ -369,6 +383,14 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
     }
     e.chain_width = width;
     e.chain_height = height;
+}
+
+fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
+    if (e.capture_width == width and e.capture_height == height and e.capture_target != null) return;
+    if (e.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    e.capture_target = try render.Renderer.createOffscreenTarget(width, height);
+    e.capture_width = width;
+    e.capture_height = height;
 }
 
 /// Whether the live preview needs the GPU beauty compositing bridge
@@ -678,6 +700,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         if (ready) ready_count += 1;
     }
     const beauty_active = anyBeautyActive(s);
+    if (s.capture_requested) try ensureCaptureTarget(e, @intCast(r.width), @intCast(r.height));
     if (ready_count == 0 and !beauty_active) {
         // view 0 may still be bound to an offscreen chain/beauty target
         // from an earlier frame that took the other branch below -
@@ -688,8 +711,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // backbuffer, and the visible canvas simply stops updating -
         // found via a real toggle-on-then-off repro (whiten set to 1
         // then back to 0), not a static read.
-        render.Renderer.setViewTarget(0, null, @intCast(r.width), @intCast(r.height));
+        render.Renderer.setViewTarget(0, finalTarget(e, s), @intCast(r.width), @intCast(r.height));
         r.submitPreview(0, current.preview, rotation * 90, mirror);
+        if (s.capture_requested) blitCaptureToSwapChain(e, r, 1);
         return;
     }
 
@@ -734,12 +758,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
-                const output = if (drawn == ready_count) null else targets[next_slot % 2];
-                if (output) |target| render.Renderer.setViewTarget(view_id, target, width, height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture);
                 if (output) |target| {
                     input_texture = target.texture;
-                    next_slot += 1;
+                    if (!is_final) next_slot += 1;
                 }
             },
             .lut => {
@@ -747,12 +772,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
-                const output = if (drawn == ready_count) null else targets[next_slot % 2];
-                if (output) |target| render.Renderer.setViewTarget(view_id, target, width, height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitLutPass(view_id, input_texture, lut_texture);
                 if (output) |target| {
                     input_texture = target.texture;
-                    next_slot += 1;
+                    if (!is_final) next_slot += 1;
                 }
             },
             .blend => {
@@ -761,12 +787,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 drawn += 1;
                 const view_id = next_view_id;
                 next_view_id += 1;
-                const output = if (drawn == ready_count) null else targets[next_slot % 2];
-                if (output) |target| render.Renderer.setViewTarget(view_id, target, width, height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
                 if (output) |target| {
                     input_texture = target.texture;
-                    next_slot += 1;
+                    if (!is_final) next_slot += 1;
                 }
             },
             .model => {
@@ -781,12 +808,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 next_view_id += 1;
                 const mesh_view = next_view_id;
                 next_view_id += 1;
-                const output = if (drawn == ready_count) null else targets[next_slot % 2];
-                const rect_width = if (output != null) width else output_width;
-                const rect_height = if (output != null) height else output_height;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                const rect_width = if (output != null and !is_final) width else output_width;
+                const rect_height = if (output != null and !is_final) height else output_height;
                 if (output) |target| {
-                    render.Renderer.setViewTarget(blit_view, target, width, height);
-                    render.Renderer.setViewTarget(mesh_view, target, width, height);
+                    render.Renderer.setViewTarget(blit_view, target, rect_width, rect_height);
+                    render.Renderer.setViewTarget(mesh_view, target, rect_width, rect_height);
                 } else {
                     render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
                     render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
@@ -798,11 +826,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, aspect_ratio);
                 if (output) |target| {
                     input_texture = target.texture;
-                    next_slot += 1;
+                    if (!is_final) next_slot += 1;
                 }
             },
         }
     }
+
+    if (s.capture_requested and ready_count > 0) blitCaptureToSwapChain(e, r, next_view_id);
 
     if (ready_count == 0) {
         // beauty_active is guaranteed true here (the ready_count == 0
@@ -810,9 +840,29 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // output is a plain sampled texture, never a view's render
         // target, so with no lens stage to hand it off to, it still
         // needs one real draw to actually reach the swap chain.
-        render.Renderer.setViewTarget(next_view_id, null, output_width, output_height);
+        render.Renderer.setViewTarget(next_view_id, finalTarget(e, s), output_width, output_height);
         r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture);
+        if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 1);
     }
+}
+
+/// The composite chain's true final-stage target: the swap chain
+/// directly, or - for exactly the one frame ck_engine_capture_frame
+/// requested - the dedicated capture target instead, so the chain's
+/// real output lands somewhere bgfx_read_texture can read it back from
+/// after the frame completes.
+fn finalTarget(e: *Engine, s: *Session) ?render.Renderer.OffscreenTarget {
+    return if (s.capture_requested) e.capture_target else null;
+}
+
+/// Draws the just-composited capture target to the swap chain, so a
+/// captured frame still displays normally - the same passthrough blit
+/// the ready_count == 0 beauty-only path already uses to reach the
+/// swap chain, reused here for the same reason.
+fn blitCaptureToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
+    const target = e.capture_target orelse return;
+    render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
+    r.submitShaderPass(view_id, r.passthroughProgram(), target.texture);
 }
 
 pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!*Session {
@@ -1043,6 +1093,57 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
     } else {
         r.touch();
     }
+    _ = r.frame();
+    return .ok;
+}
+
+/// Renders one frame the same way ck_engine_render_frame does, and also
+/// reads its composited output back into out_data as RGBA8, row 0
+/// first. The WebGPU render path's own equivalent to what a WebGL2
+/// canvas's readPixels already gives a caller directly - WebGPU has no
+/// synchronous equivalent, so this does the capture on the render side
+/// instead. out_width/out_height report the real image size; out_data
+/// must be at least out_width * out_height * 4 bytes, reported through
+/// the same two out params, and the call fails with invalid_argument
+/// rather than truncating silently if out_capacity is smaller.
+/// render.Renderer.readTexture only enqueues a read - bgfx's own
+/// command-buffer model (bgfx_p.h's Context::readTexture) defers the
+/// actual copy to the next bgfx_frame() call after the one it's queued
+/// in, so a second frame() after the enqueue is what actually runs it.
+pub export fn ck_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const s = session orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    const data = out_data orelse return .invalid_argument;
+    const w = out_width orelse return .invalid_argument;
+    const h = out_height orelse return .invalid_argument;
+
+    s.capture_requested = true;
+    defer s.capture_requested = false;
+
+    pollLutLoaders(s, r, s.engine.gpa);
+    pollBlendLoaders(s, r, s.engine.gpa);
+    pollModelLoaders(s, r, s.engine.gpa);
+    pollSegmentationMask(s);
+    if (s.current) |current| {
+        const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
+        const mirror = current.desc.flags & frame_flag_mirror != 0;
+        renderCompositeChain(e, r, s, current, rotation, mirror) catch {
+            r.submitPreview(0, current.preview, rotation * 90, mirror);
+        };
+    } else {
+        r.touch();
+    }
+    _ = r.frame();
+
+    const target = e.capture_target orelse return .renderer_unavailable;
+    w.* = e.capture_width;
+    h.* = e.capture_height;
+    const full_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
+    if (full_size == 0) return .ok;
+    if (out_capacity < full_size) return .invalid_argument;
+
+    render.Renderer.readTexture(target.texture, data);
     _ = r.frame();
     return .ok;
 }

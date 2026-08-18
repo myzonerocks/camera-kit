@@ -129,6 +129,14 @@ export class PreviewSession {
   /// mechanism every other shell uses for sensor orientation - not a
   /// CSS or texture-upload workaround.
   private videoFlipped = false;
+  /// ck_engine_capture_frame on the WebGPU build runs as an async
+  /// (Asyncify-suspending) ccall - while it's suspended, the rAF-driven
+  /// tick() below would otherwise keep firing and reenter the wasm
+  /// module with a plain synchronous ck_engine_render_frame call, which
+  /// Emscripten's Asyncify does not support while a call is already
+  /// suspended. tick() checks this and skips its own render call until
+  /// the capture completes.
+  private captureInFlight = false;
   private whitenLutsLoaded = 0;
   private lipstickTextureLoaded = false;
   private blushTextureLoaded = false;
@@ -461,6 +469,7 @@ export class PreviewSession {
 
   private tick = (): void => {
     this.raf = requestAnimationFrame(this.tick);
+    if (this.captureInFlight) return;
     const now = performance.now();
     const frameTimeUs = Math.max(0, Math.round((now - this.lastTick) * 1000));
     this.lastTick = now;
@@ -496,59 +505,77 @@ export class PreviewSession {
     }
   };
 
-  /// bgfx's own WebGL2 context (see the comment on create() above) never
-  /// preserves its drawing buffer, so a read has to happen synchronously
-  /// right after a fresh render - one JS turn later and the browser has
-  /// already presented and cleared it. Both read methods below render
-  /// once more immediately before reading rather than trusting whatever
-  /// the last rAF tick happened to leave behind.
-  private renderForReadback(): void {
-    this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
+  /// The two ways this shell reads pixels back: bgfx's own WebGL2
+  /// context (see create() above) never preserves its drawing buffer,
+  /// so readPixels has to run right after a fresh render. WebGPU has
+  /// no synchronous readPixels equivalent - ck_engine_capture_frame is
+  /// the native-side path for that backend, and needs {async: true}
+  /// since its internal bgfx_read_texture call maps a GPU buffer.
+  private async capturePixels(): Promise<{ pixels: Uint8Array; width: number; height: number }> {
+    if (this.gl) {
+      const gl = this.gl;
+      this.mod.ccall("ck_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
+      const width = this.canvas.width;
+      const height = this.canvas.height;
+      const pixels = new Uint8Array(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return { pixels, width, height };
+    }
+
+    const capacity = this.canvas.width * this.canvas.height * 4;
+    const dataPtr = this.mod.ccall("ck_alloc", "number", ["number"], [capacity]);
+    const outWidthPtr = this.mod.ccall("ck_alloc", "number", ["number"], [4]);
+    const outHeightPtr = this.mod.ccall("ck_alloc", "number", ["number"], [4]);
+    this.captureInFlight = true;
+    try {
+      const status = await this.mod.ccall(
+        "ck_engine_capture_frame",
+        "number",
+        ["number", "number", "number", "number", "number", "number"],
+        [this.engine, this.session, dataPtr, capacity, outWidthPtr, outHeightPtr],
+        { async: true },
+      );
+      if (status !== CK_OK) throw new Error(`ck_engine_capture_frame failed: status ${status}`);
+      const width = this.mod.getValue(outWidthPtr, "i32");
+      const height = this.mod.getValue(outHeightPtr, "i32");
+      const pixels = this.mod.HEAPU8.slice(dataPtr, dataPtr + width * height * 4);
+      return { pixels, width, height };
+    } finally {
+      this.captureInFlight = false;
+      this.mod.ccall("ck_free", null, ["number", "number"], [dataPtr, capacity]);
+      this.mod.ccall("ck_free", null, ["number", "number"], [outWidthPtr, 4]);
+      this.mod.ccall("ck_free", null, ["number", "number"], [outHeightPtr, 4]);
+    }
   }
 
-  /// readPixels-based readback only exists on the WebGL2 build for now
-  /// - the WebGPU build's canvas has no synchronous pixel-read API
-  /// (its equivalent is an async GPUBuffer copy+map), not yet built.
-  private requireGl(): WebGL2RenderingContext {
-    if (!this.gl) throw new Error("pixel readback is not yet implemented on the WebGPU build");
-    return this.gl;
-  }
-
-  /// Renders, reads, and PNG-encodes the canvas in one synchronous
-  /// call - same reason readCenterPixel/readFrameSum render right
-  /// before reading (bgfx's own context never preserves its drawing
-  /// buffer), a caller across an async boundary can't split render and
-  /// read into two separate steps either. Test/debug tooling: a real
-  /// image beats a frame-sum heuristic for verifying a landmark-driven
-  /// effect actually landed where it should, not just that something
-  /// changed somewhere.
-  captureFrame(): string {
-    this.renderForReadback();
-    const gl = this.requireGl();
-    const w = this.canvas.width;
-    const h = this.canvas.height;
-    const pixels = new Uint8Array(w * h * 4);
-    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  /// PNG-encodes the current frame. Test/debug tooling: a real image
+  /// beats a frame-sum heuristic for verifying a landmark-driven effect
+  /// actually landed where it should, not just that something changed
+  /// somewhere.
+  async captureFrame(): Promise<string> {
+    const { pixels, width: w, height: h } = await this.capturePixels();
     const out = document.createElement("canvas");
     out.width = w;
     out.height = h;
     const ctx = out.getContext("2d")!;
     const imageData = ctx.createImageData(w, h);
-    const rowBytes = w * 4;
-    for (let y = 0; y < h; y += 1) {
-      const srcStart = (h - 1 - y) * rowBytes;
-      imageData.data.set(pixels.subarray(srcStart, srcStart + rowBytes), y * rowBytes);
+    if (this.gl) {
+      const rowBytes = w * 4;
+      for (let y = 0; y < h; y += 1) {
+        const srcStart = (h - 1 - y) * rowBytes;
+        imageData.data.set(pixels.subarray(srcStart, srcStart + rowBytes), y * rowBytes);
+      }
+    } else {
+      imageData.data.set(pixels);
     }
     ctx.putImageData(imageData, 0, 0);
     return out.toDataURL("image/png");
   }
 
-  readCenterPixel(): Uint8Array {
-    this.renderForReadback();
-    const gl = this.requireGl();
-    const pixel = new Uint8Array(4);
-    gl.readPixels(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
-    return pixel;
+  async readCenterPixel(): Promise<Uint8Array> {
+    const { pixels, width, height } = await this.capturePixels();
+    const offset = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
+    return pixels.slice(offset, offset + 4);
   }
 
   degradeLevel(): DegradeLevel {
@@ -560,11 +587,8 @@ export class PreviewSession {
   /// synthetic test pattern (Chrome's fake capture device, say) is free
   /// to put its own "lit" content anywhere and leave any single fixed
   /// coordinate dark for long stretches.
-  readFrameSum(): number {
-    this.renderForReadback();
-    const gl = this.requireGl();
-    const pixels = new Uint8Array(this.canvas.width * this.canvas.height * 4);
-    gl.readPixels(0, 0, this.canvas.width, this.canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  async readFrameSum(): Promise<number> {
+    const { pixels } = await this.capturePixels();
     let sum = 0;
     for (const value of pixels) sum += value;
     return sum;

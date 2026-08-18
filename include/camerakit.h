@@ -214,6 +214,21 @@ ck_status ck_engine_render_frame(ck_engine *engine, ck_session *session);
  * tooling only - conformance harnesses, never a user-facing control. */
 ck_status ck_engine_request_screenshot(ck_engine *engine, const uint8_t *path, size_t path_len);
 
+/* Graph thread. Renders and presents like ck_engine_render_frame, and
+ * also reads the composited output back into out_data as RGBA8 (row 0
+ * first), reporting the real image size through out_width/out_height.
+ * out_data must already be at least render_surface_width *
+ * render_surface_height * 4 bytes (the same dimensions passed to
+ * ck_engine_init_renderer, or the most recent ck_engine_resize) - the
+ * call fails with invalid_argument rather than truncating silently if
+ * out_capacity is smaller. Debug/test tooling only, for render backends
+ * with no synchronous pixel-readback API of their own. On the WebGPU
+ * backend this issues two internal frame submits (see
+ * third_party/bgfx/patches/0003-webgpu-readtexture-wait-any.patch for
+ * the wait-mode fix this also depends on) since bgfx's own read-texture
+ * command only runs on the frame after the one that queues it. */
+ck_status ck_engine_capture_frame(ck_engine *engine, ck_session *session, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height);
+
 /* Graph thread. config may be null for defaults. */
 ck_status ck_session_create(ck_engine *engine, const ck_session_config *config, ck_session **out_session);
 void ck_session_destroy(ck_session *session);

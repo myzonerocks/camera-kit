@@ -53,3 +53,30 @@ export fn ck_core_smoke_render_frame(out_name: [*]u8, out_name_cap: i32) i32 {
 
     return @intCast(copy_len);
 }
+
+/// bgfx_read_texture() enqueues a CommandBuffer::ReadTexture entry
+/// (bgfx_p.h's Context::readTexture) instead of running synchronously -
+/// it only executes when that entry's frame is processed, which on
+/// this single-threaded Emscripten build (BGFX_CONFIG_MULTITHREADED=0)
+/// happens inside the *next* bgfx_frame() call after the one it was
+/// queued in, not the call that precedes it. Packs the first read-back
+/// pixel's RGBA into the return value (8 bits each) so a caller can
+/// inspect the real bytes.
+export fn ck_core_smoke_read_texture() i32 {
+    var renderer = render.Renderer.init(std.heap.c_allocator, .{
+        .native_window_handle = @ptrCast(@constCast("#canvas")),
+        .width = 640,
+        .height = 480,
+    }) catch return -1;
+    defer renderer.deinit();
+
+    const red_pixels = [_]u8{ 255, 0, 0, 255 } ** 4;
+    const texture = render.Renderer.createStaticTexture(2, 2, &red_pixels);
+    _ = c.bgfx_frame(0);
+
+    var pixels: [2 * 2 * 4]u8 = undefined;
+    render.Renderer.readTexture(texture, &pixels);
+    _ = c.bgfx_frame(0);
+
+    return (@as(i32, pixels[0]) << 24) | (@as(i32, pixels[1]) << 16) | (@as(i32, pixels[2]) << 8) | @as(i32, pixels[3]);
+}

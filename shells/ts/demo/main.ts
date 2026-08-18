@@ -185,11 +185,19 @@ async function run(): Promise<void> {
     onFps(fps, rendered, cameraFrames) {
       const level = preview.degradeLevel();
       status.textContent = `capture ${preview.state}  ${fps.toFixed(1)} fps  frames ${cameraFrames}  degrade ${level}`;
+      // Claimed before the read starts, not after it resolves - the
+      // WebGPU build's own readCenterPixel is a real async engine call,
+      // and this fires once per rAF tick, so without an early claim
+      // several ticks would each start their own capture before the
+      // first one's promise settles.
       if (!proofLogged && cameraFrames > 30 && fps > 20) {
-        const pixel = preview.readCenterPixel();
-        const lit = pixel[0] + pixel[1] + pixel[2] > 0;
-        if (lit) {
-          proofLogged = true;
+        proofLogged = true;
+        preview.readCenterPixel().then((pixel) => {
+          const lit = pixel[0] + pixel[1] + pixel[2] > 0;
+          if (!lit) {
+            proofLogged = false;
+            return;
+          }
           const line = `CKWEB preview active: ${cameraFrames} camera frames at ${fps.toFixed(1)} fps, center pixel ${pixel[0]},${pixel[1]},${pixel[2]}`;
           console.log(line);
           document.title = line;
@@ -197,7 +205,7 @@ async function run(): Promise<void> {
           div.id = "proof";
           div.textContent = line;
           document.body.appendChild(div);
-        }
+        });
       }
     },
   });
@@ -269,7 +277,7 @@ async function run(): Promise<void> {
   };
   (window as unknown as Record<string, unknown>).makeupTexturesReady = true;
   (window as unknown as Record<string, unknown>).loadStillFrame = (url: string) => preview.loadStillFrame(url);
-  (window as unknown as Record<string, unknown>).readCenterPixel = () => Array.from(preview.readCenterPixel());
+  (window as unknown as Record<string, unknown>).readCenterPixel = async () => Array.from(await preview.readCenterPixel());
   (window as unknown as Record<string, unknown>).readFrameSum = () => preview.readFrameSum();
   (window as unknown as Record<string, unknown>).captureFrame = () => preview.captureFrame();
   (window as unknown as Record<string, unknown>).activateLens = async (url: string) => {
