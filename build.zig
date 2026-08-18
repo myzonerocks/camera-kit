@@ -3232,6 +3232,18 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         .install_subdir = "",
     });
     step.dependOn(&install.step);
+
+    // shells/ts/demo/ is a real source-tree directory, not under
+    // zig-out - addInstallDirectory can't reach it (InstallDir is
+    // always rooted at the install prefix), so this step's own build
+    // output is the demo's actual input, keeping it from silently
+    // testing a stale binary a manual `cp` forgot to re-run.
+    const wasm_out = js_out.dirname().path(b, "camerakit_web.wasm");
+    const demo_subdir = if (webgpu) "shells/ts/demo/webgpu/" else "shells/ts/demo/";
+    const demo_copy = b.addUpdateSourceFiles();
+    demo_copy.addCopyFileToSource(js_out, b.fmt("{s}camerakit_web.js", .{demo_subdir}));
+    demo_copy.addCopyFileToSource(wasm_out, b.fmt("{s}camerakit_web.wasm", .{demo_subdir}));
+    step.dependOn(&demo_copy.step);
 }
 
 // Compiles bgfx, bx, bimg, and astc-encoder for wasm32-emscripten and
