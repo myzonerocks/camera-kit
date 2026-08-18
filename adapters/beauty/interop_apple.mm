@@ -15,11 +15,10 @@
 // GPUPixelFramebuffer, a publicly reachable facility whose header just
 // is not under the public include tree.
 //
-// macOS renders through legacy desktop GL (NSOpenGLContext/CGL); iOS
-// through GLES2 (EAGLContext). Both speak the same core GL ES 2.0 subset
-// this file actually uses, and CVOpenGLTextureCache/CVOpenGLESTextureCache
-// are the same shape one level up, so the blit itself and the shaders it
-// runs are shared; only surface setup differs.
+// macOS reads the shared surface through CVOpenGLTextureCache. iOS
+// renders through ANGLE's EGL/GLES-over-Metal now (see adapters/angle),
+// so it reads through ANGLE's own EGL_IOSURFACE_ANGLE surface instead -
+// CVOpenGLESTextureCache has no real EAGLContext to bind to anymore.
 
 #include <cstdint>
 #include <new>
@@ -37,8 +36,10 @@
 #import <OpenGL/OpenGL.h>
 #import <OpenGL/gl.h>
 #else
-#import <OpenGLES/EAGL.h>
-#import <OpenGLES/ES2/gl.h>
+#include <EGL/egl.h>
+#include <EGL/eglext_angle.h>
+#include <GLES2/gl2ext.h>
+#include <GLES3/gl3.h>
 #endif
 
 extern "C" int32_t goss_beauty_process_external_texture(void* handle,
@@ -228,52 +229,50 @@ struct AppleInterop {
 
 #else  // TARGET_OS_IOS
 
-// Same shape as the macOS struct above, over CVOpenGLESTextureCache
-// instead: bound to whatever EAGLContext is current when first created
-// rather than a CGL pixel format, and the vended texture target is always
-// GL_TEXTURE_2D (the ES cache never yields rectangle textures the way the
-// legacy desktop one does).
+// Goes straight at the IOSurface through ANGLE's EGL_IOSURFACE_ANGLE
+// client-buffer surface, bound to a normal GL texture via
+// eglBindTexImage - the same texture handle DrawBlit already expects.
 struct AppleInterop {
-  CVOpenGLESTextureCacheRef texture_cache = nullptr;
+  EGLSurface egl_surface = EGL_NO_SURFACE;
   CVPixelBufferRef pixel_buffer = nullptr;
-  CVOpenGLESTextureRef gl_texture = nullptr;
+  GLuint texture = 0;
   GLuint fbo = 0;
   GLuint blit_program = 0;
   int width = 0;
   int height = 0;
 
-  ~AppleInterop() {
-    if (gl_texture) CFRelease(gl_texture);
-    if (pixel_buffer) CFRelease(pixel_buffer);
-    if (texture_cache) CFRelease(texture_cache);
-    if (fbo) glDeleteFramebuffers(1, &fbo);
-    if (blit_program) glDeleteProgram(blit_program);
-  }
-
-  bool EnsureSurface(int new_width, int new_height) {
-    if (gl_texture && width == new_width && height == new_height) return true;
-
-    EAGLContext* eagl_context = [EAGLContext currentContext];
-    if (eagl_context == nullptr) return false;
-
-    if (texture_cache == nullptr) {
-      CVReturn created = CVOpenGLESTextureCacheCreate(
-          kCFAllocatorDefault, nullptr, eagl_context, nullptr, &texture_cache);
-      if (created != kCVReturnSuccess) return false;
+  void ReleaseSurface() {
+    auto* ctx = gpupixel::GPUPixelContext::GetInstance();
+    if (egl_surface != EGL_NO_SURFACE) {
+      if (texture) eglReleaseTexImage(ctx->GetEglDisplay(), egl_surface, EGL_BACK_BUFFER);
+      eglDestroySurface(ctx->GetEglDisplay(), egl_surface);
+      egl_surface = EGL_NO_SURFACE;
     }
-
-    if (gl_texture) {
-      CFRelease(gl_texture);
-      gl_texture = nullptr;
+    if (texture) {
+      glDeleteTextures(1, &texture);
+      texture = 0;
     }
     if (pixel_buffer) {
       CFRelease(pixel_buffer);
       pixel_buffer = nullptr;
     }
+  }
+
+  ~AppleInterop() {
+    ReleaseSurface();
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (blit_program) glDeleteProgram(blit_program);
+  }
+
+  bool EnsureSurface(int new_width, int new_height) {
+    if (texture && width == new_width && height == new_height) return true;
+    ReleaseSurface();
+
+    auto* ctx = gpupixel::GPUPixelContext::GetInstance();
+    EGLDisplay display = ctx->GetEglDisplay();
 
     NSDictionary* attributes = @{
       (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferOpenGLESCompatibilityKey : @YES,
       (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
     };
     CVReturn buffer_status = CVPixelBufferCreate(
@@ -281,11 +280,39 @@ struct AppleInterop {
         (__bridge CFDictionaryRef)attributes, &pixel_buffer);
     if (buffer_status != kCVReturnSuccess) return false;
 
-    CVReturn texture_status = CVOpenGLESTextureCacheCreateTextureFromImage(
-        kCFAllocatorDefault, texture_cache, pixel_buffer, nullptr, GL_TEXTURE_2D,
-        GL_RGBA, new_width, new_height, GL_BGRA_EXT, GL_UNSIGNED_BYTE, 0,
-        &gl_texture);
-    if (texture_status != kCVReturnSuccess) {
+    IOSurfaceRef io_surface = CVPixelBufferGetIOSurface(pixel_buffer);
+    if (io_surface == nullptr) {
+      CFRelease(pixel_buffer);
+      pixel_buffer = nullptr;
+      return false;
+    }
+
+    const EGLint surface_attribs[] = {
+        EGL_WIDTH, new_width,
+        EGL_HEIGHT, new_height,
+        EGL_IOSURFACE_PLANE_ANGLE, 0,
+        EGL_TEXTURE_TARGET, EGL_TEXTURE_2D,
+        EGL_TEXTURE_FORMAT, EGL_TEXTURE_RGBA,
+        EGL_TEXTURE_INTERNAL_FORMAT_ANGLE, GL_BGRA_EXT,
+        EGL_TEXTURE_TYPE_ANGLE, GL_UNSIGNED_BYTE,
+        EGL_NONE,
+    };
+    egl_surface = eglCreatePbufferFromClientBuffer(
+        display, EGL_IOSURFACE_ANGLE, (EGLClientBuffer)io_surface,
+        ctx->GetEglConfig(), surface_attribs);
+    if (egl_surface == EGL_NO_SURFACE) {
+      CFRelease(pixel_buffer);
+      pixel_buffer = nullptr;
+      return false;
+    }
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    if (!eglBindTexImage(display, egl_surface, EGL_BACK_BUFFER)) {
+      glDeleteTextures(1, &texture);
+      texture = 0;
+      eglDestroySurface(display, egl_surface);
+      egl_surface = EGL_NO_SURFACE;
       CFRelease(pixel_buffer);
       pixel_buffer = nullptr;
       return false;
@@ -296,8 +323,8 @@ struct AppleInterop {
     return true;
   }
 
-  GLenum Target() const { return CVOpenGLESTextureGetTarget(gl_texture); }
-  GLuint Name() const { return CVOpenGLESTextureGetName(gl_texture); }
+  GLenum Target() const { return GL_TEXTURE_2D; }
+  GLuint Name() const { return texture; }
 };
 
 #endif
@@ -430,22 +457,34 @@ struct AppleInputSurface {
 
 #else  // TARGET_OS_IOS
 
-// Same shape as the macOS struct above, over CVOpenGLESTextureCache
-// instead of CVOpenGLTextureCache - the ES cache always vends
-// GL_TEXTURE_2D, unlike the legacy desktop one, so SamplerKind is
-// always 0 here.
+// Same Metal-side capture as the macOS struct above; the GL-side import
+// goes through ANGLE's EGL_IOSURFACE_ANGLE instead of
+// CVOpenGLESTextureCache, same reasoning as AppleInterop above. ANGLE
+// only ever vends GL_TEXTURE_2D, so SamplerKind is always 0 here.
 struct AppleInputSurface {
   CVPixelBufferRef pixel_buffer = nullptr;
   CVMetalTextureCacheRef metal_cache = nullptr;
   CVMetalTextureRef metal_texture = nullptr;
-  CVOpenGLESTextureCacheRef gl_cache = nullptr;
-  CVOpenGLESTextureRef gl_texture = nullptr;
+  EGLSurface egl_surface = EGL_NO_SURFACE;
+  GLuint gl_texture = 0;
   int width = 0;
   int height = 0;
 
+  void ReleaseGLImport() {
+    auto* ctx = gpupixel::GPUPixelContext::GetInstance();
+    if (egl_surface != EGL_NO_SURFACE) {
+      if (gl_texture) eglReleaseTexImage(ctx->GetEglDisplay(), egl_surface, EGL_BACK_BUFFER);
+      eglDestroySurface(ctx->GetEglDisplay(), egl_surface);
+      egl_surface = EGL_NO_SURFACE;
+    }
+    if (gl_texture) {
+      glDeleteTextures(1, &gl_texture);
+      gl_texture = 0;
+    }
+  }
+
   ~AppleInputSurface() {
-    if (gl_texture) CFRelease(gl_texture);
-    if (gl_cache) CFRelease(gl_cache);
+    ReleaseGLImport();
     if (metal_texture) CFRelease(metal_texture);
     if (metal_cache) CFRelease(metal_cache);
     if (pixel_buffer) CFRelease(pixel_buffer);
@@ -455,14 +494,12 @@ struct AppleInputSurface {
     if (metal_texture && width == new_width && height == new_height) return true;
     if (device == nil) return false;
 
-    if (gl_texture) { CFRelease(gl_texture); gl_texture = nullptr; }
-    if (gl_cache) { CFRelease(gl_cache); gl_cache = nullptr; }
+    ReleaseGLImport();
     if (metal_texture) { CFRelease(metal_texture); metal_texture = nullptr; }
     if (pixel_buffer) { CFRelease(pixel_buffer); pixel_buffer = nullptr; }
 
     NSDictionary* attributes = @{
       (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (NSString*)kCVPixelBufferOpenGLESCompatibilityKey : @YES,
       (NSString*)kCVPixelBufferMetalCompatibilityKey : @YES,
     };
     CVReturn buffer_status = CVPixelBufferCreate(
@@ -503,23 +540,41 @@ struct AppleInputSurface {
     if (gl_texture) return true;
     if (pixel_buffer == nullptr) return false;
 
-    EAGLContext* eagl_context = [EAGLContext currentContext];
-    if (eagl_context == nullptr) return false;
+    IOSurfaceRef io_surface = CVPixelBufferGetIOSurface(pixel_buffer);
+    if (io_surface == nullptr) return false;
 
-    if (gl_cache == nullptr) {
-      CVReturn created = CVOpenGLESTextureCacheCreate(
-          kCFAllocatorDefault, nullptr, eagl_context, nullptr, &gl_cache);
-      if (created != kCVReturnSuccess) return false;
+    auto* ctx = gpupixel::GPUPixelContext::GetInstance();
+    EGLDisplay display = ctx->GetEglDisplay();
+
+    const EGLint surface_attribs[] = {
+        EGL_WIDTH, width,
+        EGL_HEIGHT, height,
+        EGL_IOSURFACE_PLANE_ANGLE, 0,
+        EGL_TEXTURE_TARGET, EGL_TEXTURE_2D,
+        EGL_TEXTURE_FORMAT, EGL_TEXTURE_RGBA,
+        EGL_TEXTURE_INTERNAL_FORMAT_ANGLE, GL_BGRA_EXT,
+        EGL_TEXTURE_TYPE_ANGLE, GL_UNSIGNED_BYTE,
+        EGL_NONE,
+    };
+    egl_surface = eglCreatePbufferFromClientBuffer(
+        display, EGL_IOSURFACE_ANGLE, (EGLClientBuffer)io_surface,
+        ctx->GetEglConfig(), surface_attribs);
+    if (egl_surface == EGL_NO_SURFACE) return false;
+
+    glGenTextures(1, &gl_texture);
+    glBindTexture(GL_TEXTURE_2D, gl_texture);
+    if (!eglBindTexImage(display, egl_surface, EGL_BACK_BUFFER)) {
+      glDeleteTextures(1, &gl_texture);
+      gl_texture = 0;
+      eglDestroySurface(display, egl_surface);
+      egl_surface = EGL_NO_SURFACE;
+      return false;
     }
-
-    CVReturn texture_status = CVOpenGLESTextureCacheCreateTextureFromImage(
-        kCFAllocatorDefault, gl_cache, pixel_buffer, nullptr, GL_TEXTURE_2D,
-        GL_RGBA, width, height, GL_BGRA_EXT, GL_UNSIGNED_BYTE, 0, &gl_texture);
-    return texture_status == kCVReturnSuccess;
+    return true;
   }
 
-  GLenum GLTarget() const { return CVOpenGLESTextureGetTarget(gl_texture); }
-  GLuint GLName() const { return CVOpenGLESTextureGetName(gl_texture); }
+  GLenum GLTarget() const { return GL_TEXTURE_2D; }
+  GLuint GLName() const { return gl_texture; }
   int32_t SamplerKind() const { return 0; }
 };
 
