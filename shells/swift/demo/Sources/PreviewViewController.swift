@@ -50,7 +50,7 @@ final class PreviewViewController: UIViewController {
         ])
 
         let version = goss_abi_version()
-        log.info("ck abi \(version >> 16).\(version & 0xffff)")
+        log.info("goss abi \(version >> 16).\(version & 0xffff)")
         guard version >> 16 == 0 else {
             statusLabel.text = "abi major mismatch"
             return
@@ -211,13 +211,18 @@ final class PreviewViewController: UIViewController {
 
         let path = CGMutablePath()
         let bounds = view.bounds
+        // landmark_count is read here, not inside the closure below - Swift's
+        // exclusivity checking treats withUnsafeBytes(of: &faceResult.landmarks)
+        // as an exclusive access to all of faceResult, and a sibling-field read
+        // from inside that closure is a real runtime crash, not just a lint.
+        let landmarkCount = Int(faceResult.landmark_count)
         withUnsafeBytes(of: &faceResult.landmarks) { raw in
             let points = raw.bindMemory(to: Float.self)
             let sensorWidth = CGFloat(max(camera.frameWidth, 1))
             let sensorHeight = CGFloat(max(camera.frameHeight, 1))
             let scaleX = bounds.width / sensorHeight
             let scaleY = bounds.height / sensorWidth
-            for index in 0 ..< Int(faceResult.landmark_count) {
+            for index in 0 ..< landmarkCount {
                 let x = CGFloat(points[index * 3])
                 let y = CGFloat(points[index * 3 + 1])
                 // Quarter turn: sensor x runs down the portrait screen.

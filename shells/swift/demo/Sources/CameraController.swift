@@ -244,13 +244,18 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         )
         // bgfx is single-threaded (main thread only, via CADisplayLink) -
         // hop off this background capture queue for the submit call.
-        DispatchQueue.main.async { [weak self, engineSession] in
+        // planes only holds raw pointer values, so the CVMetalTexture refs
+        // must be captured here too - inflight's ring can recycle its slot
+        // before this block runs, and MTLTexture is only valid as long as
+        // its CVMetalTexture wrapper is retained.
+        DispatchQueue.main.async { [weak self, engineSession, yRef, uvRef] in
             guard let self else { return }
             var desc = desc
             var planes = planes
             if goss_session_submit_frame(engineSession, &desc, &planes) == GOSS_OK {
                 self.submittedFrames += 1
             }
+            _ = (yRef, uvRef)
         }
 
         // Tracking reads the same frame's planes on the CPU; the worker

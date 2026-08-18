@@ -46,12 +46,18 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var proofLogged = false
     private val lensSignals = LensSignals()
 
-    // Two frames of retained buffers keep the copies alive while in flight.
-    private var yScratch: ByteBuffer? = null
-    private var uvScratch: ByteBuffer? = null
+    // Ring depth 2: the actual submit call hops to the main thread (bgfx's
+    // single-threaded contract), so the analyzer can start refilling the
+    // next slot before the previous slot's hopped submit has run.
+    private val yScratchRing = arrayOfNulls<ByteBuffer>(2)
+    private val uvScratchRing = arrayOfNulls<ByteBuffer>(2)
+    private var scratchRingIndex = 0
 
     // Zero-copy is attempted until the device or stream refuses it once;
-    // after that the stream stays on the declared copy path.
+    // after that the stream stays on the declared copy path. Written from
+    // the main thread (inside the hopped submit below), read from the
+    // analyzer thread.
+    @Volatile
     private var zeroCopyRefused = false
 
     // The conformance run reuses this same real window/renderer setup,
@@ -248,28 +254,40 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .build()
+            val mainExecutor = ContextCompat.getMainExecutor(this)
             analysis.setAnalyzer(analysisExecutor) { image ->
                 image.use {
                     val session = session ?: return@use
 
-                    var previewSubmitted = false
+                    // bgfx is single-threaded (main thread only, driven by
+                    // Choreographer in renderTick) - every submit call below
+                    // hops there, each keeping its own frame data alive
+                    // across the hop instead of relying on anything this
+                    // analyzer callback recycles once it returns.
+                    var zeroCopyAttempted = false
                     if (!zeroCopyRefused && android.os.Build.VERSION.SDK_INT >= 28) {
                         val hardwareBuffer = it.image?.hardwareBuffer
                         if (hardwareBuffer != null) {
-                            val submitted = session.submitHardwareBuffer(
-                                hardwareBuffer,
-                                it.width, it.height,
-                                it.imageInfo.rotationDegrees, false,
-                                it.imageInfo.timestamp / 1000,
-                            )
-                            hardwareBuffer.close()
-                            if (submitted) {
-                                cameraFrames += 1
-                                if (cameraFrames == 1) Log.i(tag, "capture state running zero copy")
-                                previewSubmitted = true
-                            } else {
-                                zeroCopyRefused = true
-                                Log.i(tag, "zero copy refused, copy path takes over")
+                            zeroCopyAttempted = true
+                            val width = it.width
+                            val height = it.height
+                            val rotationDegrees = it.imageInfo.rotationDegrees
+                            val timestampUs = it.imageInfo.timestamp / 1000
+                            mainExecutor.execute {
+                                val submitted = session.submitHardwareBuffer(
+                                    hardwareBuffer,
+                                    width, height,
+                                    rotationDegrees, false,
+                                    timestampUs,
+                                )
+                                hardwareBuffer.close()
+                                if (submitted) {
+                                    cameraFrames += 1
+                                    if (cameraFrames == 1) Log.i(tag, "capture state running zero copy")
+                                } else {
+                                    zeroCopyRefused = true
+                                    Log.i(tag, "zero copy refused, copy path takes over")
+                                }
                             }
                         }
                     }
@@ -278,27 +296,28 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     val u = it.planes[1]
                     val v = it.planes[2]
 
-                    // Direct buffers survive the native call; the camera
-                    // buffer is recycled the moment use() closes.
+                    val slot = scratchRingIndex
+                    scratchRingIndex = (scratchRingIndex + 1) % yScratchRing.size
+
                     val ySize = y.buffer.remaining()
-                    var yCopy = yScratch
+                    var yCopy = yScratchRing[slot]
                     if (yCopy == null || yCopy.capacity() < ySize) {
                         yCopy = ByteBuffer.allocateDirect(ySize)
-                        yScratch = yCopy
+                        yScratchRing[slot] = yCopy
                     }
                     yCopy.clear()
                     yCopy.put(y.buffer)
                     yCopy.flip()
 
                     val uvStride: Int
-                    var uvCopy = uvScratch
+                    var uvCopy = uvScratchRing[slot]
                     if (u.pixelStride == 2) {
                         // Semi-planar already; the interleaved view starts
                         // at the u plane.
                         val uvSize = u.buffer.remaining()
                         if (uvCopy == null || uvCopy.capacity() < uvSize) {
                             uvCopy = ByteBuffer.allocateDirect(uvSize)
-                            uvScratch = uvCopy
+                            uvScratchRing[slot] = uvCopy
                         }
                         uvCopy.clear()
                         uvCopy.put(u.buffer)
@@ -312,7 +331,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         val uvSize = chromaWidth * chromaHeight * 2
                         if (uvCopy == null || uvCopy.capacity() < uvSize) {
                             uvCopy = ByteBuffer.allocateDirect(uvSize)
-                            uvScratch = uvCopy
+                            uvScratchRing[slot] = uvCopy
                         }
                         uvCopy.clear()
                         val uBuf = u.buffer
@@ -328,16 +347,25 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         uvCopy.flip()
                         uvStride = chromaWidth * 2
                     }
-                    if (!previewSubmitted) {
-                        val submitted = session.submitFrameCopy(
-                            yCopy, y.rowStride, uvCopy, uvStride,
-                            it.width, it.height,
-                            it.imageInfo.rotationDegrees, mirrored = false,
-                            it.imageInfo.timestamp / 1000,
-                        )
-                        if (submitted) {
-                            cameraFrames += 1
-                            if (cameraFrames == 1) Log.i(tag, "capture state running")
+                    if (!zeroCopyAttempted) {
+                        val width = it.width
+                        val height = it.height
+                        val rotationDegrees = it.imageInfo.rotationDegrees
+                        val timestampUs = it.imageInfo.timestamp / 1000
+                        val yStride = y.rowStride
+                        val ySubmit = yCopy
+                        val uvSubmit = uvCopy
+                        mainExecutor.execute {
+                            val submitted = session.submitFrameCopy(
+                                ySubmit, yStride, uvSubmit, uvStride,
+                                width, height,
+                                rotationDegrees, mirrored = false,
+                                timestampUs,
+                            )
+                            if (submitted) {
+                                cameraFrames += 1
+                                if (cameraFrames == 1) Log.i(tag, "capture state running")
+                            }
                         }
                     }
                     overlay.frameGeometry(it.width, it.height, it.imageInfo.rotationDegrees)
