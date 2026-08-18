@@ -341,6 +341,7 @@
 				OTHER_LDFLAGS = (
 					"-lgosslens",
 					"-lgpupixel",
+					"-langle",
 					"-lyuv",
 					"-lbgfx",
 					"-ltflite",
@@ -360,6 +361,7 @@
 					"-lflatbuffers",
 					"-lcpuinfo",
 					"-lpthreadpool",
+					"-lz",
 					"-lc++",
 					"-framework",
 					Metal,
@@ -370,11 +372,11 @@
 					"-framework",
 					CoreVideo,
 					"-framework",
+					IOSurface,
+					"-framework",
 					VideoToolbox,
 					"-framework",
 					AVFoundation,
-					"-framework",
-					OpenGLES,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.gosslens.demo;
 				SDKROOT = iphoneos;
@@ -408,6 +410,7 @@
 				OTHER_LDFLAGS = (
 					"-lgosslens",
 					"-lgpupixel",
+					"-langle",
 					"-lyuv",
 					"-lbgfx",
 					"-ltflite",
@@ -427,6 +430,7 @@
 					"-lflatbuffers",
 					"-lcpuinfo",
 					"-lpthreadpool",
+					"-lz",
 					"-lc++",
 					"-framework",
 					Metal,
@@ -437,11 +441,11 @@
 					"-framework",
 					CoreVideo,
 					"-framework",
+					IOSurface,
+					"-framework",
 					VideoToolbox,
 					"-framework",
 					AVFoundation,
-					"-framework",
-					OpenGLES,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.gosslens.demo;
 				SDKROOT = iphoneos;

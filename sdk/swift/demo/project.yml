@@ -47,6 +47,7 @@ targets:
         OTHER_LDFLAGS:
           - "-lgosslens"
           - "-lgpupixel"
+          - "-langle"
           - "-lyuv"
           - "-lbgfx"
           - "-ltflite"
@@ -66,6 +67,7 @@ targets:
           - "-lflatbuffers"
           - "-lcpuinfo"
           - "-lpthreadpool"
+          - "-lz"
           - "-lc++"
           - "-framework"
           - "Metal"
@@ -76,11 +78,11 @@ targets:
           - "-framework"
           - "CoreVideo"
           - "-framework"
+          - "IOSurface"
+          - "-framework"
           - "VideoToolbox"
           - "-framework"
           - "AVFoundation"
-          - "-framework"
-          - "OpenGLES"
         TARGETED_DEVICE_FAMILY: "1"
     info:
       path: Sources/Info.plist
