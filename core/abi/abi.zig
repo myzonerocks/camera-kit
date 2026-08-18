@@ -192,6 +192,12 @@ pub const Session = struct {
     engine: *Engine,
     controller: graph.DegradeController,
     current: ?CurrentFrame = null,
+    /// Zero-copy camera ingress rebinds these every submit rather than
+    /// creating a fresh bgfx handle per frame - see
+    /// render.Renderer.PersistentTexture.rebind for why.
+    preview_bgra: render.Renderer.PersistentTexture = .{},
+    preview_y: render.Renderer.PersistentTexture = .{},
+    preview_uv: render.Renderer.PersistentTexture = .{},
     copied_frames: u64 = 0,
     /// Set for exactly one renderCompositeChain call by
     /// goss_engine_capture_frame, then cleared - redirects the chain's
@@ -918,6 +924,11 @@ pub fn destroySession(session: *Session) void {
     session.segmentation_worker = null;
     destroySegmentationTexture(session);
     releaseCurrentFrame(session);
+    if (session.engine.renderer != null) {
+        session.preview_bgra.deinit();
+        session.preview_y.deinit();
+        session.preview_uv.deinit();
+    }
     session.engine.gpa.destroy(session);
 }
 
@@ -1174,27 +1185,27 @@ pub export fn goss_session_submit_frame(session: ?*Session, desc: ?*const FrameD
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const p = planes orelse return .invalid_argument;
-    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    if (s.engine.renderer == null) return .renderer_unavailable;
 
     releaseCurrentFrame(s);
     switch (d.pixel_format) {
         pixel_format_bgra8, pixel_format_rgba8 => {
             if (p.plane_count != 1) return .invalid_argument;
             const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
-            const texture = r.wrapExternalTexture(@intCast(d.width), @intCast(d.height), format, @intCast(p.planes[0]), false);
-            s.current = .{ .desc = d.*, .preview = .{ .bgra = .{ .texture = texture } } };
+            const texture = s.preview_bgra.rebind(@intCast(d.width), @intCast(d.height), format, @intCast(p.planes[0]));
+            s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .bgra = .{ .texture = texture } } };
         },
         pixel_format_nv12 => {
             if (p.plane_count != 2) return .invalid_argument;
-            const y = r.wrapExternalTexture(@intCast(d.width), @intCast(d.height), render.c.BGFX_TEXTURE_FORMAT_R8, @intCast(p.planes[0]), false);
-            const uv = r.wrapExternalTexture(@intCast(d.width / 2), @intCast(d.height / 2), render.c.BGFX_TEXTURE_FORMAT_RG8, @intCast(p.planes[1]), false);
+            const y = s.preview_y.rebind(@intCast(d.width), @intCast(d.height), render.c.BGFX_TEXTURE_FORMAT_R8, @intCast(p.planes[0]));
+            const uv = s.preview_uv.rebind(@intCast(d.width / 2), @intCast(d.height / 2), render.c.BGFX_TEXTURE_FORMAT_RG8, @intCast(p.planes[1]));
             const standard: math.color.Standard = switch (d.color_standard) {
                 0 => .bt601,
                 2 => .bt2020,
                 else => .bt709,
             };
             const range: math.color.Range = if (d.color_range == 1) .full else .video;
-            s.current = .{ .desc = d.*, .preview = .{ .nv12 = .{
+            s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .nv12 = .{
                 .y = y,
                 .uv = uv,
                 .conversion = math.color.yuvToRgb(standard, range),

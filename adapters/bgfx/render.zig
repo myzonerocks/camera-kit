@@ -541,6 +541,41 @@ pub const Renderer = struct {
         return handle;
     }
 
+    /// A bgfx texture handle a caller keeps across calls and repeatedly
+    /// rebinds to new native pointers via PersistentTexture.rebind,
+    /// instead of creating a fresh handle every time.
+    pub const PersistentTexture = struct {
+        handle: c.bgfx_texture_handle_t = .{ .idx = invalid_handle },
+        width: u16 = 0,
+        height: u16 = 0,
+
+        /// overrideInternal's own doc: "If result is 0, texture is not
+        /// created yet from the main thread" - a handle bgfx hasn't
+        /// processed through a real bgfx_frame() yet always overrides
+        /// as a no-op, which a handle created fresh every frame (as
+        /// wrapExternalTexture does) never lives long enough to clear.
+        /// Reusing the same handle across frames, created once and only
+        /// recreated on an actual size change, gives it that frame to
+        /// land before its first real use, and every override after
+        /// that targets an already-live handle.
+        pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) c.bgfx_texture_handle_t {
+            if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
+                if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+                const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+                self.handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
+                self.width = width;
+                self.height = height;
+            }
+            _ = c.bgfx_override_internal_texture_ptr(self.handle, native_ptr, 0);
+            return self.handle;
+        }
+
+        pub fn deinit(self: *PersistentTexture) void {
+            if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+            self.* = .{};
+        }
+    };
+
     /// Same as wrapExternalTexture(render_target: true), except it
     /// verifies the override actually landed instead of assuming it
     /// did. bgfx_override_internal_texture_ptr documents returning 0

@@ -88,6 +88,21 @@ pub const Renderer = struct {
         return null;
     }
 
+    pub const PersistentTexture = struct {
+        pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) TextureHandle {
+            _ = self;
+            _ = width;
+            _ = height;
+            _ = format;
+            _ = native_ptr;
+            return .{};
+        }
+
+        pub fn deinit(self: *PersistentTexture) void {
+            _ = self;
+        }
+    };
+
     pub fn createAndroidBeautyRenderTarget(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?TextureHandle {
         _ = r;
         _ = width;
