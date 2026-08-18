@@ -263,7 +263,7 @@ const Gate = struct {
                 current_path = if (std.mem.startsWith(u8, rest, "b/")) rest["b/".len..] else rest;
                 continue;
             }
-            const is_added = std.mem.startsWith(u8, line, "+") and !std.mem.startsWith(u8, line, "+++");
+            const is_added = std.mem.startsWith(u8, line, "+") and !std.mem.startsWith(u8, line, "+++") and !isGeneratedWrapperScript(current_path);
             const content = if (is_added) line[1..] else "";
             const is_added_comment = is_added and isCommentLine(content);
 
@@ -450,6 +450,12 @@ fn forbiddenExtension(path: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, path, "sdk/ts/demo/res/") and std.mem.endsWith(u8, path, ".png")) {
         return null;
     }
+    // Gradle's own bootstrap stub, not a build output - JitPack (and
+    // anyone else) clones this repo and runs ./gradlew directly, which
+    // does not exist without the jar next to it.
+    if (std.mem.eql(u8, path, "sdk/kotlin/gradle/wrapper/gradle-wrapper.jar")) {
+        return null;
+    }
     for (forbidden_extensions) |ext| {
         if (std.mem.endsWith(u8, path, ext)) return ext;
     }
@@ -466,6 +472,12 @@ fn findBannedToken(text: []const u8) ?[]const u8 {
         if (std.ascii.indexOfIgnoreCase(text, tok) != null) return tok;
     }
     return null;
+}
+
+// Gradle's own wrapper script - `gradle wrapper` generates it verbatim
+// and it is never hand-edited, the same reasoning a vendored tree gets.
+fn isGeneratedWrapperScript(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, "/gradlew") or std.mem.eql(u8, path, "gradlew");
 }
 
 fn isCommentLine(line: []const u8) bool {
@@ -551,6 +563,10 @@ test "forbidden extensions catch artifact classes" {
     try std.testing.expectEqualStrings(".png", forbiddenExtension("sdk/kotlin/demo/src/main/assets/res/mouth.png").?);
     try std.testing.expect(forbiddenExtension("lenses/reference/background-swap/assets/beach.png") == null);
     try std.testing.expect(forbiddenExtension("sdk/ts/demo/res/lookup_gray.png") == null);
+    // A jar anywhere else is still a build output - only the Gradle
+    // wrapper's own bootstrap stub is real, necessary bundle content.
+    try std.testing.expectEqualStrings(".jar", forbiddenExtension("some/other/lib.jar").?);
+    try std.testing.expect(forbiddenExtension("sdk/kotlin/gradle/wrapper/gradle-wrapper.jar") == null);
 }
 
 test "banned tokens match case-insensitively and only when present" {
@@ -575,6 +591,12 @@ test "comment lines are recognized across languages" {
     try std.testing.expect(isCommentLine("/// a doc comment"));
     try std.testing.expect(isCommentLine("  # a shell comment"));
     try std.testing.expect(!isCommentLine("    const x = 1;"));
+}
+
+test "generated wrapper scripts are recognized, hand-written scripts are not" {
+    try std.testing.expect(isGeneratedWrapperScript("sdk/kotlin/gradlew"));
+    try std.testing.expect(isGeneratedWrapperScript("gradlew"));
+    try std.testing.expect(!isGeneratedWrapperScript("sdk/kotlin/demo/prove-emulator.sh"));
 }
 
 test "verbose comment markers are caught, plain ones are not" {

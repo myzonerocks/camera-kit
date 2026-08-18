@@ -20,10 +20,6 @@ dependencies {
 }
 ```
 
-Built from a tagged commit by [JitPack](https://jitpack.io) — see
-[`jitpack.yml`](../../jitpack.yml). Building against a checkout of this
-repository takes it as an included build instead:
-
 ```kotlin
 dependencies {
     implementation(project(":"))
