@@ -1662,6 +1662,7 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     module.addCMacro("LIBGLESV2_IMPLEMENTATION", "1");
     module.addCMacro("LIBEGL_IMPLEMENTATION", "1");
     module.addCMacro("ANGLE_UTIL_EXPORT", "");
+    module.addCMacro("ANGLE_CAPTURE_ENABLED", "0");
 
     const flags = [_][]const u8{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" };
 
@@ -1681,6 +1682,17 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         "/compiler/translator/ir/", "/compiler/translator/hlsl/",
         "/compiler/translator/spirv/", "/compiler/translator/wgsl/",
         "/libANGLE/capture/",
+        // The real ASTC decoder needs an external codec this project
+        // doesn't vendor; AstcDecompressorNoOp.cpp is ANGLE's own
+        // fallback for exactly that, same as angle_has_astc_encoder=false.
+        "/image_util/AstcDecompressor.cpp",
+        // gpu_info_util's real per-platform source list (src/libGLESv2.gni)
+        // for iOS is exactly SystemInfo.cpp + SystemInfo_apple.mm +
+        // SystemInfo_ios.cpp - every other SystemInfo_*.{cpp,mm} here is
+        // a different platform's file.
+        "SystemInfo_android", "SystemInfo_fuchsia", "SystemInfo_libpci",
+        "SystemInfo_linux",   "SystemInfo_macos",   "SystemInfo_vulkan",
+        "SystemInfo_win",     "SystemInfo_x11",
     };
 
     var sources: std.ArrayList([]const u8) = .empty;
@@ -1690,6 +1702,8 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         angle_dir ++ "/src/libGLESv2",
         angle_dir ++ "/src/libEGL",
         angle_dir ++ "/src/compiler",
+        angle_dir ++ "/src/image_util",
+        angle_dir ++ "/src/gpu_info_util",
     }) |dir| {
         listFilesRecursive(b, dir, ".cpp", &angle_excludes, &sources);
         listFilesRecursive(b, dir, ".mm", &angle_excludes, &sources);
@@ -1704,6 +1718,22 @@ fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
     }
     module.addCSourceFile(.{ .file = b.path("adapters/angle/compression_utils_portable.cc"), .flags = &flags });
+    // xxhash.h alone only declares the API; this is its implementation.
+    // A plain C file, so it gets its own flags rather than -std=c++20.
+    const xxhash_flags = [_][]const u8{ "-fno-sanitize=undefined", "-w" };
+    module.addCSourceFile(.{
+        .file = b.path(angle_dir ++ "/src/common/third_party/xxhash/xxhash.c"),
+        .flags = &xxhash_flags,
+    });
+    // Core code calls into FrameCaptureShared unconditionally even with
+    // capture disabled - ANGLE's own GN build hits the same real gap
+    // and papers over it with exactly these two stub sources.
+    for ([_][]const u8{
+        angle_dir ++ "/src/libANGLE/capture/FrameCapture_mock.cpp",
+        angle_dir ++ "/src/libANGLE/capture/serialize_mock.cpp",
+    }) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
 
     module.linkSystemLibrary("z", .{});
     module.linkFramework("Metal", .{});
@@ -1826,9 +1856,15 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     for (sources) |file| {
         if (apple) {
             const name = std.mem.trimEnd(u8, file[std.mem.lastIndexOfScalar(u8, file, '/').? + 1 ..], ".c");
+            const real_path = b.fmt(".vendor/gpupixel/src/{s}", .{file});
+            // The wrapper's own text never changes between builds, so a
+            // vendor patch editing real_path's content alone leaves
+            // zig's cache none the wiser. Forces the wrapper to change.
+            const real_content = b.build_root.handle.readFileAlloc(b.graph.io, real_path, b.allocator, .limited(1 << 20)) catch @panic("gpupixel source unreadable");
+            const fingerprint = std.hash.Wyhash.hash(0, real_content);
             const wrapper = wrappers.add(
                 b.fmt("{s}.mm", .{name}),
-                b.fmt("#include \"{s}\"\n", .{b.pathFromRoot(b.fmt(".vendor/gpupixel/src/{s}", .{file}))}),
+                b.fmt("// fingerprint: {x}\n#include \"{s}\"\n", .{ fingerprint, b.pathFromRoot(real_path) }),
             );
             module.addCSourceFile(.{ .file = wrapper, .flags = flags.items });
         } else {
@@ -2831,6 +2867,13 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             inference_libs.append(b.allocator, lib) catch @panic("oom");
         }
         inference_libs.appendSlice(b.allocator, family_libs.items) catch @panic("oom");
+        if (config.abi == .none) {
+            // Device only for now - simulator needs its own proof later.
+            // gpupixel links this lib internally already; installing it
+            // separately is what makes zig-out/ios/libangle.a exist for
+            // Xcode's own -langle (zig's cache dedupes the real compile).
+            inference_libs.append(b.allocator, buildAngleLib(b, ios_target, optimize)) catch @panic("oom");
+        }
     } else {
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
         abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
