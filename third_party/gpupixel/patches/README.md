@@ -16,12 +16,9 @@ own to hand eglGetPlatformDisplay. CreateContext, UseAsCurrent,
 PresentBufferForDisplay, and ReleaseContext all move to the same shape
 GPUPIXEL_ANDROID already uses.
 
-adapters/beauty/interop_apple.mm's iOS path still pulls
-`[EAGLContext currentContext]` to stand up its CVOpenGLESTextureCache -
-that call returns nil once this patch lands, since ANGLE never creates
-a real EAGLContext. That bridge needs its own follow-up pass onto
-ANGLE's IOSurface EGL surface (EGL_IOSURFACE_ANGLE, confirmed real in
-the vendored source at
-src/libANGLE/renderer/metal/IOSurfaceSurfaceMtl.mm) rather than
-CVOpenGLESTextureCache. Not done here - this patch only gets the
-context itself created and current.
+adapters/beauty/interop_apple.mm's iOS path pulled
+`[EAGLContext currentContext]` to stand up its CVOpenGLESTextureCache,
+which returns nil once this patch lands, since ANGLE never creates a
+real EAGLContext. That bridge is rewired separately (not part of this
+patch, since it's this project's own code, not gpupixel's) onto
+ANGLE's EGL_IOSURFACE_ANGLE client-buffer surface instead.
