@@ -480,12 +480,28 @@ fn isGeneratedWrapperScript(path: []const u8) bool {
     return std.mem.endsWith(u8, path, "/gradlew") or std.mem.eql(u8, path, "gradlew");
 }
 
+// A `#`-led line that is real C/ObjC code (#define, #include, #if...),
+// not a shell/Python/YAML comment - the two share a leading marker.
+fn isPreprocessorDirective(trimmed: []const u8) bool {
+    const rest = std.mem.trimStart(u8, trimmed[1..], " \t");
+    // Deliberately excludes if/ifdef/ifndef/else/elif/endif - real
+    // directives, but also how plenty of plain-English comments open.
+    const directives = [_][]const u8{ "define", "include", "pragma", "import" };
+    for (directives) |word| {
+        if (std.mem.startsWith(u8, rest, word)) {
+            const after = rest[word.len..];
+            if (after.len == 0 or !std.ascii.isAlphanumeric(after[0])) return true;
+        }
+    }
+    return false;
+}
+
 fn isCommentLine(line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t");
     return std.mem.startsWith(u8, trimmed, "//") or
         std.mem.startsWith(u8, trimmed, "///") or
         std.mem.startsWith(u8, trimmed, "*") or
-        std.mem.startsWith(u8, trimmed, "#");
+        (std.mem.startsWith(u8, trimmed, "#") and !isPreprocessorDirective(trimmed));
 }
 
 fn hasIsoDate(line: []const u8) bool {
@@ -591,6 +607,17 @@ test "comment lines are recognized across languages" {
     try std.testing.expect(isCommentLine("/// a doc comment"));
     try std.testing.expect(isCommentLine("  # a shell comment"));
     try std.testing.expect(!isCommentLine("    const x = 1;"));
+}
+
+test "preprocessor directives are not comments, even though they share a shell comment's # marker" {
+    try std.testing.expect(!isCommentLine("#define ANGLE_COMMIT_DATE \"2026-08-18\""));
+    try std.testing.expect(!isCommentLine("#include <zlib.h>"));
+    try std.testing.expect(!isCommentLine("#import <UIKit/UIKit.h>"));
+    try std.testing.expect(!isCommentLine("#pragma once"));
+    // if/ifdef/endif stay comment-classified on purpose - too many real
+    // English comments open the same way ("# if this ever fires...").
+    try std.testing.expect(isCommentLine("#if this ever fires, retry"));
+    try std.testing.expect(isCommentLine("  # a shell comment"));
 }
 
 test "generated wrapper scripts are recognized, hand-written scripts are not" {
