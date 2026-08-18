@@ -1,20 +1,19 @@
 # Gosslens — Kotlin SDK
 
-The Kotlin SDK for **Gosslens**, a brand-neutral camera engine. A Zig core
-owns the frame graph, the lens runtime, and the effect pipeline behind one
-frozen C ABI (`include/gosslens.h`); this module is the idiomatic layer an
-Android app embeds over it — `Engine`, `Session`, `Gosslens` — matching the
-Swift and TypeScript SDKs method for method.
+Kotlin SDK for Gosslens, a camera engine with a Zig core behind one C ABI
+([`include/gosslens.h`](../../include/gosslens.h)). This module wraps that
+ABI as `Engine`, `Session`, and `Gosslens`, the same names and method
+shapes the [Swift](../swift/README.md) and [TypeScript](../ts/README.md)
+SDKs use.
 
-This SDK owns capture ingress, GPU surface handoff, and the platform's own
-tracking/world backends. It does **not** own the frame graph, the lens
-runtime, or the effect pipeline — those live in the core and are identical
-across every platform.
+This SDK owns capture ingress, GPU surface handoff, and platform tracking.
+The frame graph, the lens runtime, and the effect pipeline live in the core
+and stay identical across every platform.
 
 ## Install
 
-The library is this Gradle project's own root module. Depend on it from a
-build that includes this repository:
+This module is this Gradle project's own root, so a build that includes
+the repository depends on it directly:
 
 ```kotlin
 dependencies {
@@ -44,9 +43,8 @@ session.submitFrameCopy(yBuffer, yStride, uvBuffer, uvStride, width, height, rot
 engine.renderFrame(session)
 ```
 
-`submitHardwareBuffer` is the zero-copy path for an `AHardwareBuffer`-backed
-frame; any non-OK status means that stream should fall back to
-`submitFrameCopy`.
+`submitHardwareBuffer` is the zero-copy path for an `AHardwareBuffer`. Any
+non-OK status means that stream should fall back to `submitFrameCopy`.
 
 ## Beauty and lenses
 
@@ -59,26 +57,23 @@ session.tickLens(dtUs, signals)
 
 ## Design commitments
 
-- **Zero-copy on the frame path where the platform allows it.** A hardware
-  buffer is wrapped, not re-encoded, until the lens graph itself needs to
-  touch it.
-- **One canonical method name per ABI operation.** `Session.setBeauty(effect, amount)`
-  is the same name and parameter shape as Swift's `Session.setBeauty` and
-  TypeScript's `Session.setBeauty` — decided once in `API-CONFORMANCE.md`,
-  not reinvented per platform.
-- **Every handle has one owner.** `Engine`/`Session` are `AutoCloseable`;
-  `close()` is the sanctioned platform-idiom exception to `destroy()`.
+- Zero-copy on the frame path where the platform allows it: a hardware
+  buffer is wrapped, not re-encoded, until the lens graph needs to touch it.
+- One method name per ABI operation, held across all three SDKs, decided
+  once per operation rather than guessed independently per platform.
+- `Engine`/`Session` are `AutoCloseable`. `close()` is the one sanctioned
+  platform-idiom exception to `destroy()`.
 
 ## Demo app
 
-`demo/` is a real Android app driving a live camera through this SDK — see
-`demo/README.md`.
+[`demo/`](demo/) is a real Android app driving a live camera through this
+SDK. See [`demo/README.md`](demo/README.md).
 
 ## TODO
 
-- Publish to Maven Central / a coordinate consumers can depend on without
-  including this repository; the install instructions above assume an
-  included build until then.
-- `src/test/` — this module has no unit test suite yet; conformance today
-  runs through the demo app's `ConformanceRunner` and the headless harness
-  in `harness/`, not a Gradle test task.
+- Publish to a Maven coordinate consumers can depend on without including
+  this repository. The install instructions above assume an included
+  build until then.
+- Add a `src/test/` suite. Conformance today runs through the demo app's
+  `ConformanceRunner` and the headless harness in
+  [`harness/`](../../harness/), not a Gradle test task.

@@ -1,15 +1,15 @@
 # Gosslens — TypeScript SDK
 
-The TypeScript SDK for **Gosslens**, a brand-neutral camera engine. A Zig
-core owns the frame graph, the lens runtime, and the effect pipeline behind
-one frozen C ABI (`include/gosslens.h`), compiled to `wasm32`; this package
-is the idiomatic layer a web app embeds over it — `Engine`, `Session`,
-`Gosslens` — matching the Swift and Kotlin SDKs method for method.
+TypeScript SDK for Gosslens, a camera engine with a Zig core behind one C
+ABI ([`include/gosslens.h`](../../include/gosslens.h)), compiled to
+`wasm32`. This package wraps that ABI as `Engine`, `Session`, and
+`Gosslens`, the same names and method shapes the
+[Swift](../swift/README.md) and [Kotlin](../kotlin/README.md) SDKs use.
 
 This SDK owns camera capture through `getUserMedia`, the render loop, and
-decoding the PNGs the core has no decoder for. It does **not** own the frame
-graph, the lens runtime, or the effect pipeline — those live in the core and
-are identical across every platform.
+decoding the PNGs the core has no decoder for. The frame graph, the lens
+runtime, and the effect pipeline live in the core and stay identical across
+every platform.
 
 ## Install
 
@@ -34,8 +34,8 @@ const session = Session.create(engine, gosslens);
 ```
 
 `PreviewSession.create(canvas, wasmJsUrl, events)` does all three steps at
-once and also owns the capture loop (camera, `requestAnimationFrame`, FPS
-accounting) — the class most demo/app code actually wants.
+once and also owns the capture loop: camera, `requestAnimationFrame`, FPS
+accounting. Most app code wants this one, not the three pieces directly.
 
 ## Submit a frame and render
 
@@ -55,24 +55,22 @@ session.tickLens(dtUs);
 
 ## Design commitments
 
-- **One canonical method name per ABI operation.** `Session.setBeauty(effect, amount)`
-  is the same name and parameter shape as Swift's `Session.setBeauty` and
-  Kotlin's `Session.setBeauty` — decided once in `API-CONFORMANCE.md`, not
-  reinvented per platform.
-- **Two build artifacts, not a runtime toggle.** WebGPU and WebGL2 are
-  separate `gosslens_web.js`/`.wasm` outputs, since Asyncify (WebGPU) taxes
-  the whole per-frame path; `pickEngineUrl` picks the right one after
-  confirming a real adapter, never navigator.gpu's bare presence.
+- One method name per ABI operation, held across all three SDKs, decided
+  once per operation rather than guessed independently per platform.
+- WebGPU and WebGL2 are two separate build artifacts, not a runtime
+  toggle: Asyncify (required for WebGPU) taxes the whole per-frame path.
+  `pickEngineUrl` picks the right one after confirming a real adapter,
+  not just `navigator.gpu`'s presence.
 
 ## Demo app
 
-`demo/` is a real web page driving a live camera through this SDK — see
-`demo/README.md`.
+[`demo/`](demo/) is a real web page driving a live camera through this
+SDK. See [`demo/README.md`](demo/README.md).
 
 ## TODO
 
-- Publish to npm; the install instructions above assume a monorepo
+- Publish to npm. The install instructions above assume a monorepo
   workspace dependency until then.
-- `test/` — this package has no unit test suite yet; conformance today runs
-  through `demo/prove.ts` and the headless harness in `harness/`, not a
-  `bun test` task.
+- Add a `test/` suite. Conformance today runs through
+  [`demo/prove.ts`](demo/prove.ts) and the headless harness in
+  [`harness/`](../../harness/), not a `bun test` task.

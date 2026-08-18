@@ -1,20 +1,18 @@
 # Gosslens — Swift SDK
 
-The Swift SDK for **Gosslens**, a brand-neutral camera engine. A Zig core owns
-the frame graph, the lens runtime, and the effect pipeline behind one frozen C
-ABI (`include/gosslens.h`); this package is the idiomatic layer an iOS app
-embeds over it — `Engine`, `Session`, `Gosslens` — matching the Kotlin and
-TypeScript SDKs method for method.
+Swift SDK for Gosslens, a camera engine with a Zig core behind one C ABI
+([`include/gosslens.h`](../../include/gosslens.h)). This package wraps that
+ABI as `Engine`, `Session`, and `Gosslens`, the same names and method
+shapes the [Kotlin](../kotlin/README.md) and [TypeScript](../ts/README.md)
+SDKs use.
 
-This SDK owns capture ingress, GPU surface handoff, and the platform's own
-tracking/world backends. It does **not** own the frame graph, the lens
-runtime, or the effect pipeline — those live in the core and are identical
-across every platform.
+This SDK owns capture ingress, GPU surface handoff, and platform tracking.
+The frame graph, the lens runtime, and the effect pipeline live in the core
+and stay identical across every platform.
 
 ## Install
 
-Add the package locally (this repository has not published a tagged release
-yet):
+No tagged release yet, so add the package by local path:
 
 ```swift
 .package(path: "../gosslens/sdk/swift"),
@@ -47,9 +45,9 @@ try session.submitFrame(
 try engine.renderFrame(session: session)
 ```
 
-`submitFrame` is zero-copy: the platform texture handles are wrapped, not
-copied. `submitFrameCopy` is the CPU-copy fallback for a stream whose planes
-aren't already GPU textures.
+`submitFrame` wraps the platform texture handles instead of copying them.
+`submitFrameCopy` is the CPU-copy fallback for planes that aren't already
+GPU textures.
 
 ## Beauty and lenses
 
@@ -62,24 +60,22 @@ try session.tickLens(dtUs: frameTimeUs, signals: LensSignals(hasFace: true))
 
 ## Design commitments
 
-- **Zero-copy on the frame path.** A submitted frame's platform texture is
-  wrapped, never re-encoded, until the lens graph itself needs to touch it.
-- **One canonical method name per ABI operation.** `Session.setBeauty(effect:amount:)`
-  is the same name and parameter shape as Kotlin's `Session.setBeauty` and
-  TypeScript's `Session.setBeauty` — decided once in `API-CONFORMANCE.md`,
-  not reinvented per platform.
-- **Every handle has one owner.** `destroy()` is idempotent and `deinit`
-  falls back to it, so a double-free through the wrapper is not possible.
+- Zero-copy on the frame path: a submitted frame's platform texture is
+  wrapped, not re-encoded, until the lens graph needs to touch it.
+- One method name per ABI operation, held across all three SDKs, decided
+  once per operation rather than guessed independently per platform.
+- `destroy()` is idempotent and `deinit` falls back to it, so a double-free
+  through this wrapper can't happen.
 
 ## Demo app
 
-`demo/` is a real iOS app driving a live camera through this SDK — see
-`demo/README.md`.
+[`demo/`](demo/) is a real iOS app driving a live camera through this SDK.
+See [`demo/README.md`](demo/README.md).
 
 ## TODO
 
-- Publish a tagged release; the install instructions above assume a local
+- Publish a tagged release. The install instructions above assume a local
   path dependency until then.
-- `Tests/` — this package has no test target yet; conformance today runs
-  through the demo app's `-GossConformance` launch argument and the
-  headless harness in `harness/`, not a SwiftPM test suite.
+- Add a `Tests/` target. Conformance today runs through the demo app's
+  `-GossConformance` launch argument and the headless harness in
+  [`harness/`](../../harness/), not a SwiftPM test suite.
