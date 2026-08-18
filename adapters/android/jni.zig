@@ -202,7 +202,7 @@ export fn Java_com_gosslens_Gosslens_nativeTrackFrame(
 }
 
 /// The result buffer is a direct buffer of at least the frozen result
-/// size; the shell reads the fields straight out of it.
+/// size; the SDK reads the fields straight out of it.
 export fn Java_com_gosslens_Gosslens_nativeFaceResult(env: *JniEnv, cls: jobject, session: i64, result_buffer: jobject) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, result_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

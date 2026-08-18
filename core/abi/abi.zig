@@ -35,7 +35,7 @@ const is_web = builtin.os.tag == .emscripten;
 
 // A directory-based lens activation needs to read files (manifest.json,
 // compiled shader bytecode) from within an exported goss_ function, which
-// no shell hands an Io instance into - this library owns one blocking
+// no SDK hands an Io instance into - this library owns one blocking
 // implementation for that, single-threaded since it's only ever
 // occasional small reads at lens activation, never the frame path.
 // std.Io.Threaded assumes a POSIX-like host and cannot even be typed
@@ -1058,8 +1058,8 @@ const screenshot_path_max = 480;
 /// Requests a screenshot of the next presented frame, written as
 /// path ++ ".tga" through the renderer's own default callback (the same
 /// mechanism harness/conformance.zig already drives internally, exposed
-/// here so a real shell target - the ios simulator conformance run this
-/// exists for - can trigger it too). Debug/test tooling only; no shell
+/// here so a real SDK target - the ios simulator conformance run this
+/// exists for - can trigger it too). Debug/test tooling only; no SDK
 /// ships this behind a user-facing control.
 pub export fn goss_engine_request_screenshot(engine: ?*Engine, path: ?[*]const u8, path_len: usize) Status {
     const e = engine orelse return .invalid_argument;
@@ -1217,8 +1217,8 @@ pub export fn goss_session_submit_frame(session: ?*Session, desc: ?*const FrameD
 }
 
 /// Writes the YCbCr to RGB conversion for a standard and range as one
-/// column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).xyz. Shells
-/// that own their GPU pipeline, the web shell today, get their color math
+/// column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).xyz. SDKs
+/// that own their GPU pipeline, the web SDK today, get their color math
 /// from the core instead of hardcoding it.
 pub export fn goss_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_matrix: ?*[16]f32) Status {
     const out = out_matrix orelse return .invalid_argument;
@@ -1244,7 +1244,7 @@ pub export fn goss_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_m
     return .ok;
 }
 
-/// Copies NV12 planes into pooled textures. The stated CPU path: a shell
+/// Copies NV12 planes into pooled textures. The stated CPU path: an SDK
 /// uses it only where the zero-copy import is not wired yet, and the copy
 /// is counted so the budget report shows it.
 pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {

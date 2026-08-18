@@ -2,7 +2,7 @@
 //! detect-then-track loop off the camera thread. Frames arrive as NV12
 //! plane copies into a latest-wins mailbox; results leave through a
 //! seqlock slot any thread may read without blocking the worker. One
-//! worker per session, created when a shell enables tracking with a model
+//! worker per session, created when an SDK enables tracking with a model
 //! bundle and torn down with the session.
 
 const std = @import("std");

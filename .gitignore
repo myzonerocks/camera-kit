@@ -8,7 +8,7 @@
 !harness/**
 !include/**
 !lenses/**
-!shells/**
+!sdk/**
 !third_party/**
 !tools/**
 
@@ -46,31 +46,31 @@ a.out
 # Build artifacts, rebuilt from tracked .glsl source every run.
 .lens-packages/
 
-# Shell build detritus.
-shells/swift/**/*.xcodeproj/
-shells/swift/demo/Sources/Info.plist
-shells/swift/**/xcuserdata/
-shells/swift/**/.build/
-shells/swift/**/DerivedData/
-shells/kotlin/.gradle/
-shells/kotlin/**/build/
-shells/kotlin/gradle/
-shells/kotlin/gradlew
-shells/kotlin/local.properties
-shells/ts/node_modules/
-shells/ts/dist/
-shells/ts/demo/dist.js
-shells/ts/demo/tracking-worker.js
-shells/ts/demo/gosslens_web.js
-shells/ts/demo/gosslens_web.wasm
-shells/ts/demo/webgpu/
-shells/ts/demo/gosslens_tracking.wasm
-shells/ts/demo/face_landmarker.task
-shells/ts/demo/beauty-baseline.manifest.json
-shells/ts/**/*.wasm.map
+# SDK build detritus.
+sdk/swift/**/*.xcodeproj/
+sdk/swift/demo/Sources/Info.plist
+sdk/swift/**/xcuserdata/
+sdk/swift/**/.build/
+sdk/swift/**/DerivedData/
+sdk/kotlin/.gradle/
+sdk/kotlin/**/build/
+sdk/kotlin/gradle/
+sdk/kotlin/gradlew
+sdk/kotlin/local.properties
+sdk/ts/node_modules/
+sdk/ts/dist/
+sdk/ts/demo/dist.js
+sdk/ts/demo/tracking-worker.js
+sdk/ts/demo/gosslens_web.js
+sdk/ts/demo/gosslens_web.wasm
+sdk/ts/demo/webgpu/
+sdk/ts/demo/gosslens_tracking.wasm
+sdk/ts/demo/face_landmarker.task
+sdk/ts/demo/beauty-baseline.manifest.json
+sdk/ts/**/*.wasm.map
 
 # Model assets are synced from .models at app build time, never tracked.
-shells/kotlin/demo/src/main/assets/
+sdk/kotlin/demo/src/main/assets/
 
 # Raster images are fetched corpus or scratch artifacts, never source -
 # except a reference lens's own assets/*.png (lut.pass and blend.pass
@@ -81,6 +81,6 @@ shells/kotlin/demo/src/main/assets/
 *.jpeg
 *.png
 !lenses/**/*.png
-!shells/ts/demo/res/*.png
+!sdk/ts/demo/res/*.png
 *.webp
 *.bmp

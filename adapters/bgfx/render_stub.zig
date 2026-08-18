@@ -1,7 +1,7 @@
 //! Render backend stub for targets without a compiled render stack, such as
 //! the CI host running unit tests. Mirrors the real module's surface;
 //! every entry point reports the renderer as unavailable. The engine treats
-//! that as a configuration the shell must handle, never a crash.
+//! that as a configuration the SDK must handle, never a crash.
 
 const std = @import("std");
 const math = @import("math");

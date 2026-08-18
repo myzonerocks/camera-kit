@@ -1,5 +1,5 @@
 //! The render backend node: the one binding over bgfx. Owns renderer
-//! lifecycle, the preview pipeline, and shader assembly. Shells hand over a
+//! lifecycle, the preview pipeline, and shader assembly. SDKs hand over a
 //! native surface and zero-copy camera textures; everything after that
 //! happens here. Frame-path work allocates nothing after the pipelines are
 //! built: transient quad vertices come from bgfx's bounded pools.
@@ -526,10 +526,10 @@ pub const Renderer = struct {
 
     /// Wraps a platform texture (MTLTexture and friends) as a bgfx handle
     /// without copying pixels. The platform object must outlive the frame
-    /// that samples it; the shell guarantees that by holding the buffer
+    /// that samples it; the SDK guarantees that by holding the buffer
     /// until the next frame completes. render_target must be true for a
     /// handle createExternalTarget will wrap into a framebuffer - bgfx
-    /// validates the BGFX_TEXTURE_RT flag against the shell texture at
+    /// validates the BGFX_TEXTURE_RT flag against the SDK texture at
     /// creation, before override ever runs, so a handle created without
     /// it can never become a render target later no matter what the
     /// underlying native texture itself supports.

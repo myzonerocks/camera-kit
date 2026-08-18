@@ -2,7 +2,7 @@
 //! triangulation over the 111-point contour face106.zig fills, position
 //! from tracked landmarks, texture coordinate from this module's own
 //! reference UV layout scaled per effect. Ported verbatim from
-//! gpupixel's face_makeup_filter.cc (matching shells/ts/src/face-mesh.ts,
+//! gpupixel's face_makeup_filter.cc (matching sdk/ts/src/face-mesh.ts,
 //! the same data already proven against a real WebGL2 render).
 
 pub const triangle_count = 176;

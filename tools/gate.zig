@@ -447,7 +447,7 @@ fn forbiddenExtension(path: []const u8) ?[]const u8 {
     }
     // The web demo's own beauty LUT textures - same reasoning, real
     // bundle content copied in once rather than fetched or built.
-    if (std.mem.startsWith(u8, path, "shells/ts/demo/res/") and std.mem.endsWith(u8, path, ".png")) {
+    if (std.mem.startsWith(u8, path, "sdk/ts/demo/res/") and std.mem.endsWith(u8, path, ".png")) {
         return null;
     }
     for (forbidden_extensions) |ext| {
@@ -533,24 +533,24 @@ test "forbidden prefixes catch force-added trees" {
 }
 
 test "forbidden segments catch build detritus anywhere in the path" {
-    try std.testing.expectEqualStrings("node_modules", forbiddenSegment("shells/ts/node_modules/x/y.js").?);
-    try std.testing.expectEqualStrings(".build", forbiddenSegment("shells/swift/.build/debug/a").?);
-    try std.testing.expectEqualStrings(".xcframework", forbiddenSegment("shells/swift/Gosslens.xcframework/Info.plist").?);
+    try std.testing.expectEqualStrings("node_modules", forbiddenSegment("sdk/ts/node_modules/x/y.js").?);
+    try std.testing.expectEqualStrings(".build", forbiddenSegment("sdk/swift/.build/debug/a").?);
+    try std.testing.expectEqualStrings(".xcframework", forbiddenSegment("sdk/swift/Gosslens.xcframework/Info.plist").?);
     try std.testing.expect(forbiddenSegment("core/graph/scheduler.zig") == null);
 }
 
 test "forbidden extensions catch artifact classes" {
     try std.testing.expectEqualStrings(".task", forbiddenExtension("face_landmarker.task").?);
-    try std.testing.expectEqualStrings(".wasm", forbiddenExtension("shells/ts/core.wasm").?);
+    try std.testing.expectEqualStrings(".wasm", forbiddenExtension("sdk/ts/core.wasm").?);
     try std.testing.expectEqualStrings(".a", forbiddenExtension("libfoo.a").?);
     try std.testing.expectEqualStrings(".out", forbiddenExtension("a.out").?);
     try std.testing.expect(forbiddenExtension("core/math/mat4.zig") == null);
     try std.testing.expect(forbiddenExtension("include/gosslens.h") == null);
     // A png anywhere else is still a fetched/scratch artifact - only a
     // reference lens's own assets/ directory is real bundle content.
-    try std.testing.expectEqualStrings(".png", forbiddenExtension("shells/kotlin/demo/src/main/assets/res/mouth.png").?);
+    try std.testing.expectEqualStrings(".png", forbiddenExtension("sdk/kotlin/demo/src/main/assets/res/mouth.png").?);
     try std.testing.expect(forbiddenExtension("lenses/reference/background-swap/assets/beach.png") == null);
-    try std.testing.expect(forbiddenExtension("shells/ts/demo/res/lookup_gray.png") == null);
+    try std.testing.expect(forbiddenExtension("sdk/ts/demo/res/lookup_gray.png") == null);
 }
 
 test "banned tokens match case-insensitively and only when present" {

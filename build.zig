@@ -528,7 +528,7 @@ pub fn build(b: *std.Build) void {
         // too, wired in below as tracking_module's "transpose_conv_bias"
         // import.
         // The export layer instance under real tracking: the harness drives
-        // the same goss_ surface a shell uses, worker thread and all.
+        // the same goss_ surface an SDK uses, worker thread and all.
         const tracking_real_module = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/tracking.zig"),
             .target = target,
@@ -641,7 +641,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // The web tracking module: the same pipeline compiled to a wasi module
-    // the ts shell runs inside a worker, synchronous per frame.
+    // the TS SDK runs inside a worker, synchronous per frame.
     const tracking_wasm_step = b.step("tracking-wasm", "Build the web tracking module (wasm32-wasi)");
     if (have_inference_stack and flatc_exe != null) {
         // The pinned build enables both simd sets globally for wasm, and the
@@ -795,7 +795,7 @@ pub fn build(b: *std.Build) void {
 
     // The render-capable half of the web core, real bgfx underneath
     // instead of render_stub.zig - separate from wasm_step above (which
-    // stays as-is until the TS shell actually points at this one)
+    // stays as-is until the TS SDK actually points at this one)
     // rather than replacing it outright. tracking/segmentation/beauty/
     // image/asset stay the same stubs wasm_step already uses - gpupixel
     // still isn't ported to web, and the effects this step renders
@@ -806,7 +806,7 @@ pub fn build(b: *std.Build) void {
     // instruments the whole per-frame render/submit path, not just
     // init, so a WebGL2-only user shouldn't pay for it. wasm-emscripten
     // below is unchanged; wasm-emscripten-webgpu is the new artifact
-    // the TS shell fetches only after confirming a
+    // the TS SDK fetches only after confirming a
     // real WebGPU adapter.
     const wasm_emscripten_step = b.step("wasm-emscripten", "Build the gosslens core for the web with a real bgfx renderer (needs emscripten vendors synced)");
     addWasmEmscriptenStep(b, wasm_emscripten_step, shaderc_exe, false);
@@ -2522,7 +2522,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
 /// The simulator variant of addIosStep, for exactly the same libraries
 /// built against Zig's aarch64-ios-simulator target instead of device -
 /// what a conformance run needs, since it proves determinism through a
-/// real Swift shell on a real (if not physical) window without the
+/// real Swift SDK on a real (if not physical) window without the
 /// Apple-ID/device-install gate a device run needs. Kept as one shared
 /// implementation rather than a duplicate function: every module/vendor
 /// build call below would otherwise drift in lockstep by hand, the same
@@ -3183,7 +3183,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // emdawnwebgpu is this pinned Emscripten's WebGPU port
         // (-sUSE_WEBGPU=1 is gone); ASYNCIFY lets bgfx_init block on
         // Dawn's async adapter/device request. No WebGL2 flags - this
-        // artifact only ships after the TS shell confirms an adapter.
+        // artifact only ships after the TS SDK confirms an adapter.
         link.addArgs(&.{ "--use-port=emdawnwebgpu", "-sASYNCIFY=1" });
     } else {
         link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1" });
@@ -3192,7 +3192,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         "-sALLOW_MEMORY_GROWTH=1",
         // 256MB up front. 64MB (comfortably past what session/
         // engine creation and a frame or two of textures need)
-        // was enough until the ts shell started submitting real
+        // was enough until the TS SDK started submitting real
         // RGBA frames through goss_session_submit_frame_rgba_copy
         // - a single still test photo at 2400x3000 is 28.8MB by
         // itself, on top of live 1280x720 camera frames, LUT/
@@ -3204,8 +3204,8 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // is close enough to the old budget to be worth the
         // headroom.
         "-sINITIAL_MEMORY=268435456",
-        // Every goss_* entry point is a real call site the TS
-        // shell reaches dynamically, so EXPORT_ALL keeps them all
+        // Every goss_* entry point is a real call site the TS SDK
+        // reaches dynamically, so EXPORT_ALL keeps them all
         // reachable rather than hand-listing EXPORTED_FUNCTIONS.
         // LINKABLE is also required, or every goss_* export comes
         // back undefined - deprecated upstream but still needed as
@@ -3218,7 +3218,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // A real ES module (import GosslensWebModule from
         // "./gosslens_web.js") rather than a plain-global
         // factory function a <script> tag would have to expose -
-        // the ts shell's whole build (bun, ESM throughout)
+        // the TS SDK's whole build (bun, ESM throughout)
         // already assumes every dependency is import-able.
         "-sEXPORT_ES6=1",
         "-sUSE_ES6_IMPORT_META=1",
@@ -3233,13 +3233,13 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     });
     step.dependOn(&install.step);
 
-    // shells/ts/demo/ is a real source-tree directory, not under
+    // sdk/ts/demo/ is a real source-tree directory, not under
     // zig-out - addInstallDirectory can't reach it (InstallDir is
     // always rooted at the install prefix), so this step's own build
     // output is the demo's actual input, keeping it from silently
     // testing a stale binary a manual `cp` forgot to re-run.
     const wasm_out = js_out.dirname().path(b, "gosslens_web.wasm");
-    const demo_subdir = if (webgpu) "shells/ts/demo/webgpu/" else "shells/ts/demo/";
+    const demo_subdir = if (webgpu) "sdk/ts/demo/webgpu/" else "sdk/ts/demo/";
     const demo_copy = b.addUpdateSourceFiles();
     demo_copy.addCopyFileToSource(js_out, b.fmt("{s}gosslens_web.js", .{demo_subdir}));
     demo_copy.addCopyFileToSource(wasm_out, b.fmt("{s}gosslens_web.wasm", .{demo_subdir}));
@@ -3302,7 +3302,7 @@ fn addWasmWebgpuSmokeStep(b: *std.Build, step: *std.Build.Step) void {
     step.dependOn(&install.step);
 }
 
-// The real render.zig - the one binding over bgfx every native shell
+// The real render.zig - the one binding over bgfx every native SDK
 // already runs, not a rewrite - compiled as a wasm32-emscripten object
 // and linked against the same real bgfx/bx/bimg/astc-encoder objects
 // wasm-bgfx-smoke proves, plus a small Zig driver exporting one probe

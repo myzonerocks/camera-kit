@@ -1,5 +1,5 @@
 //! The web tracking module's export surface. The browser has its own
-//! threading story: the shell runs this whole module inside a Worker, so
+//! threading story: the SDK runs this whole module inside a Worker, so
 //! every call here executes the pipeline synchronously and returns. One
 //! instance per create call, frames in as RGBA straight from the camera
 //! canvas, the frozen result struct out.
