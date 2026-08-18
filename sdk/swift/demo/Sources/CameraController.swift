@@ -2,6 +2,7 @@ import AVFoundation
 @preconcurrency import CoreVideo
 import Gosslens
 import Metal
+import UIKit
 import os
 
 // Owns the capture side: device discovery, permission, the NV12 output, and
@@ -38,11 +39,36 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private var rotationQuarterTurns: UInt32 = 0
     var onStateChange: ((State) -> Void)?
 
+    private var activeObserver: NSObjectProtocol?
+
+    // gpupixel's context creation silently no-ops with no retry while
+    // the app isn't foreground-active (GPXObjcHelper's s_isAppActive) -
+    // viewDidLayoutSubviews routinely calls this before that's true,
+    // losing the one shot for good. Wait for real activation first.
+    private func enableEngineFeaturesWhenActive() {
+        if UIApplication.shared.applicationState == .active {
+            enableFaceTracking()
+            enableBeauty()
+            activateLens()
+            return
+        }
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            if let observer = self.activeObserver {
+                NotificationCenter.default.removeObserver(observer)
+                self.activeObserver = nil
+            }
+            self.enableFaceTracking()
+            self.enableBeauty()
+            self.activateLens()
+        }
+    }
+
     func start(session: Session?, position: AVCaptureDevice.Position = .back) {
         self.session = session
-        enableFaceTracking()
-        enableBeauty()
-        activateLens()
+        enableEngineFeaturesWhenActive()
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
