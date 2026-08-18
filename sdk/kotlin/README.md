@@ -11,18 +11,23 @@ core.
 
 ## Install
 
+Building against a checkout of this repository:
+
+```kotlin
+dependencies {
+    implementation(project(":"))
+}
+```
+
+Over [JitPack](https://jitpack.io) once a tag exists (see the native-`.so`
+caveat in TODO below):
+
 ```kotlin
 repositories {
     maven { url = uri("https://jitpack.io") }
 }
 dependencies {
     implementation("com.myzonerocks:gosslens:0.1.0")
-}
-```
-
-```kotlin
-dependencies {
-    implementation(project(":"))
 }
 ```
 
@@ -52,5 +57,11 @@ any non-OK status falls back to `submitFrameCopy`.
 ## TODO
 
 - Tag a `0.1.0` release; JitPack needs a real tag to resolve.
+- JitPack's build doesn't run `zig build android` first, so today's
+  JitPack artifact would carry no native `.so` and crash on
+  `System.loadLibrary`. Needs a real CI step that cross-compiles the
+  native library (NDK-dependent, not something JitPack's own
+  environment can do) before publishing - the included-build path
+  above is the only one that works right now.
 - Add a `src/test/` suite. Conformance runs through the demo app's
   `ConformanceRunner` and [`harness/`](../../harness/) for now.

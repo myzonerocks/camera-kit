@@ -15,6 +15,11 @@ runtime, and effect pipeline live in the core.
 { "dependencies": { "@gosslens/core": "workspace:*" } }
 ```
 
+This package is the JS wrapper only. `zig build wasm-emscripten`
+produces the `gosslens_web.js`/`.wasm` pair `wasmJsUrl` below needs to
+point at - not bundled, since WebGPU and WebGL2 are separate artifacts
+(see below).
+
 ## Use
 
 ```ts

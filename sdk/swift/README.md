@@ -22,6 +22,11 @@ core.
 Resolved from the [root manifest](../../Package.swift); `cd sdk/swift &&
 swift build` uses this directory's own for development.
 
+The package alone doesn't link the engine - `zig build ios`/`ios-simulator`
+produces the native `.a` archives, and your app target needs its own
+`LIBRARY_SEARCH_PATHS`/`OTHER_LDFLAGS` pointing at `zig-out/`. See
+[`demo/project.yml`](demo/project.yml) for the exact list.
+
 ## Use
 
 ```swift
