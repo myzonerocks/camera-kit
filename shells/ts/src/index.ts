@@ -336,6 +336,36 @@ export class PreviewSession {
     );
   }
 
+  /// Uploads one of whiten's four lookup textures directly - slot 0
+  /// gray, 1 origin, 2 skin, 3 custom. loadWhitenLuts is the sugar most
+  /// callers want; this is the raw upload it calls internally.
+  setBeautyLut(slot: number, rgba: Uint8ClampedArray | Uint8Array, width: number, height: number): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]);
+    this.mod.HEAPU8.set(rgba, ptr);
+    this.mod.ccall(
+      "goss_session_set_beauty_lut",
+      "number",
+      ["number", "number", "number", "number", "number"],
+      [this.session, slot, ptr, width, height],
+    );
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, rgba.length]);
+  }
+
+  /// Uploads lipstick's or blush's own source image directly.
+  /// loadMakeupTextures is the sugar most callers want; this is the raw
+  /// upload it calls internally.
+  setBeautyMakeupTexture(effect: BeautyEffect, rgba: Uint8ClampedArray | Uint8Array, width: number, height: number): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [rgba.length]);
+    this.mod.HEAPU8.set(rgba, ptr);
+    this.mod.ccall(
+      "goss_session_set_beauty_makeup_texture",
+      "number",
+      ["number", "number", "number", "number", "number"],
+      [this.session, effect, ptr, width, height],
+    );
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, rgba.length]);
+  }
+
   /// Fetches the four whiten lookup textures (gray/origin/skin/custom),
   /// relative to lutBaseUrl. Safe to call once after construction;
   /// setWhiten stays a no-op until this resolves.
@@ -345,15 +375,7 @@ export class PreviewSession {
       names.map((name) => fetch(new URL(`${name}.png`, lutBaseUrl)).then((r) => r.blob()).then(decodeImageRgba)),
     );
     images.forEach((image, slot) => {
-      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [image.data.length]);
-      this.mod.HEAPU8.set(image.data, ptr);
-      this.mod.ccall(
-        "goss_session_set_beauty_lut",
-        "number",
-        ["number", "number", "number", "number", "number"],
-        [this.session, slot, ptr, image.width, image.height],
-      );
-      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, image.data.length]);
+      this.setBeautyLut(slot, image.data, image.width, image.height);
       this.whitenLutsLoaded += 1;
     });
   }
@@ -369,15 +391,7 @@ export class PreviewSession {
       [BeautyEffect.Lipstick, mouth],
       [BeautyEffect.Blush, blusher],
     ] as const) {
-      const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [image.data.length]);
-      this.mod.HEAPU8.set(image.data, ptr);
-      this.mod.ccall(
-        "goss_session_set_beauty_makeup_texture",
-        "number",
-        ["number", "number", "number", "number", "number"],
-        [this.session, effect, ptr, image.width, image.height],
-      );
-      this.mod.ccall("goss_free", null, ["number", "number"], [ptr, image.data.length]);
+      this.setBeautyMakeupTexture(effect, image.data, image.width, image.height);
     }
     this.lipstickTextureLoaded = true;
     this.blushTextureLoaded = true;
@@ -397,7 +411,7 @@ export class PreviewSession {
     // setLandmarksFromStill tracks this same unmirrored image - mirroring
     // only the background here would leave the tracked landmarks
     // pointing at the wrong side of the now-mirrored face.
-    this.submitRgbaFrame(image.data, image.width, image.height, false);
+    this.submitFrameRgbaCopy(image.data, image.width, image.height, false);
   }
 
   private ensureFramePixels(byteLength: number): void {
@@ -407,7 +421,7 @@ export class PreviewSession {
     this.framePixelsCapacity = byteLength;
   }
 
-  private submitRgbaFrame(rgba: Uint8ClampedArray, width: number, height: number, mirror: boolean): void {
+  private submitFrameRgbaCopy(rgba: Uint8ClampedArray, width: number, height: number, mirror: boolean): void {
     this.frameWidth = width;
     this.frameHeight = height;
     const byteLength = width * height * 4;
@@ -487,7 +501,7 @@ export class PreviewSession {
       // for display, so the engine keeps working in the camera's real,
       // unmirrored coordinate space (matching tracking, which analyzes
       // this same unmirrored buffer).
-      this.submitRgbaFrame(pixels.data, width, height, false);
+      this.submitFrameRgbaCopy(pixels.data, width, height, false);
     }
 
     const status = this.mod.ccall("goss_engine_render_frame", "number", ["number", "number"], [this.engine, this.session]);
