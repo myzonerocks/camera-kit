@@ -1632,6 +1632,88 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 // The flatbuffers runtime pieces the schema code links against; the
 // headers carry almost everything, this archive holds the rest.
 
+// ANGLE's own EGL/GLES2-over-Metal backend, the fix for real iOS
+// hardware where native EAGLContext creation fails outright. Scoped the
+// way Tint was: libANGLE core, only the Metal renderer backend, the
+// translator, libGLESv2, libEGL - compiled directly, no GN/Ninja.
+fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const angle_dir = ".vendor/angle";
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.link_libcpp = true;
+    addAppleSdkPaths(b, module);
+
+    for ([_][]const u8{
+        angle_dir ++ "/include",
+        angle_dir ++ "/src",
+        angle_dir ++ "/src/common/base",
+        angle_dir ++ "/src/common/third_party/xxhash",
+        "adapters/angle",
+    }) |dir| {
+        module.addIncludePath(b.path(dir));
+    }
+
+    module.addCMacro("ANGLE_ENABLE_METAL", "1");
+    module.addCMacro("ANGLE_ENABLE_ESSL", "1");
+    module.addCMacro("ANGLE_ENABLE_GLSL", "1");
+    module.addCMacro("GL_GLES_PROTOTYPES", "0");
+    module.addCMacro("EGL_EGL_PROTOTYPES", "0");
+    module.addCMacro("LIBANGLE_IMPLEMENTATION", "1");
+    module.addCMacro("LIBGLESV2_IMPLEMENTATION", "1");
+    module.addCMacro("LIBEGL_IMPLEMENTATION", "1");
+    module.addCMacro("ANGLE_UTIL_EXPORT", "");
+
+    const flags = [_][]const u8{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" };
+
+    // Backends and features this scope has no use for: other GPU APIs
+    // (D3D/Vulkan/WGPU/desktop-GL/null, plus the DXGI/SPIR-V/Vulkan
+    // common code they alone pull in), OpenCL, the experimental Rust
+    // translator, frame capture, and code for platforms that aren't us.
+    const angle_excludes = [_][]const u8{
+        "_unittest.cpp", "_test.cpp",    "_fuzzer.cpp",   "_unittest.mm", "_test.mm",
+        "/fuzz/",        "/tests/",
+        "/renderer/d3d/", "/renderer/vulkan/", "/renderer/wgpu/",
+        "/renderer/null/", "/renderer/gl/",    "/renderer/cl/",
+        "/dxgi_support_table", "/dxgi_format_map_autogen",
+        "/CL",           "/cl_",         "_cl_",         "validationCL", "PackedCLEnums",
+        "system_utils_linux", "system_utils_win",
+        "/common/gl/",   "/common/serializer/", "/common/vulkan/", "/common/spirv/",
+        "/compiler/translator/ir/", "/compiler/translator/hlsl/",
+        "/compiler/translator/spirv/", "/compiler/translator/wgsl/",
+        "/libANGLE/capture/",
+    };
+
+    var sources: std.ArrayList([]const u8) = .empty;
+    for ([_][]const u8{
+        angle_dir ++ "/src/common",
+        angle_dir ++ "/src/libANGLE",
+        angle_dir ++ "/src/libGLESv2",
+        angle_dir ++ "/src/libEGL",
+        angle_dir ++ "/src/compiler",
+    }) |dir| {
+        listFilesRecursive(b, dir, ".cpp", &angle_excludes, &sources);
+        listFilesRecursive(b, dir, ".mm", &angle_excludes, &sources);
+    }
+    std.mem.sort([]const u8, sources.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b_: []const u8) bool {
+            return std.mem.lessThan(u8, a, b_);
+        }
+    }.lessThan);
+
+    for (sources.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
+    module.addCSourceFile(.{ .file = b.path("adapters/angle/compression_utils_portable.cc"), .flags = &flags });
+
+    module.linkSystemLibrary("z", .{});
+    module.linkFramework("Metal", .{});
+    module.linkFramework("QuartzCore", .{});
+    module.linkFramework("Foundation", .{});
+    module.linkFramework("IOSurface", .{});
+
+    return b.addLibrary(.{ .name = "angle", .linkage = .static, .root_module = module });
+}
+
 // The beauty effects engine from its pinned tree: the core graph, the
 // filter set, raw data source and sinks, compiled per platform against the
 // system gl it targets. The bundled face detector never builds; landmarks
@@ -1651,6 +1733,9 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         ".vendor/gpupixel/third_party/stb/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
+    }
+    if (target.result.os.tag == .ios) {
+        module.addIncludePath(b.path(".vendor/angle/include"));
     }
     const os = target.result.os.tag;
     const platform_define: []const u8 = switch (os) {
@@ -1762,7 +1847,9 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         module.addCSourceFile(.{ .file = b.path("adapters/beauty/interop_apple.mm"), .flags = flags.items });
         module.linkFramework("CoreVideo", .{});
         if (os == .macos) module.linkFramework("OpenGL", .{});
-        if (os == .ios) module.linkFramework("OpenGLES", .{});
+        // Real OpenGL ES is gone on current iOS hardware; ANGLE's
+        // EGL/GLES-over-Metal backend stands in (see buildAngleLib).
+        if (os == .ios) module.linkLibrary(buildAngleLib(b, target, optimize));
     } else {
         module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim.cc"), .flags = flags.items });
         if (target.result.abi.isAndroid()) {
@@ -2396,6 +2483,7 @@ var apple_sdk: ?[]const u8 = null;
 fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
     const sdk = apple_sdk orelse b.sysroot orelse return;
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "include" }) });
+    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "lib" }) });
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
     // Newer sdks split pieces of the ui frameworks into sub frameworks.
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "SubFrameworks" }) });

@@ -1,0 +1,10 @@
+.{
+    .name = "angle",
+    .repo = "https://github.com/google/angle",
+    .version = "main 2026-08-18",
+    .commit = "a871bdb05932b9bbaf511e531a8497cf1a6e1865",
+    .archive_sha256 = "f8f7f8531a0127a5a1c1f90dc9cf3d66c12ca9ce1ad4c536fe56a2b7bdf6abd8",
+    .license = "BSD-2-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "bf4da21bd20bcfb5b60b7ecc67fa864a79be049e21d6178076887f178dd6c71a",
+}

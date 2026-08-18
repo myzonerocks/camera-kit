@@ -1,0 +1,27 @@
+Local patches applied on top of the pinned gpupixel source after
+vendor-sync extracts and verifies it (see pin.zon's archive_sha256, which
+stays anchored to the pristine, pre-patch archive). Applied in filename
+order by tools/vendor_sync.zig.
+
+0001-ios-angle-egl-context.patch
+gpupixel's iOS context creation calls
+`[[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2]` directly.
+Real OpenGL ES is gone on current iOS hardware, so this fails outright
+and the whole beauty chain never initializes there. Android already
+works around the same problem class through EGL; this gives iOS the
+same EGL-shaped context, but backed by ANGLE (vendored separately, see
+third_party/angle) forced onto its Metal backend via
+EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE, since iOS has no native EGL of its
+own to hand eglGetPlatformDisplay. CreateContext, UseAsCurrent,
+PresentBufferForDisplay, and ReleaseContext all move to the same shape
+GPUPIXEL_ANDROID already uses.
+
+adapters/beauty/interop_apple.mm's iOS path still pulls
+`[EAGLContext currentContext]` to stand up its CVOpenGLESTextureCache -
+that call returns nil once this patch lands, since ANGLE never creates
+a real EAGLContext. That bridge needs its own follow-up pass onto
+ANGLE's IOSurface EGL surface (EGL_IOSURFACE_ANGLE, confirmed real in
+the vendored source at
+src/libANGLE/renderer/metal/IOSurfaceSurfaceMtl.mm) rather than
+CVOpenGLESTextureCache. Not done here - this patch only gets the
+context itself created and current.
