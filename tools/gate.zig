@@ -80,6 +80,20 @@ const banned_tokens = [_][]const u8{
     "ai-gen" ++ "erated",
 };
 
+// A comment states what the code does and why; it never narrates the
+// investigation that led here (what was checked, how confident the
+// author is, when it happened) or cites another tracked document by
+// name. These markers catch that shape on added comment lines - this
+// project's own recurring mistake, not a hypothetical.
+const verbose_comment_markers = [_][]const u8{
+    "verified",       "confirmed",       "not assumed",
+    "found that",     "found a real",    "real finding",
+    "real question",  "real, proven",    "real and proven",
+    "owner-directed", "owner-ordered",   "DECISIONS.md",
+    "SPEC.md",        "ENGINEERING.md",  "COMPLETION-BAR.md",
+    "No-Gated-On-You", "DEFERRAL-LOOPHOLES",
+};
+
 const Gate = struct {
     arena: Allocator,
     io: Io,
@@ -207,6 +221,32 @@ const Gate = struct {
         }
     }
 
+    // Scans added lines in a unified diff for comment-hygiene violations.
+    // diff_args are appended to `git diff` (e.g. `--cached ...` for
+    // staged, or a rev range for CI) so this one scanner serves both.
+    fn checkCommentHygiene(g: *Gate, diff_args: []const []const u8) !void {
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(g.arena, &.{ "git", "diff", "--diff-filter=ACMR", "-U0" });
+        try argv.appendSlice(g.arena, diff_args);
+        const out = try g.git(argv.items, &.{0});
+
+        var current_path: []const u8 = "";
+        var lines = std.mem.splitScalar(u8, out, '\n');
+        while (lines.next()) |line| {
+            if (std.mem.startsWith(u8, line, "+++ ")) {
+                const rest = line["+++ ".len..];
+                current_path = if (std.mem.startsWith(u8, rest, "b/")) rest["b/".len..] else rest;
+                continue;
+            }
+            if (!std.mem.startsWith(u8, line, "+") or std.mem.startsWith(u8, line, "+++")) continue;
+            const content = line[1..];
+            if (!isCommentLine(content)) continue;
+            if (findVerboseMarker(content)) |marker| {
+                try g.flag("comment-hygiene: '{s}' has a verbose comment (matched '{s}'): {s}", .{ current_path, marker, std.mem.trim(u8, content, " \t") });
+            }
+        }
+    }
+
     fn stagedPaths(g: *Gate) ![][]const u8 {
         const out = try g.git(&.{ "git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z" }, &.{0});
         return g.nulSeparated(out);
@@ -237,7 +277,7 @@ pub fn main(init: std.process.Init) !u8 {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next(); // program path
     const mode = args.next() orelse {
-        std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range>\n", .{});
+        std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range> | --diff <range>\n", .{});
         return 2;
     };
 
@@ -246,6 +286,7 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkIgnoreIntegrity();
         try g.checkInbound(paths);
         try g.checkFileProvenance(paths);
+        try g.checkCommentHygiene(&.{"--cached"});
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
@@ -264,6 +305,12 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         };
         try g.checkLogRange(range);
+    } else if (std.mem.eql(u8, mode, "--diff")) {
+        const range = args.next() orelse {
+            std.debug.print("gate: --diff needs a rev range argument\n", .{});
+            return 2;
+        };
+        try g.checkCommentHygiene(&.{range});
     } else {
         std.debug.print("gate: unknown mode '{s}'\n", .{mode});
         return 2;
@@ -341,6 +388,38 @@ fn findBannedToken(text: []const u8) ?[]const u8 {
     return null;
 }
 
+fn isCommentLine(line: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t");
+    return std.mem.startsWith(u8, trimmed, "//") or
+        std.mem.startsWith(u8, trimmed, "///") or
+        std.mem.startsWith(u8, trimmed, "*") or
+        std.mem.startsWith(u8, trimmed, "#");
+}
+
+fn hasIsoDate(line: []const u8) bool {
+    if (line.len < 10) return false;
+    var i: usize = 0;
+    while (i + 10 <= line.len) : (i += 1) {
+        const s = line[i..][0..10];
+        if (s[0] == '2' and s[1] == '0' and
+            std.ascii.isDigit(s[2]) and std.ascii.isDigit(s[3]) and
+            s[4] == '-' and std.ascii.isDigit(s[5]) and std.ascii.isDigit(s[6]) and
+            s[7] == '-' and std.ascii.isDigit(s[8]) and std.ascii.isDigit(s[9]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn findVerboseMarker(line: []const u8) ?[]const u8 {
+    for (verbose_comment_markers) |marker| {
+        if (std.ascii.indexOfIgnoreCase(line, marker) != null) return marker;
+    }
+    if (hasIsoDate(line)) return "a dated timeline entry, not a fact about the code";
+    return null;
+}
+
 test "top-level trees require their re-include line" {
     const ignore = "!core/**\n!tools/**\ndocs/private/\n";
     try std.testing.expect(hasLine(ignore, "!core/**"));
@@ -392,4 +471,18 @@ test "binary probe" {
 test "design-ignored prefixes are skipped" {
     try std.testing.expect(hasAnyPrefix(".zig-cache/h/x", &design_ignored_prefixes));
     try std.testing.expect(!hasAnyPrefix("core/x.zig", &design_ignored_prefixes));
+}
+
+test "comment lines are recognized across languages" {
+    try std.testing.expect(isCommentLine("    // a comment"));
+    try std.testing.expect(isCommentLine("/// a doc comment"));
+    try std.testing.expect(isCommentLine("  # a shell comment"));
+    try std.testing.expect(!isCommentLine("    const x = 1;"));
+}
+
+test "verbose comment markers are caught, plain ones are not" {
+    try std.testing.expect(findVerboseMarker("// verified this is correct") != null);
+    try std.testing.expect(findVerboseMarker("// see DECISIONS.md for context") != null);
+    try std.testing.expect(findVerboseMarker("// found 2026-08-17 that this works") != null);
+    try std.testing.expect(findVerboseMarker("// converts YUV to RGB via a fixed matrix") == null);
 }

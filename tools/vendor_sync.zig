@@ -90,6 +90,49 @@ const Sync = struct {
         return std.mem.eql(u8, &sha256Hex(data), expected);
     }
 
+    /// Sorted (filename order, matching application order) *.patch names
+    /// under third_party/<name>/patches - empty, not an error, when that
+    /// directory doesn't exist (the common no-patches case).
+    fn sortedPatchNames(s: *Sync, patches_dir_path: []const u8) ![][]const u8 {
+        var dir = Io.Dir.cwd().openDir(s.io, patches_dir_path, .{ .iterate = true }) catch return &.{};
+        defer dir.close(s.io);
+
+        var names: std.ArrayList([]const u8) = .empty;
+        var it = dir.iterate();
+        while (try it.next(s.io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".patch")) continue;
+            try names.append(s.arena, try s.arena.dupe(u8, entry.name));
+        }
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+        return names.items;
+    }
+
+    /// Digest over every patch's name and content, in application order.
+    /// Folded into the synced-vendor stamp so that adding, editing, or
+    /// removing a patch invalidates the "already synced" fast path - without
+    /// this, a patch added after a vendor's first sync would silently never
+    /// apply, since vendorSynced() only used to compare pin.commit.
+    fn patchesDigest(s: *Sync, name: []const u8) ![64]u8 {
+        const patches_dir_path = try std.fmt.allocPrint(s.arena, "third_party/{s}/patches", .{name});
+        const names = try s.sortedPatchNames(patches_dir_path);
+
+        var buf: std.ArrayList(u8) = .empty;
+        for (names) |patch_name| {
+            const patch_path = try std.fmt.allocPrint(s.arena, "{s}/{s}", .{ patches_dir_path, patch_name });
+            const data = try Io.Dir.cwd().readFileAlloc(s.io, patch_path, s.arena, .limited(1 << 20));
+            try buf.appendSlice(s.arena, patch_name);
+            try buf.append(s.arena, '\n');
+            try buf.appendSlice(s.arena, data);
+            try buf.append(s.arena, '\n');
+        }
+        return sha256Hex(buf.items);
+    }
+
     fn licenseExcepted(name: []const u8, license: []const u8) bool {
         for (license_exceptions) |exception| {
             if (std.mem.eql(u8, exception.name, name) and std.mem.eql(u8, exception.license, license)) return true;
@@ -113,7 +156,16 @@ const Sync = struct {
     fn vendorSynced(s: *Sync, pin: Pin) bool {
         const stamp_path = std.fmt.allocPrint(s.arena, ".vendor/{s}/.pin-commit", .{pin.name}) catch return false;
         const stamp = Io.Dir.cwd().readFileAlloc(s.io, stamp_path, s.arena, .limited(256)) catch return false;
-        if (!std.mem.eql(u8, std.mem.trim(u8, stamp, " \n"), pin.commit)) return false;
+        var lines = std.mem.splitScalar(u8, std.mem.trim(u8, stamp, " \n"), '\n');
+        const stamped_commit = lines.next() orelse return false;
+        if (!std.mem.eql(u8, stamped_commit, pin.commit)) return false;
+        // Old-format stamps (pre-dating patch tracking) have no second
+        // line - treated as unsynced so the one-time upgrade re-syncs and
+        // re-stamps rather than silently trusting a tree patches may have
+        // moved past.
+        const stamped_patches = lines.next() orelse return false;
+        const current_patches = s.patchesDigest(pin.name) catch return false;
+        if (!std.mem.eql(u8, stamped_patches, &current_patches)) return false;
         const license_path = std.fmt.allocPrint(s.arena, ".vendor/{s}/{s}", .{ pin.name, pin.license_file }) catch return false;
         return s.fileDigestMatches(license_path, pin.license_sha256);
     }
@@ -197,9 +249,40 @@ const Sync = struct {
             return;
         }
 
+        try s.applyPatches(name, dest);
+
+        const patches_digest = try s.patchesDigest(name);
+        const stamp_data = try std.fmt.allocPrint(s.arena, "{s}\n{s}\n", .{ pin.commit, patches_digest });
         const stamp_path = try std.fmt.allocPrint(s.arena, "{s}/.pin-commit", .{dest});
-        try Io.Dir.cwd().writeFile(s.io, .{ .sub_path = stamp_path, .data = pin.commit });
+        try Io.Dir.cwd().writeFile(s.io, .{ .sub_path = stamp_path, .data = stamp_data });
         std.debug.print("vendor-sync: {s} {s} synced at {s}\n", .{ pin.name, pin.version, pin.commit[0..@min(pin.commit.len, 12)] });
+    }
+
+    /// Applies third_party/<name>/patches/*.patch, in filename order, onto
+    /// the just-extracted dest tree - local modifications layered on top
+    /// of the pristine, digest-checked archive, never folded into what's
+    /// cryptographically pinned (pin.archive_sha256 stays anchored to the
+    /// unpatched source). No patches/ directory is the common case and a
+    /// silent no-op. A patch that no longer applies cleanly against the
+    /// pinned commit fails the whole sync loudly (via `try`, matching how
+    /// this function's own curl/tar steps above already fail) rather than
+    /// leaving a half-patched tree that looks synced.
+    fn applyPatches(s: *Sync, name: []const u8, dest: []const u8) !void {
+        const patches_dir_path = try std.fmt.allocPrint(s.arena, "third_party/{s}/patches", .{name});
+        const names = try s.sortedPatchNames(patches_dir_path);
+
+        for (names) |patch_name| {
+            // patch's own -d chdirs into dest before it opens -i's file, so
+            // -i must resolve from there, not from this process's cwd - a
+            // repo-root-relative path silently fails to be found once -d
+            // has already taken effect. dest is always exactly
+            // ".vendor/<name>" (built a few lines above), two segments
+            // deep, so "../.." reliably returns to the repo root from any
+            // vendor's own dest without needing to resolve an absolute cwd.
+            const patch_path = try std.fmt.allocPrint(s.arena, "../../{s}/{s}", .{ patches_dir_path, patch_name });
+            std.debug.print("vendor-sync: {s} applying {s}\n", .{ name, patch_name });
+            try s.run(&.{ "patch", "-p1", "-d", dest, "-i", patch_path });
+        }
     }
 };
 
@@ -313,6 +396,49 @@ test "host archive override is null with no platform pins set" {
         .license_sha256 = "",
     };
     try t.expect(hostArchiveOverrideFor(pin, .macos, .aarch64) == null);
+}
+
+test "applyPatches finds, sorts, and really applies a patch onto a synced vendor tree" {
+    const cwd = Io.Dir.cwd();
+    const vendor_name = "_test_patch_vendor";
+    const patches_dir = "third_party/" ++ vendor_name ++ "/patches";
+    const dest = ".vendor/" ++ vendor_name;
+    cwd.deleteTree(t.io, "third_party/" ++ vendor_name) catch {};
+    cwd.deleteTree(t.io, dest) catch {};
+    defer cwd.deleteTree(t.io, "third_party/" ++ vendor_name) catch {};
+    defer cwd.deleteTree(t.io, dest) catch {};
+
+    try cwd.createDirPath(t.io, patches_dir);
+    try cwd.createDirPath(t.io, dest);
+    try cwd.writeFile(t.io, .{ .sub_path = dest ++ "/hello.txt", .data = "before\n" });
+    // Two patches, named so alphabetical order matters (0002 depends on
+    // 0001 having already landed) - proves real ordering, not just that
+    // a single patch applies.
+    try cwd.writeFile(t.io, .{ .sub_path = patches_dir ++ "/0002-second.patch", .data =
+        \\--- a/hello.txt
+        \\+++ b/hello.txt
+        \\@@ -1 +1 @@
+        \\-middle
+        \\+after
+        \\
+    });
+    try cwd.writeFile(t.io, .{ .sub_path = patches_dir ++ "/0001-first.patch", .data =
+        \\--- a/hello.txt
+        \\+++ b/hello.txt
+        \\@@ -1 +1 @@
+        \\-before
+        \\+middle
+        \\
+    });
+
+    var arena_state = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena_state.deinit();
+    var s: Sync = .{ .arena = arena_state.allocator(), .io = t.io, .check_only = false };
+    try s.applyPatches(vendor_name, dest);
+
+    const result = try cwd.readFileAlloc(t.io, dest ++ "/hello.txt", t.allocator, .limited(1024));
+    defer t.allocator.free(result);
+    try t.expectEqualStrings("after\n", result);
 }
 
 test "opt_in and host_optional default to false" {

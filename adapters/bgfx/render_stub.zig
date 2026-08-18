@@ -273,6 +273,12 @@ pub const Renderer = struct {
         _ = path;
     }
 
+    pub fn readTexture(texture: TextureHandle, data: [*]u8) u32 {
+        _ = texture;
+        _ = data;
+        return 0;
+    }
+
     pub fn currentShaderProfileTag() ![]const u8 {
         return error.RendererUnavailable;
     }

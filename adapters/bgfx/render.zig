@@ -142,6 +142,20 @@ pub const Renderer = struct {
     upload_cache: ?UploadCache = null,
     rgba_upload_cache: ?RgbaUploadCache = null,
 
+    /// Web/wasm renderer choice: WebGPU when this build has it compiled
+    /// in, auto-select (OpenGLES/WebGL2) otherwise. Queries bgfx's own
+    /// supported-renderers list rather than a build-time flag, since
+    /// wasm-emscripten-webgpu and wasm-emscripten link different bgfx
+    /// object files.
+    fn preferredWebRenderer() c.bgfx_renderer_type_t {
+        var supported: [16]c.bgfx_renderer_type_t = undefined;
+        const count = c.bgfx_get_supported_renderers(supported.len, &supported);
+        for (supported[0..count]) |renderer| {
+            if (renderer == c.BGFX_RENDERER_TYPE_WEBGPU) return c.BGFX_RENDERER_TYPE_WEBGPU;
+        }
+        return c.BGFX_RENDERER_TYPE_COUNT;
+    }
+
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         var bgfx_init: c.bgfx_init_t = undefined;
         c.bgfx_init_ctor(&bgfx_init);
@@ -160,7 +174,7 @@ pub const Renderer = struct {
         else if (is_android)
             (if (vk_context != null) c.BGFX_RENDERER_TYPE_VULKAN else c.BGFX_RENDERER_TYPE_OPENGLES)
         else
-            c.BGFX_RENDERER_TYPE_COUNT;
+            preferredWebRenderer();
         if (is_android) {
             if (vk_context) |ctx| bgfx_init.platformData.context = ctx.rendererDevice();
         }
@@ -181,7 +195,18 @@ pub const Renderer = struct {
         // itself spawned, so single-threaded mode is what actually makes
         // that contract hold rather than racing bgfx's internal thread.
         _ = c.bgfx_render_frame(-1);
-        if (!c.bgfx_init(&bgfx_init)) return error.RendererInit;
+        if (!c.bgfx_init(&bgfx_init)) {
+            // bgfx doesn't retry another backend on its own when a
+            // specific type was requested - WebGPU falls back to
+            // auto-select here instead of failing outright.
+            if (bgfx_init.type == c.BGFX_RENDERER_TYPE_WEBGPU) {
+                bgfx_init.type = c.BGFX_RENDERER_TYPE_COUNT;
+                _ = c.bgfx_render_frame(-1);
+                if (!c.bgfx_init(&bgfx_init)) return error.RendererInit;
+            } else {
+                return error.RendererInit;
+            }
+        }
         errdefer c.bgfx_shutdown();
 
         var layout: c.bgfx_vertex_layout_t = undefined;
@@ -203,6 +228,10 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_OPENGLES => .{
                 try loadProgram(blobs.vs_preview_essl, blobs.fs_preview_rgba_essl),
                 try loadProgram(blobs.vs_preview_essl, blobs.fs_preview_nv12_essl),
+            },
+            c.BGFX_RENDERER_TYPE_WEBGPU => .{
+                try loadProgram(blobs.vs_preview_wgsl, blobs.fs_preview_rgba_wgsl),
+                try loadProgram(blobs.vs_preview_wgsl, blobs.fs_preview_nv12_wgsl),
             },
             else => return error.RendererUnsupported,
         };
@@ -307,6 +336,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => "metal",
             c.BGFX_RENDERER_TYPE_VULKAN => "spirv",
             c.BGFX_RENDERER_TYPE_OPENGLES => "essl",
+            c.BGFX_RENDERER_TYPE_WEBGPU => "wgsl",
             else => error.RendererUnsupported,
         };
     }
@@ -321,6 +351,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => blobs.vs_lens_pass_metal,
             c.BGFX_RENDERER_TYPE_VULKAN => blobs.vs_lens_pass_spirv,
             c.BGFX_RENDERER_TYPE_OPENGLES => blobs.vs_lens_pass_essl,
+            c.BGFX_RENDERER_TYPE_WEBGPU => blobs.vs_lens_pass_wgsl,
             else => return error.RendererUnsupported,
         };
         return loadProgram(vs_blob, fs_bytes);
@@ -337,6 +368,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_lut_pass_metal),
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_lut_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_lut_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_lut_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -348,6 +380,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_blend_pass_metal),
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_blend_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_blend_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_blend_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -359,6 +392,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_blur_pass_metal),
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_blur_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_blur_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_blur_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -370,6 +404,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_beauty_face_metal),
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_beauty_face_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_beauty_face_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_beauty_face_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -381,6 +416,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_beauty_reshape_metal),
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_beauty_reshape_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_beauty_reshape_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_beauty_reshape_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -393,6 +429,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_makeup_metal, blobs.fs_makeup_metal),
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_makeup_spirv, blobs.fs_makeup_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_makeup_essl, blobs.fs_makeup_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_makeup_wgsl, blobs.fs_makeup_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -408,6 +445,7 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_model_metal),
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_model_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_model_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_model_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -977,6 +1015,19 @@ pub const Renderer = struct {
     pub fn requestScreenshot(r: *Renderer, path: [*:0]const u8) void {
         _ = r;
         c.bgfx_request_screen_shot(.{ .idx = invalid_handle }, path);
+    }
+
+    /// Reads a texture's pixels back into `data`, which must be at
+    /// least as large as the texture's own byte size (width * height *
+    /// bytes-per-pixel for a plain 2D RGBA8 texture, the only shape
+    /// this project reads back today). Only enqueues the read - per
+    /// bgfx's own documented contract, the return value is the frame
+    /// number bgfx_frame() must reach before `data` is safe to read;
+    /// the caller is responsible for calling frame() until its own
+    /// return value reaches it, not assuming any fixed number of
+    /// extra calls.
+    pub fn readTexture(texture: TextureHandle, data: [*]u8) u32 {
+        return c.bgfx_read_texture(texture, data, 0, 0);
     }
 };
 

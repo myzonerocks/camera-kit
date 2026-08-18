@@ -1,0 +1,52 @@
+--- a/src/renderer_webgpu.cpp
++++ b/src/renderer_webgpu.cpp
+@@ -1829,23 +1829,33 @@
+ 				.height    = srcHeight,
+ 			};
+ 
+-			WGPU_CHECK(wgpuBufferMapAsync(
+-				  readTextureBuffer
+-				, WGPUMapMode_Read
+-				, 0
+-				, copySize
+-				, {
+-					.nextInChain = NULL,
+-					.mode        = WGPUCallbackMode_AllowProcessEvents,
+-					.callback    = readTextureCb,
+-					.userdata1   = &readTexture,
+-					.userdata2   = &s_done,
+-				}) );
+-
+-			while (!s_done)
++			// camera-kit patch: AllowProcessEvents + a bare
++			// wgpuInstanceProcessEvents pump never resolves under
++			// Emscripten's emdawnwebgpu port - the real browser
++			// GPUBuffer.mapAsync() promise needs an actual yield back
++			// to the JS event loop to settle, which this mode/pump
++			// combination never triggers there (spins at 100% CPU
++			// forever). WaitAnyOnly + waitForFuture is the same
++			// primitive this file's own adapter/device negotiation
++			// already uses successfully for exactly this reason - see
++			// third_party/bgfx/patches/README.md.
++			WGPUFutureWaitInfo fwi =
+ 			{
+-				wgpuInstanceProcessEvents(m_instance);
+-			}
++				.future = WGPU_CHECK(wgpuBufferMapAsync(
++					  readTextureBuffer
++					, WGPUMapMode_Read
++					, 0
++					, copySize
++					, {
++						.nextInChain = NULL,
++						.mode        = WGPUCallbackMode_WaitAnyOnly,
++						.callback    = readTextureCb,
++						.userdata1   = &readTexture,
++						.userdata2   = &s_done,
++					}) ),
++				.completed = false,
++			};
++			waitForFuture(fwi);
+ 		}
+ 
+ 		void resizeTexture(TextureHandle _handle, uint16_t _width, uint16_t _height, uint8_t _numMips, uint16_t _numLayers) override
