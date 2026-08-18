@@ -13,6 +13,7 @@
 		72B674BA311D190519BCC3C6 /* CameraController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD1B389A86F58C08E5E4DFB7 /* CameraController.swift */; };
 		878B2196AE2A6B45632771E6 /* shader-tint in Resources */ = {isa = PBXBuildFile; fileRef = 03C9BCA5CDB8ADF75B982350 /* shader-tint */; };
 		887CF4B04B21D80A890CDD6A /* ConformanceRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F998503A50856BC52D05527 /* ConformanceRunner.swift */; };
+		A37A97FE89DE3EA6437CF6A2 /* Gosslens in Frameworks */ = {isa = PBXBuildFile; productRef = D7D59881D14DBCB77C77D2CF /* Gosslens */; };
 		A65A3DE80ED8454384198F53 /* res in Resources */ = {isa = PBXBuildFile; fileRef = 5D6D8CFD58DF6BD69AC50AF8 /* res */; };
 		C70697F441C0323B1B525708 /* face_frontal_b.jpg in Resources */ = {isa = PBXBuildFile; fileRef = B798B9CEE86B93A4505BEB1B /* face_frontal_b.jpg */; };
 		E32D434E12DCCD93C8F60A61 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A97BF2E557892F3E85DCEBF /* AppDelegate.swift */; };
@@ -30,8 +31,20 @@
 		B798B9CEE86B93A4505BEB1B /* face_frontal_b.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = face_frontal_b.jpg; sourceTree = "<group>"; };
 		BD1B389A86F58C08E5E4DFB7 /* CameraController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraController.swift; sourceTree = "<group>"; };
 		CA88990CE2A2BC69393525B7 /* beauty-baseline */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "beauty-baseline"; path = "../../../lenses/reference/beauty-baseline"; sourceTree = SOURCE_ROOT; };
+		E578B2F0047578A027ACB174 /* Gosslens */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Gosslens; path = ../Gosslens; sourceTree = SOURCE_ROOT; };
 		EC67874C6280FDD4A27DDB6E /* face_landmarker.task */ = {isa = PBXFileReference; path = face_landmarker.task; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A513D9C6E5FAFFA372245ACA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A37A97FE89DE3EA6437CF6A2 /* Gosslens in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		1874C325067F6DD7051CAC87 = {
@@ -42,6 +55,7 @@
 				03C9BCA5CDB8ADF75B982350 /* shader-tint */,
 				356D4A3C90D44CFBCA32C207 /* .models */,
 				B89598D0FC6999586DE00291 /* corpus */,
+				688E75F06C7428E85853EC1B /* Packages */,
 				4233235EAEA37965AFE26DC1 /* Sources */,
 				1D1DFA07D10F9ADB7B53AA5C /* Products */,
 			);
@@ -77,6 +91,14 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		688E75F06C7428E85853EC1B /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				E578B2F0047578A027ACB174 /* Gosslens */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
 		B89598D0FC6999586DE00291 /* corpus */ = {
 			isa = PBXGroup;
 			children = (
@@ -95,6 +117,7 @@
 			buildPhases = (
 				75303676886377C3E12927A6 /* Sources */,
 				96587489339492FC066EFC64 /* Resources */,
+				A513D9C6E5FAFFA372245ACA /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -102,6 +125,7 @@
 			);
 			name = GosslensDemo;
 			packageProductDependencies = (
+				D7D59881D14DBCB77C77D2CF /* Gosslens */,
 			);
 			productName = GosslensDemo;
 			productReference = 5C99C56E373D158571329337 /* GosslensDemo.app */;
@@ -131,6 +155,9 @@
 			);
 			mainGroup = 1874C325067F6DD7051CAC87;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5B37E15CE45FADD78206D6D3 /* XCLocalSwiftPackageReference "../Gosslens" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1D1DFA07D10F9ADB7B53AA5C /* Products */;
 			projectDirPath = "";
@@ -223,7 +250,7 @@
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6;
 			};
 			name = Release;
 		};
@@ -286,7 +313,7 @@
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6;
 			};
 			name = Debug;
 		};
@@ -352,6 +379,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.gosslens.demo;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = Sources/Bridging.h;
+				SWIFT_VERSION = 6;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
@@ -418,6 +446,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.gosslens.demo;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = Sources/Bridging.h;
+				SWIFT_VERSION = 6;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
@@ -444,6 +473,20 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		5B37E15CE45FADD78206D6D3 /* XCLocalSwiftPackageReference "../Gosslens" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../Gosslens;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D7D59881D14DBCB77C77D2CF /* Gosslens */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Gosslens;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 34DC259038FE5B2569EA2326 /* Project object */;
 }

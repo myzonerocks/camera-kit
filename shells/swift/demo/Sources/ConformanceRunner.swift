@@ -1,4 +1,5 @@
 import CryptoKit
+import Gosslens
 import QuartzCore
 import UIKit
 import os
@@ -153,52 +154,34 @@ enum ConformanceRunner {
     /// own renderOnce - proves activation and teardown aren't hiding state
     /// that would make a second run trivially match the first.
     private static func renderOnce(metalLayer: CAMetalLayer, width: UInt32, height: UInt32, corpus: Nv12Corpus, outPath: String) -> String? {
-        var engineOut: OpaquePointer?
-        guard goss_engine_create(nil, &engineOut) == GOSS_OK, let engine = engineOut else { return nil }
-        defer { goss_engine_destroy(engine) }
+        guard let engine = try? Engine.create() else { return nil }
+        defer { engine.destroy() }
 
-        var rendererDesc = goss_renderer_desc(
-            native_window_handle: Unmanaged.passUnretained(metalLayer).toOpaque(),
-            width: width,
-            height: height
-        )
-        guard goss_engine_init_renderer(engine, &rendererDesc) == GOSS_OK else { return nil }
+        guard (try? engine.initRenderer(surface: Unmanaged.passUnretained(metalLayer).toOpaque(), width: width, height: height)) != nil else { return nil }
 
-        var sessionOut: OpaquePointer?
-        guard goss_session_create(engine, nil, &sessionOut) == GOSS_OK, let session = sessionOut else { return nil }
-        defer { goss_session_destroy(session) }
+        guard let session = try? Session.create(engine: engine) else { return nil }
+        defer { session.destroy() }
 
         guard let lensManifestURL = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "shader-tint") else { return nil }
-        let lensDir = Array(lensManifestURL.deletingLastPathComponent().path.utf8)
-        let activated = lensDir.withUnsafeBufferPointer { buf in
-            goss_session_activate_lens_from_directory(session, buf.baseAddress, buf.count)
-        }
-        guard activated == GOSS_OK else { return nil }
+        guard (try? session.activateLensFromDirectory(bundlePath: lensManifestURL.deletingLastPathComponent().path)) != nil else { return nil }
 
-        var frameDesc = goss_frame_desc(
-            width: corpus.width,
-            height: corpus.height,
-            pixel_format: GOSS_PIXEL_NV12.rawValue,
-            color_standard: GOSS_COLOR_BT601.rawValue,
-            color_range: GOSS_COLOR_RANGE_FULL.rawValue,
-            flags: 0,
-            timestamp_us: 1000
-        )
         let uvStride = UInt32((corpus.width + 1) / 2) * 2
-        let submitted = corpus.y.withUnsafeBufferPointer { yBuf in
+        let submitted: ()? = corpus.y.withUnsafeBufferPointer { yBuf in
             corpus.uv.withUnsafeBufferPointer { uvBuf in
-                goss_session_submit_frame_copy(session, &frameDesc, yBuf.baseAddress, corpus.width, uvBuf.baseAddress, uvStride)
+                try? session.submitFrameCopy(
+                    y: yBuf.baseAddress!, yStride: corpus.width,
+                    uv: uvBuf.baseAddress!, uvStride: uvStride,
+                    width: corpus.width, height: corpus.height,
+                    rotationDegrees: 0, mirrored: false, timestampUs: 1000,
+                    colorStandard: GOSS_COLOR_BT601.rawValue, colorRange: GOSS_COLOR_RANGE_FULL.rawValue
+                )
             }
         }
-        guard submitted == GOSS_OK else { return nil }
+        guard submitted != nil else { return nil }
 
-        for _ in 0 ..< 5 { _ = goss_engine_render_frame(engine, session) }
-        let pathBytes = Array(outPath.utf8)
-        let requested = pathBytes.withUnsafeBufferPointer { buf in
-            goss_engine_request_screenshot(engine, buf.baseAddress, buf.count)
-        }
-        guard requested == GOSS_OK else { return nil }
-        for _ in 0 ..< 5 { _ = goss_engine_render_frame(engine, session) }
+        for _ in 0 ..< 5 { try? engine.renderFrame(session: session) }
+        guard (try? engine.requestScreenshot(path: outPath)) != nil else { return nil }
+        for _ in 0 ..< 5 { try? engine.renderFrame(session: session) }
 
         guard let shot = try? Data(contentsOf: URL(fileURLWithPath: outPath + ".tga")) else { return nil }
         return SHA256.hash(data: shot).map { String(format: "%02x", $0) }.joined()

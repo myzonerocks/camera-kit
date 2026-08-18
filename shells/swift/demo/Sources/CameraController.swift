@@ -1,13 +1,16 @@
 import AVFoundation
-import CoreVideo
+@preconcurrency import CoreVideo
+import Gosslens
 import Metal
 import os
 
 // Owns the capture side: device discovery, permission, the NV12 output, and
 // zero-copy hand-off of each frame's Metal textures into the engine. Frames
 // never touch the CPU; CVMetalTextureCache wraps the camera planes as
-// MTLTextures backed by the same IOSurface.
-final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+// MTLTextures backed by the same IOSurface. Unchecked Sendable: mutable
+// state is confined to outputQueue and an explicit hop to main, by
+// construction, not something the compiler can see through captures.
+final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     enum State: String {
         case idle
         case running
@@ -20,7 +23,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private let captureSession = AVCaptureSession()
     private let outputQueue = DispatchQueue(label: "com.gosslens.demo.capture")
     private var textureCache: CVMetalTextureCache?
-    private var engineSession: OpaquePointer?
+    private var session: Session?
 
     // The plane textures of the two most recent frames stay retained so the
     // GPU can still sample the frame in flight while the next one arrives.
@@ -35,8 +38,8 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private var rotationQuarterTurns: UInt32 = 0
     var onStateChange: ((State) -> Void)?
 
-    func start(engineSession: OpaquePointer?, position: AVCaptureDevice.Position = .back) {
-        self.engineSession = engineSession
+    func start(session: Session?, position: AVCaptureDevice.Position = .back) {
+        self.session = session
         enableFaceTracking()
         enableBeauty()
         activateLens()
@@ -65,46 +68,54 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     }
 
     private func enableFaceTracking() {
-        guard let engineSession,
+        guard let session,
               let url = Bundle.main.url(forResource: "face_landmarker", withExtension: "task"),
               let bundleData = try? Data(contentsOf: url)
         else {
             log.info("face tracking bundle not present")
             return
         }
-        let status = bundleData.withUnsafeBytes { raw in
-            goss_session_enable_face_tracking(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count, 0)
+        do {
+            try session.enableFaceTracking(taskBundle: bundleData, threads: 0)
+            log.info("face tracking enabled")
+        } catch {
+            log.info("face tracking enable failed: \(String(describing: error))")
         }
-        log.info("face tracking enable status \(status.rawValue)")
     }
 
     // The engine's own loader appends "res/" to whatever root it is given,
     // so the bundle root is the argument, not the res folder itself.
     private func enableBeauty() {
-        guard let engineSession else { return }
+        guard let session else { return }
         let resourceRoot = Bundle.main.bundlePath
         guard FileManager.default.fileExists(atPath: resourceRoot + "/res") else {
             log.info("beauty resources not present")
             return
         }
-        let status = goss_session_enable_beauty(engineSession, resourceRoot)
-        log.info("beauty enable status \(status.rawValue)")
+        do {
+            try session.enableBeauty(resourceDir: resourceRoot)
+            log.info("beauty enabled")
+        } catch {
+            log.info("beauty enable failed: \(String(describing: error))")
+        }
     }
 
     // The reference lens ships as a bundled folder (project.yml) keeping
     // its own name, so its manifest sits at <bundle>/beauty-baseline/manifest.json.
     private func activateLens() {
-        guard let engineSession,
+        guard let session,
               let url = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "beauty-baseline"),
               let manifestData = try? Data(contentsOf: url)
         else {
             log.info("reference lens not present")
             return
         }
-        let status = manifestData.withUnsafeBytes { raw in
-            goss_session_activate_lens(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+        do {
+            try session.activateLens(manifestJson: manifestData)
+            log.info("lens activated")
+        } catch {
+            log.info("lens activate failed: \(String(describing: error))")
         }
-        log.info("lens activate status \(status.rawValue)")
     }
 
     private func transition(to newState: State) {
@@ -161,11 +172,9 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         NotificationCenter.default.addObserver(self, selector: #selector(interruptionEnded), name: AVCaptureSession.interruptionEndedNotification, object: captureSession)
         NotificationCenter.default.addObserver(self, selector: #selector(runtimeError), name: AVCaptureSession.runtimeErrorNotification, object: captureSession)
 
-        // Rear sensor's raw buffer needs a 90-degree clockwise turn to
-        // read upright; rotationZ's positive angle is counter-clockwise,
-        // so that's 3 quarter-turns here, not 1 - using 1 rotates the
-        // wrong way, landing 180 degrees off (upside down and mirrored
-        // at once, since a half-turn is both at the same time).
+        // rotationZ's positive angle is counter-clockwise, so the rear
+        // sensor's clockwise 90-degree correction is 3 quarter-turns,
+        // not 1 - 1 lands 180 degrees off, both upside down and mirrored.
         rotationQuarterTurns = 3
 
         outputQueue.async {
@@ -192,7 +201,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let engineSession,
+        guard let session,
               let cache = textureCache,
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
         else { return }
@@ -225,38 +234,18 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             }
         }
 
-        var flags: UInt32 = rotationQuarterTurns << GOSS_FRAME_ROTATION_SHIFT
-        if mirrored { flags |= GOSS_FRAME_FLAG_MIRROR }
+        let rotationDegrees = rotationQuarterTurns * 90
+        let timestampUs = Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000)
+        let yPlane = UInt64(UInt(bitPattern: Unmanaged.passUnretained(yTexture).toOpaque()))
+        let uvPlane = UInt64(UInt(bitPattern: Unmanaged.passUnretained(uvTexture).toOpaque()))
 
-        var desc = goss_frame_desc(
-            width: UInt32(width),
-            height: UInt32(height),
-            pixel_format: GOSS_PIXEL_NV12.rawValue,
-            color_standard: standard,
-            color_range: GOSS_COLOR_RANGE_VIDEO.rawValue,
-            flags: flags,
-            timestamp_us: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000)
-        )
-        let planes = goss_frame_planes(
-            plane_count: 2,
-            reserved: 0,
-            planes: (
-                UInt64(UInt(bitPattern: Unmanaged.passUnretained(yTexture).toOpaque())),
-                UInt64(UInt(bitPattern: Unmanaged.passUnretained(uvTexture).toOpaque())),
-                0
-            )
-        )
-        // bgfx is single-threaded (main thread only, via CADisplayLink) -
-        // hop off this background capture queue for the submit call.
-        // planes only holds raw pointer values, so the CVMetalTexture refs
-        // must be captured here too - inflight's ring can recycle its slot
-        // before this block runs, and MTLTexture is only valid as long as
-        // its CVMetalTexture wrapper is retained.
-        DispatchQueue.main.async { [weak self, engineSession, yRef, uvRef] in
+        // bgfx runs on the main thread only, so this hops off the capture
+        // queue; yRef/uvRef ride along since planes only holds raw pointer
+        // values, and inflight's ring could recycle its slot - freeing the
+        // MTLTexture these point at - before this block runs otherwise.
+        DispatchQueue.main.async { [weak self, session, yRef, uvRef] in
             guard let self else { return }
-            var desc = desc
-            var planes = planes
-            if goss_session_submit_frame(engineSession, &desc, &planes) == GOSS_OK {
+            if (try? session.submitFrame(planes: [yPlane, uvPlane], width: UInt32(width), height: UInt32(height), pixelFormat: GOSS_PIXEL_NV12.rawValue, colorStandard: standard, rotationDegrees: rotationDegrees, mirrored: self.mirrored, timestampUs: timestampUs)) != nil {
                 self.submittedFrames += 1
             }
             _ = (yRef, uvRef)
@@ -269,10 +258,10 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                let uvBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1) {
                 let yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
                 let uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
-                _ = goss_session_track_frame(
-                    engineSession, &desc,
-                    yBase.assumingMemoryBound(to: UInt8.self), UInt32(yStride),
-                    uvBase.assumingMemoryBound(to: UInt8.self), UInt32(uvStride)
+                try? session.trackFrame(
+                    y: yBase.assumingMemoryBound(to: UInt8.self), yStride: UInt32(yStride),
+                    uv: uvBase.assumingMemoryBound(to: UInt8.self), uvStride: UInt32(uvStride),
+                    width: UInt32(width), height: UInt32(height), timestampUs: timestampUs
                 )
             }
             CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly)

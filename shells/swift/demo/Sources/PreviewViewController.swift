@@ -1,4 +1,5 @@
 import AVFoundation
+import Gosslens
 import QuartzCore
 import UIKit
 import os
@@ -15,11 +16,11 @@ final class PreviewViewController: UIViewController {
     private let statusLabel = UILabel()
     private let beautyStack = UIStackView()
     private let faceLayer = CAShapeLayer()
-    private var faceResult = goss_face_result()
+    private var lastFaceResult: FaceResult?
     private var lastFaceSerial: UInt64 = 0
 
-    private var engine: OpaquePointer?
-    private var session: OpaquePointer?
+    private var engine: Engine?
+    private var session: Session?
     private var displayLink: CADisplayLink?
 
     private var renderedFrames = 0
@@ -49,7 +50,7 @@ final class PreviewViewController: UIViewController {
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
 
-        let version = goss_abi_version()
+        let version = Gosslens.abiVersion()
         log.info("goss abi \(version >> 16).\(version & 0xffff)")
         guard version >> 16 == 0 else {
             statusLabel.text = "abi major mismatch"
@@ -70,11 +71,10 @@ final class PreviewViewController: UIViewController {
         setupBeautyControls()
     }
 
-    // Each slider reaches goss_session_set_beauty directly; the effect
-    // shows up in the live preview itself, composited on the render
-    // thread through the GPU bridge (Metal write, gpupixel GL read, back
-    // out through Metal) - no CPU round trip through
-    // goss_session_beautify_frame involved.
+    // Each slider reaches setBeauty directly; the effect shows up in the
+    // live preview itself, composited on the render thread through the
+    // GPU bridge (Metal write, gpupixel GL read, back out through
+    // Metal) - no CPU round trip through beautifyFrame involved.
     private func setupBeautyControls() {
         beautyStack.axis = .vertical
         beautyStack.spacing = 4
@@ -106,7 +106,7 @@ final class PreviewViewController: UIViewController {
     }
 
     @objc private func beautySliderChanged(_ slider: UISlider) {
-        _ = goss_session_set_beauty(session, Int32(slider.tag), slider.value)
+        try? session?.setBeauty(effect: Int32(slider.tag), amount: slider.value)
     }
 
     private var conformanceStarted = false
@@ -133,38 +133,33 @@ final class PreviewViewController: UIViewController {
 
         if engine == nil, pixelWidth > 0 {
             startEngine(pixelWidth: pixelWidth, pixelHeight: pixelHeight)
-        } else if engine != nil {
-            goss_engine_resize(engine, pixelWidth, pixelHeight)
+        } else if let engine {
+            engine.resize(width: pixelWidth, height: pixelHeight)
         }
     }
 
     private func startEngine(pixelWidth: UInt32, pixelHeight: UInt32) {
-        var engineOut: OpaquePointer?
-        guard goss_engine_create(nil, &engineOut) == GOSS_OK else {
+        guard let newEngine = try? Engine.create() else {
             statusLabel.text = "engine create failed"
             return
         }
-        engine = engineOut
+        engine = newEngine
 
-        var desc = goss_renderer_desc(
-            native_window_handle: Unmanaged.passUnretained(metalView.metalLayer).toOpaque(),
-            width: pixelWidth,
-            height: pixelHeight
-        )
-        guard goss_engine_init_renderer(engine, &desc) == GOSS_OK else {
+        do {
+            try newEngine.initRenderer(surface: Unmanaged.passUnretained(metalView.metalLayer).toOpaque(), width: pixelWidth, height: pixelHeight)
+        } catch {
             statusLabel.text = "renderer init failed"
             log.error("renderer init failed")
             return
         }
 
-        var sessionOut: OpaquePointer?
-        guard goss_session_create(engine, nil, &sessionOut) == GOSS_OK else {
+        guard let newSession = try? Session.create(engine: newEngine) else {
             statusLabel.text = "session create failed"
             return
         }
-        session = sessionOut
+        session = newSession
 
-        camera.start(engineSession: session)
+        camera.start(session: newSession)
 
         let link = CADisplayLink(target: self, selector: #selector(renderTick))
         link.add(to: .main, forMode: .common)
@@ -172,15 +167,15 @@ final class PreviewViewController: UIViewController {
     }
 
     @objc private func renderTick() {
-        guard let engine else { return }
+        guard let engine, let session else { return }
         let start = CFAbsoluteTimeGetCurrent()
         let frameTimeUs = UInt32(max(0, (start - lastFrameStart) * 1_000_000))
         lastFrameStart = start
 
-        _ = goss_session_report_frame(session, frameTimeUs, goss_thermal(rawValue: UInt32(ProcessInfo.processInfo.thermalState.ckThermal)))
+        session.reportFrame(frameTimeUs: frameTimeUs, thermal: goss_thermal(rawValue: UInt32(ProcessInfo.processInfo.thermalState.ckThermal)))
         drawFaceOverlay()
         tickLens(dtUs: frameTimeUs)
-        guard goss_engine_render_frame(engine, session) == GOSS_OK else { return }
+        guard (try? engine.renderFrame(session: session)) != nil else { return }
         renderedFrames += 1
         fpsWindowFrames += 1
 
@@ -201,48 +196,44 @@ final class PreviewViewController: UIViewController {
     /// Landmarks arrive in sensor pixels; the sensor sits one quarter turn
     /// from portrait, the same turn the preview applies.
     private func drawFaceOverlay() {
-        guard goss_session_face_result(session, &faceResult) == GOSS_OK else { return }
-        guard faceResult.frame_serial != lastFaceSerial else { return }
-        lastFaceSerial = faceResult.frame_serial
-        guard faceResult.landmark_count > 0, faceResult.presence >= 0.5 else {
+        guard let session, let result = try? session.faceResult() else { return }
+        guard result.frameSerial != lastFaceSerial else { return }
+        lastFaceSerial = result.frameSerial
+        lastFaceResult = result
+        guard !result.landmarks.isEmpty, result.presence >= 0.5 else {
             faceLayer.path = nil
             return
         }
 
         let path = CGMutablePath()
         let bounds = view.bounds
-        // landmark_count is read here, not inside the closure below - Swift's
-        // exclusivity checking treats withUnsafeBytes(of: &faceResult.landmarks)
-        // as an exclusive access to all of faceResult, and a sibling-field read
-        // from inside that closure is a real runtime crash, not just a lint.
-        let landmarkCount = Int(faceResult.landmark_count)
-        withUnsafeBytes(of: &faceResult.landmarks) { raw in
-            let points = raw.bindMemory(to: Float.self)
-            let sensorWidth = CGFloat(max(camera.frameWidth, 1))
-            let sensorHeight = CGFloat(max(camera.frameHeight, 1))
-            let scaleX = bounds.width / sensorHeight
-            let scaleY = bounds.height / sensorWidth
-            for index in 0 ..< landmarkCount {
-                let x = CGFloat(points[index * 3])
-                let y = CGFloat(points[index * 3 + 1])
-                // Quarter turn: sensor x runs down the portrait screen.
-                let viewX = (sensorHeight - y) * scaleX
-                let viewY = x * scaleY
-                path.addEllipse(in: CGRect(x: viewX - 1.5, y: viewY - 1.5, width: 3, height: 3))
-            }
+        let sensorWidth = CGFloat(max(camera.frameWidth, 1))
+        let sensorHeight = CGFloat(max(camera.frameHeight, 1))
+        let scaleX = bounds.width / sensorHeight
+        let scaleY = bounds.height / sensorWidth
+        for index in 0 ..< result.landmarks.count / 3 {
+            let x = CGFloat(result.landmarks[index * 3])
+            let y = CGFloat(result.landmarks[index * 3 + 1])
+            // Quarter turn: sensor x runs down the portrait screen.
+            let viewX = (sensorHeight - y) * scaleX
+            let viewY = x * scaleY
+            path.addEllipse(in: CGRect(x: viewX - 1.5, y: viewY - 1.5, width: 3, height: 3))
         }
         faceLayer.path = path
     }
 
-    /// Rides the same faceResult drawFaceOverlay just refreshed - ticking
+    /// Rides the same result drawFaceOverlay just refreshed - ticking
     /// every render frame regardless of whether that particular result
     /// was new keeps the lens's own animation ramps advancing smoothly
     /// at display refresh rate rather than at tracking cadence.
     private func tickLens(dtUs: UInt32) {
-        var signals = goss_lens_signals()
-        signals.has_face = faceResult.presence >= 0.5 && faceResult.landmark_count > 0
-        signals.blendshapes = faceResult.blendshapes
-        _ = goss_session_tick_lens(session, dtUs, &signals)
+        guard let session else { return }
+        let result = lastFaceResult
+        let signals = LensSignals(
+            hasFace: (result?.presence ?? 0) >= 0.5 && !(result?.landmarks.isEmpty ?? true),
+            blendshapes: result?.blendshapes ?? []
+        )
+        try? session.tickLens(dtUs: dtUs, signals: signals)
     }
 
     @objc private func appDidEnterBackground() {
@@ -252,7 +243,7 @@ final class PreviewViewController: UIViewController {
 
     @objc private func appWillEnterForeground() {
         displayLink?.isPaused = false
-        camera.start(engineSession: session)
+        camera.start(session: session)
     }
 }
 

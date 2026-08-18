@@ -549,15 +549,10 @@ pub const Renderer = struct {
         width: u16 = 0,
         height: u16 = 0,
 
-        /// overrideInternal's own doc: "If result is 0, texture is not
-        /// created yet from the main thread" - a handle bgfx hasn't
-        /// processed through a real bgfx_frame() yet always overrides
-        /// as a no-op, which a handle created fresh every frame (as
-        /// wrapExternalTexture does) never lives long enough to clear.
-        /// Reusing the same handle across frames, created once and only
-        /// recreated on an actual size change, gives it that frame to
-        /// land before its first real use, and every override after
-        /// that targets an already-live handle.
+        /// A fresh handle every frame never survives long enough to
+        /// clear bgfx's own override-timing contract (0 means not yet
+        /// created from the main thread). Reusing the same handle,
+        /// recreated only on a real size change, fixes that.
         pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) c.bgfx_texture_handle_t {
             if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
                 if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);

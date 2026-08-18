@@ -50,7 +50,7 @@ a.out
 shells/swift/**/*.xcodeproj/
 shells/swift/demo/Sources/Info.plist
 shells/swift/**/xcuserdata/
-shells/swift/.build/
+shells/swift/**/.build/
 shells/swift/**/DerivedData/
 shells/kotlin/.gradle/
 shells/kotlin/**/build/
