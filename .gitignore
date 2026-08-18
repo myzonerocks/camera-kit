@@ -61,10 +61,10 @@ shells/ts/node_modules/
 shells/ts/dist/
 shells/ts/demo/dist.js
 shells/ts/demo/tracking-worker.js
-shells/ts/demo/camerakit_web.js
-shells/ts/demo/camerakit_web.wasm
+shells/ts/demo/gosslens_web.js
+shells/ts/demo/gosslens_web.wasm
 shells/ts/demo/webgpu/
-shells/ts/demo/camerakit_tracking.wasm
+shells/ts/demo/gosslens_tracking.wasm
 shells/ts/demo/face_landmarker.task
 shells/ts/demo/beauty-baseline.manifest.json
 shells/ts/**/*.wasm.map

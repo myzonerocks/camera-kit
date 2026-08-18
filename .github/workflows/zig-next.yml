@@ -28,7 +28,7 @@ jobs:
         id: build
         continue-on-error: true
         run: |
-          CK_ALLOW_ZIG_MISMATCH=1 "$RUNNER_TEMP/zig-master/zig" build test 2>&1 | tee shadow.log
+          GOSS_ALLOW_ZIG_MISMATCH=1 "$RUNNER_TEMP/zig-master/zig" build test 2>&1 | tee shadow.log
           exit "${PIPESTATUS[0]}"
       - name: file issue on failure
         if: steps.build.outcome == 'failure'

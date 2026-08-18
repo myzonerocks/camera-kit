@@ -2,7 +2,7 @@
 //! (wasm32-freestanding): every entry refuses immediately rather than
 //! pretending to load. Directory-based lens activation - the only path
 //! that could ever reach an asset loader - already refuses with the
-//! same CK_UNSUPPORTED there before this would ever be reached.
+//! same GOSS_UNSUPPORTED there before this would ever be reached.
 
 const std = @import("std");
 const image = @import("image");

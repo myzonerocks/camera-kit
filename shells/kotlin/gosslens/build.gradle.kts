@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "kit.camera"
+    namespace = "com.gosslens"
     compileSdk = 36
 
     defaultConfig {

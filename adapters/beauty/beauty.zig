@@ -18,15 +18,15 @@ pub const Effect = enum(i32) {
     blush = 5,
 };
 
-extern fn ck_beauty_create(resource_path: ?[*:0]const u8) ?*anyopaque;
-extern fn ck_beauty_destroy(handle: ?*anyopaque) void;
-extern fn ck_beauty_set(handle: ?*anyopaque, effect: i32, value: f32) void;
-extern fn ck_beauty_process(handle: ?*anyopaque, rgba_in: [*]const u8, width: i32, height: i32, landmarks106: ?[*]const f32, rgba_out: [*]u8) i32;
-extern fn ck_beauty_output_texture(handle: ?*anyopaque) u32;
+extern fn goss_beauty_create(resource_path: ?[*:0]const u8) ?*anyopaque;
+extern fn goss_beauty_destroy(handle: ?*anyopaque) void;
+extern fn goss_beauty_set(handle: ?*anyopaque, effect: i32, value: f32) void;
+extern fn goss_beauty_process(handle: ?*anyopaque, rgba_in: [*]const u8, width: i32, height: i32, landmarks106: ?[*]const f32, rgba_out: [*]u8) i32;
+extern fn goss_beauty_output_texture(handle: ?*anyopaque) u32;
 
-extern fn ck_beauty_interop_create() ?*anyopaque;
-extern fn ck_beauty_interop_destroy(handle: ?*anyopaque) void;
-extern fn ck_beauty_interop_composite(handle: ?*anyopaque, source_texture: u32, width: i32, height: i32) ?*anyopaque;
+extern fn goss_beauty_interop_create() ?*anyopaque;
+extern fn goss_beauty_interop_destroy(handle: ?*anyopaque) void;
+extern fn goss_beauty_interop_composite(handle: ?*anyopaque, source_texture: u32, width: i32, height: i32) ?*anyopaque;
 
 pub const Beauty = struct {
     handle: *anyopaque,
@@ -41,9 +41,9 @@ pub const Interop = struct {
 };
 
 pub fn interopCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemory }!*Interop {
-    const handle = ck_beauty_interop_create() orelse return error.Unsupported;
+    const handle = goss_beauty_interop_create() orelse return error.Unsupported;
     const interop = gpa.create(Interop) catch {
-        ck_beauty_interop_destroy(handle);
+        goss_beauty_interop_destroy(handle);
         return error.OutOfMemory;
     };
     interop.* = .{ .handle = handle };
@@ -51,7 +51,7 @@ pub fn interopCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemory }!*
 }
 
 pub fn interopDestroy(gpa: std.mem.Allocator, interop: *Interop) void {
-    ck_beauty_interop_destroy(interop.handle);
+    goss_beauty_interop_destroy(interop.handle);
     gpa.destroy(interop);
 }
 
@@ -63,15 +63,15 @@ pub fn interopDestroy(gpa: std.mem.Allocator, interop: *Interop) void {
 /// current rather than gpupixel's own (not exposed publicly), which is
 /// only correct while gpupixel's context is still the one bound here.
 pub fn composite(interop: *Interop, beauty: *Beauty, width: u32, height: u32) ?*anyopaque {
-    const texture = ck_beauty_output_texture(beauty.handle);
+    const texture = goss_beauty_output_texture(beauty.handle);
     if (texture == 0) return null;
-    return ck_beauty_interop_composite(interop.handle, texture, @intCast(width), @intCast(height));
+    return goss_beauty_interop_composite(interop.handle, texture, @intCast(width), @intCast(height));
 }
 
 pub fn create(gpa: std.mem.Allocator, resource_path: [*:0]const u8) error{ Unsupported, OutOfMemory }!*Beauty {
-    const handle = ck_beauty_create(resource_path) orelse return error.Unsupported;
+    const handle = goss_beauty_create(resource_path) orelse return error.Unsupported;
     const beauty = gpa.create(Beauty) catch {
-        ck_beauty_destroy(handle);
+        goss_beauty_destroy(handle);
         return error.OutOfMemory;
     };
     beauty.* = .{ .handle = handle };
@@ -79,12 +79,12 @@ pub fn create(gpa: std.mem.Allocator, resource_path: [*:0]const u8) error{ Unsup
 }
 
 pub fn destroy(gpa: std.mem.Allocator, beauty: *Beauty) void {
-    ck_beauty_destroy(beauty.handle);
+    goss_beauty_destroy(beauty.handle);
     gpa.destroy(beauty);
 }
 
 pub fn set(beauty: *Beauty, effect: Effect, value: f32) void {
-    ck_beauty_set(beauty.handle, @intFromEnum(effect), std.math.clamp(value, 0.0, 1.0));
+    goss_beauty_set(beauty.handle, @intFromEnum(effect), std.math.clamp(value, 0.0, 1.0));
 }
 
 /// Fills contour from a tracked face result's landmarks, scaled to the
@@ -117,15 +117,15 @@ pub fn process(
 ) error{ProcessRefused}!void {
     var contour: [face106.point_count * 2]f32 = undefined;
     const contour_ptr = contourFromResult(result, width, height, &contour);
-    if (ck_beauty_process(beauty.handle, rgba_in, @intCast(width), @intCast(height), contour_ptr, rgba_out) != 0) {
+    if (goss_beauty_process(beauty.handle, rgba_in, @intCast(width), @intCast(height), contour_ptr, rgba_out) != 0) {
         return error.ProcessRefused;
     }
 }
 
-extern fn ck_beauty_input_create() ?*anyopaque;
-extern fn ck_beauty_input_destroy(handle: ?*anyopaque) void;
-extern fn ck_beauty_input_surface(handle: ?*anyopaque, device: ?*anyopaque, width: i32, height: i32) ?*anyopaque;
-extern fn ck_beauty_input_process(input_handle: ?*anyopaque, beauty_handle: ?*anyopaque, width: i32, height: i32, landmarks106: ?[*]const f32) i32;
+extern fn goss_beauty_input_create() ?*anyopaque;
+extern fn goss_beauty_input_destroy(handle: ?*anyopaque) void;
+extern fn goss_beauty_input_surface(handle: ?*anyopaque, device: ?*anyopaque, width: i32, height: i32) ?*anyopaque;
+extern fn goss_beauty_input_process(input_handle: ?*anyopaque, beauty_handle: ?*anyopaque, width: i32, height: i32, landmarks106: ?[*]const f32) i32;
 
 /// The reverse of Interop: a platform-shared surface bgfx writes the
 /// live preview into zero-copy, that gpupixel then reads zero-copy on
@@ -139,9 +139,9 @@ pub const InputSurface = struct {
 };
 
 pub fn inputSurfaceCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemory }!*InputSurface {
-    const handle = ck_beauty_input_create() orelse return error.Unsupported;
+    const handle = goss_beauty_input_create() orelse return error.Unsupported;
     const surface = gpa.create(InputSurface) catch {
-        ck_beauty_input_destroy(handle);
+        goss_beauty_input_destroy(handle);
         return error.OutOfMemory;
     };
     surface.* = .{ .handle = handle };
@@ -149,7 +149,7 @@ pub fn inputSurfaceCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemor
 }
 
 pub fn inputSurfaceDestroy(gpa: std.mem.Allocator, surface: *InputSurface) void {
-    ck_beauty_input_destroy(surface.handle);
+    goss_beauty_input_destroy(surface.handle);
     gpa.destroy(surface);
 }
 
@@ -159,7 +159,7 @@ pub fn inputSurfaceDestroy(gpa: std.mem.Allocator, surface: *InputSurface) void 
 /// wrapExternalTexture can bind with no copy. Unretained: valid until
 /// the next call that actually resizes, or inputSurfaceDestroy.
 pub fn inputSurfaceNativeTexture(surface: *InputSurface, device: ?*anyopaque, width: u32, height: u32) ?*anyopaque {
-    return ck_beauty_input_surface(surface.handle, device, @intCast(width), @intCast(height));
+    return goss_beauty_input_surface(surface.handle, device, @intCast(width), @intCast(height));
 }
 
 /// Runs the beauty chain over the frame bgfx just wrote into surface,
@@ -169,5 +169,5 @@ pub fn inputSurfaceNativeTexture(surface: *InputSurface, device: ?*anyopaque, wi
 pub fn processTexture(surface: *InputSurface, beauty: *Beauty, width: u32, height: u32, result: ?*const face.Result) bool {
     var contour: [face106.point_count * 2]f32 = undefined;
     const contour_ptr = contourFromResult(result, width, height, &contour);
-    return ck_beauty_input_process(surface.handle, beauty.handle, @intCast(width), @intCast(height), contour_ptr) == 0;
+    return goss_beauty_input_process(surface.handle, beauty.handle, @intCast(width), @intCast(height), contour_ptr) == 0;
 }

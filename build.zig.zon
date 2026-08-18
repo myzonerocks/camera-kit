@@ -1,7 +1,7 @@
 .{
-    .name = .camera_kit,
+    .name = .gosslens,
     .version = "0.0.0",
-    .fingerprint = 0xd621380384094729,
+    .fingerprint = 0xfca8886857032ad9,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{""},

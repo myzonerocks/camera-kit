@@ -1,7 +1,7 @@
 //! Conformance harness: drives a real packaged reference lens through the
 //! production ABI end to end - real engine, real session, real face
 //! tracking and segmentation against a real corpus portrait, real
-//! ck_session_activate_lens_from_directory, real ck_engine_render_frame -
+//! goss_session_activate_lens_from_directory, real goss_engine_render_frame -
 //! and proves the result is bit-stable: the same fixed input rendered
 //! twice produces byte-identical output. Each lens's hash also checks
 //! against lenses/conformance-baseline.txt (--print regenerates it), so
@@ -137,12 +137,12 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
 
     const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
     defer gpa.free(face_bytes);
-    if (abi.ck_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
+    if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
         return error.EnableFaceTrackingFailed;
     }
     const segmentation_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, segmentation_model_path, gpa, .limited(16 << 20));
     defer gpa.free(segmentation_bytes);
-    if (abi.ck_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) {
+    if (abi.goss_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) {
         return error.EnableSegmentationFailed;
     }
     // Enabled unconditionally, same as face tracking and segmentation
@@ -153,11 +153,11 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
     // activation applies the lens's own default effect values to
     // whatever chain is already live, and a chain enabled afterward
     // would silently miss them.
-    if (abi.ck_session_enable_beauty(session, beauty_resource_path) != .ok) {
+    if (abi.goss_session_enable_beauty(session, beauty_resource_path) != .ok) {
         return error.EnableBeautyFailed;
     }
 
-    const activated = abi.ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
     if (activated != .ok) {
         std.debug.print("conformance: activate {s}: {s}\n", .{ bundle_path, @tagName(activated) });
         return error.ActivationFailed;
@@ -178,7 +178,7 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         .timestamp_us = 1000,
     };
     const half_w = (planes.width + 1) / 2;
-    if (abi.ck_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+    if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
         return error.TrackFrameFailed;
     }
 
@@ -188,23 +188,23 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
     // computing.
     var result: abi.FaceResult = undefined;
     var polls: usize = 0;
-    while (abi.ck_session_face_result(session, &result) == .again) {
+    while (abi.goss_session_face_result(session, &result) == .again) {
         std.Thread.yield() catch {};
         polls += 1;
         if (polls > 100_000_000) return error.FaceResultTimedOut;
     }
 
-    if (abi.ck_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
         return error.SubmitFailed;
     }
 
     for (0..5) |_| {
-        _ = abi.ck_engine_render_frame(engine, session);
+        _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
     engine.renderer.?.requestScreenshot(out_path.ptr);
     for (0..5) |_| {
-        _ = abi.ck_engine_render_frame(engine, session);
+        _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
 }
@@ -217,7 +217,7 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
 /// bgfx itself still considers in flight.
 fn settle(engine: *abi.Engine) void {
     for (0..10) |_| {
-        _ = abi.ck_engine_render_frame(engine, null);
+        _ = abi.goss_engine_render_frame(engine, null);
         c.glfwPollEvents();
     }
 }
@@ -268,7 +268,7 @@ fn checkDeterminism(gpa: std.mem.Allocator, engine: *abi.Engine, lens_name: []co
 /// Proves play_animation actually fires and changes the rendered
 /// output, not just that it compiles - the bit-stability loop above
 /// only ever exercises the reference lenses' default, never-triggered
-/// state, since it never calls ck_session_tick_lens at all. Activates
+/// state, since it never calls goss_session_tick_lens at all. Activates
 /// the real packaged trigger-anim bundle, screenshots its rest pose,
 /// ticks it in dt_us steps past its own manifest's 2-second timer
 /// threshold, screenshots again, and asserts the two differ.
@@ -277,7 +277,7 @@ fn proveTriggerAnimFires(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
 
-    const activated = abi.ck_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
+    const activated = abi.goss_session_activate_lens_from_directory(session, bundle_path.ptr, bundle_path.len);
     if (activated != .ok) {
         std.debug.print("conformance: trigger-anim proof: activate: {s}\n", .{@tagName(activated)});
         return false;
@@ -298,7 +298,7 @@ fn proveTriggerAnimFires(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         .timestamp_us = 1000,
     };
     const half_w = (planes.width + 1) / 2;
-    if (abi.ck_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
         return error.SubmitFailed;
     }
 
@@ -306,13 +306,13 @@ fn proveTriggerAnimFires(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     // screenshot - both must show a real drawn mesh, only the pose
     // should differ.
     for (0..5) |_| {
-        _ = abi.ck_engine_render_frame(engine, session);
+        _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
     const before_path: [:0]const u8 = "zig-out/conformance-trigger-anim-before";
     engine.renderer.?.requestScreenshot(before_path.ptr);
     for (0..5) |_| {
-        _ = abi.ck_engine_render_frame(engine, session);
+        _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
 
@@ -320,20 +320,20 @@ fn proveTriggerAnimFires(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     var elapsed_us: u64 = 0;
     const dt_us: u32 = 16_666;
     while (elapsed_us < 2_100_000) : (elapsed_us += dt_us) {
-        if (abi.ck_session_tick_lens(session, dt_us, &signals) != .ok) {
+        if (abi.goss_session_tick_lens(session, dt_us, &signals) != .ok) {
             std.debug.print("conformance: trigger-anim proof: tick refused\n", .{});
             return false;
         }
     }
 
     for (0..5) |_| {
-        _ = abi.ck_engine_render_frame(engine, session);
+        _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
     const after_path: [:0]const u8 = "zig-out/conformance-trigger-anim-after";
     engine.renderer.?.requestScreenshot(after_path.ptr);
     for (0..5) |_| {
-        _ = abi.ck_engine_render_frame(engine, session);
+        _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
     settle(engine);
@@ -362,7 +362,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (c.glfwInit() == c.GLFW_FALSE) return error.GlfwInit;
     defer c.glfwTerminate();
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "camera-kit conformance", null, null) orelse return error.WindowCreate;
+    const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "gosslens conformance", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
 
     const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
@@ -373,7 +373,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         .width = width,
         .height = height,
     };
-    if (abi.ck_engine_init_renderer(engine, &renderer_desc) != .ok) return error.RendererInit;
+    if (abi.goss_engine_init_renderer(engine, &renderer_desc) != .ok) return error.RendererInit;
 
     var current: std.Io.Writer.Allocating = .init(gpa);
     defer current.deinit();

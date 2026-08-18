@@ -1,4 +1,4 @@
-# Camera Kit
+# Gosslens
 
 A camera engine with a Zig core and three thin shells: Swift for iOS, Kotlin
 for Android, TypeScript for the web. The core owns the frame
@@ -12,7 +12,7 @@ analytics. A camera frame never leaves the process.
 
     build.zig  build.zig.zon    one build system for Zig, C, and C++, all targets
     .zigversion                 the pinned Zig version
-    include/camerakit.h         the C ABI
+    include/gosslens.h          the C ABI
     core/                       frame graph, lens runtime, effects, math
     adapters/                   vendored engines bound as graph nodes
     shells/                     swift, kotlin, ts packages and demo apps

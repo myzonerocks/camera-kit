@@ -438,7 +438,7 @@ test "forbidden prefixes catch force-added trees" {
 test "forbidden segments catch build detritus anywhere in the path" {
     try std.testing.expectEqualStrings("node_modules", forbiddenSegment("shells/ts/node_modules/x/y.js").?);
     try std.testing.expectEqualStrings(".build", forbiddenSegment("shells/swift/.build/debug/a").?);
-    try std.testing.expectEqualStrings(".xcframework", forbiddenSegment("shells/swift/CameraKit.xcframework/Info.plist").?);
+    try std.testing.expectEqualStrings(".xcframework", forbiddenSegment("shells/swift/Gosslens.xcframework/Info.plist").?);
     try std.testing.expect(forbiddenSegment("core/graph/scheduler.zig") == null);
 }
 
@@ -448,7 +448,7 @@ test "forbidden extensions catch artifact classes" {
     try std.testing.expectEqualStrings(".a", forbiddenExtension("libfoo.a").?);
     try std.testing.expectEqualStrings(".out", forbiddenExtension("a.out").?);
     try std.testing.expect(forbiddenExtension("core/math/mat4.zig") == null);
-    try std.testing.expect(forbiddenExtension("include/camerakit.h") == null);
+    try std.testing.expect(forbiddenExtension("include/gosslens.h") == null);
     // A png anywhere else is still a fetched/scratch artifact - only a
     // reference lens's own assets/ directory is real bundle content.
     try std.testing.expectEqualStrings(".png", forbiddenExtension("shells/kotlin/demo/src/main/assets/res/mouth.png").?);

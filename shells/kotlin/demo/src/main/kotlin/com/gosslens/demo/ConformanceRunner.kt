@@ -1,4 +1,4 @@
-package kit.camera.demo
+package com.gosslens.demo
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -8,8 +8,8 @@ import android.view.Surface
 import java.io.File
 import java.nio.ByteBuffer
 import java.security.MessageDigest
-import kit.camera.Engine
-import kit.camera.Session
+import com.gosslens.Engine
+import com.gosslens.Session
 
 // Mirrors harness/conformance.zig's own determinism check (the same
 // reference lens, the same corpus frame, rendered twice through the
@@ -17,7 +17,7 @@ import kit.camera.Session
 // shell instead of a desktop GLFW window - the same real
 // Engine.initRenderer/Session.activateLens/Engine.renderFrame path
 // MainActivity's live preview already runs, just fed a bundled corpus
-// frame instead of the camera. Reached only behind the CKConformance
+// frame instead of the camera. Reached only behind the GossConformance
 // intent extra; a normal launch never touches this file. Emulator
 // output is a dev signal, not a substitute for a run on real hardware.
 //
@@ -29,7 +29,7 @@ import kit.camera.Session
 // compositing bridge this session built, not just the lens-graph/bgfx
 // half of the pipeline.
 object ConformanceRunner {
-    private const val TAG = "CKCONFORMANCE"
+    private const val TAG = "GOSSCONFORMANCE"
 
     fun run(context: Context, surface: Surface, width: Int, height: Int) {
         val corpus = loadCorpusNv12(context)
@@ -37,8 +37,8 @@ object ConformanceRunner {
             Log.e(TAG, "FAIL: corpus frame missing or undecodable")
             return
         }
-        val pathA = File(context.cacheDir, "ckconformance-a").absolutePath
-        val pathB = File(context.cacheDir, "ckconformance-b").absolutePath
+        val pathA = File(context.cacheDir, "gossconformance-a").absolutePath
+        val pathB = File(context.cacheDir, "gossconformance-b").absolutePath
         val hashA = renderOnce(context, surface, width, height, corpus, pathA)
         if (hashA == null) {
             Log.e(TAG, "FAIL: first render failed")

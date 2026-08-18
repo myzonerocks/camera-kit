@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives the demo app's conformance mode (ConformanceRunner.kt) on a
 # running Android emulator: builds the debug apk, installs, launches
-# with the CKConformance intent extra, and checks the reported result
+# with the GossConformance intent extra, and checks the reported result
 # over logcat. Mirrors prove-simulator.sh's role for the ios shell -
 # a real shell driving the real ABI end to end, just captured over adb
 # instead of simctl's console.
@@ -16,15 +16,15 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 ANDROID_SDK="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 export PATH="${ANDROID_SDK}/platform-tools:${PATH}"
-PACKAGE="kit.camera.demo"
-ACTIVITY="kit.camera.demo.MainActivity"
+PACKAGE="com.gosslens.demo"
+ACTIVITY="com.gosslens.demo.MainActivity"
 
 if ! adb get-state >/dev/null 2>&1; then
   echo "prove-emulator: no adb device reachable - boot an emulator first (emulator -avd <name>)"
   exit 1
 fi
 
-echo "prove-emulator: building camerakit for android"
+echo "prove-emulator: building gosslens for android"
 (cd ../.. && zig build android)
 
 echo "prove-emulator: building and installing the demo app"
@@ -33,12 +33,12 @@ echo "prove-emulator: building and installing the demo app"
 echo "prove-emulator: clearing logcat and launching in conformance mode"
 adb logcat -c
 adb shell am force-stop "${PACKAGE}"
-adb shell am start -n "${PACKAGE}/${ACTIVITY}" --ez CKConformance true
+adb shell am start -n "${PACKAGE}/${ACTIVITY}" --ez GossConformance true
 
 echo "prove-emulator: waiting for the conformance result"
 RESULT=""
 for _ in $(seq 1 60); do
-  LINE=$(adb logcat -d -s CKCONFORMANCE:V 2>/dev/null | grep -E "PROOF|FAIL" || true)
+  LINE=$(adb logcat -d -s GOSSCONFORMANCE:V 2>/dev/null | grep -E "PROOF|FAIL" || true)
   if [ -n "${LINE}" ]; then
     RESULT="${LINE}"
     break
@@ -50,7 +50,7 @@ adb shell am force-stop "${PACKAGE}"
 
 if [ -z "${RESULT}" ]; then
   echo "prove-emulator: FAIL - no result reported within the timeout"
-  adb logcat -d -s CKCONFORMANCE:V 2>/dev/null || true
+  adb logcat -d -s GOSSCONFORMANCE:V 2>/dev/null || true
   exit 1
 fi
 

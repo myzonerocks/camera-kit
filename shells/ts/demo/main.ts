@@ -34,7 +34,7 @@ class TrackerLink {
 
   static async create(): Promise<TrackerLink> {
     const [moduleBytes, taskBundle] = await Promise.all([
-      fetch(new URL("./camerakit_tracking.wasm", import.meta.url)).then((r) => r.arrayBuffer()),
+      fetch(new URL("./gosslens_tracking.wasm", import.meta.url)).then((r) => r.arrayBuffer()),
       fetch(new URL("./face_landmarker.task", import.meta.url)).then((r) => r.arrayBuffer()),
     ]);
     const worker = new Worker(new URL("./tracking-worker.js", import.meta.url), { type: "module" });
@@ -123,7 +123,7 @@ async function startTracking(preview: PreviewSession): Promise<void> {
       );
       if (!trackingAnnounced) {
         trackingAnnounced = true;
-        console.log(`CKWEB tracking running: serial results flowing, presence ${reply.presence.toFixed(3)}`);
+        console.log(`GOSSWEB tracking running: serial results flowing, presence ${reply.presence.toFixed(3)}`);
       }
     });
   };
@@ -168,8 +168,8 @@ async function startTracking(preview: PreviewSession): Promise<void> {
 }
 
 async function run(): Promise<void> {
-  const webgpuUrl = new URL("./webgpu/camerakit_web.js", import.meta.url);
-  const webgl2Url = new URL("./camerakit_web.js", import.meta.url);
+  const webgpuUrl = new URL("./webgpu/gosslens_web.js", import.meta.url);
+  const webgl2Url = new URL("./gosslens_web.js", import.meta.url);
   // ?engine=webgpu|webgl2 forces a specific build for testing both
   // paths independently - real Chrome always has a working adapter,
   // so the auto-detect in pickEngineUrl alone can never exercise the
@@ -180,7 +180,7 @@ async function run(): Promise<void> {
   const preview = await PreviewSession.create(canvas, wasmJsUrl, {
     onState(state) {
       status.textContent = `capture ${state}`;
-      document.title = `camerakit ${state}`;
+      document.title = `gosslens ${state}`;
     },
     onFps(fps, rendered, cameraFrames) {
       const level = preview.degradeLevel();
@@ -198,7 +198,7 @@ async function run(): Promise<void> {
             proofLogged = false;
             return;
           }
-          const line = `CKWEB preview active: ${cameraFrames} camera frames at ${fps.toFixed(1)} fps, center pixel ${pixel[0]},${pixel[1]},${pixel[2]}`;
+          const line = `GOSSWEB preview active: ${cameraFrames} camera frames at ${fps.toFixed(1)} fps, center pixel ${pixel[0]},${pixel[1]},${pixel[2]}`;
           console.log(line);
           document.title = line;
           const div = document.createElement("div");

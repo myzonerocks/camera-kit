@@ -19,13 +19,13 @@ export interface FaceResult {
 
 interface TrackingExports {
   memory: WebAssembly.Memory;
-  ck_tracking_alloc(size: number): number;
-  ck_tracking_free(ptr: number, size: number): void;
-  ck_tracking_result_size(): number;
-  ck_tracking_create(taskPtr: number, taskLen: number): number;
-  ck_tracking_destroy(instance: number): void;
-  ck_tracking_process(instance: number, rgba: number, width: number, height: number, timestampUs: bigint): number;
-  ck_tracking_result(instance: number, out: number): number;
+  goss_tracking_alloc(size: number): number;
+  goss_tracking_free(ptr: number, size: number): void;
+  goss_tracking_result_size(): number;
+  goss_tracking_create(taskPtr: number, taskLen: number): number;
+  goss_tracking_destroy(instance: number): void;
+  goss_tracking_process(instance: number, rgba: number, width: number, height: number, timestampUs: bigint): number;
+  goss_tracking_result(instance: number, out: number): number;
 }
 
 /** The wasi surface the module actually imports: a monotonic clock for
@@ -122,16 +122,16 @@ export class FaceTracker {
     memory = exports.memory;
 
     FaceTracker.onStage?.("engines starting");
-    const taskPtr = exports.ck_tracking_alloc(taskBundle.length);
+    const taskPtr = exports.goss_tracking_alloc(taskBundle.length);
     if (taskPtr === 0) throw new Error("tracking module allocation failed");
     new Uint8Array(exports.memory.buffer, taskPtr, taskBundle.length).set(taskBundle);
     FaceTracker.onStage?.("bundle staged");
-    const handle = exports.ck_tracking_create(taskPtr, taskBundle.length);
+    const handle = exports.goss_tracking_create(taskPtr, taskBundle.length);
     FaceTracker.onStage?.("engines returned");
-    exports.ck_tracking_free(taskPtr, taskBundle.length);
+    exports.goss_tracking_free(taskPtr, taskBundle.length);
     if (handle === 0) throw new Error("tracking bundle rejected");
 
-    const resultPtr = exports.ck_tracking_alloc(exports.ck_tracking_result_size());
+    const resultPtr = exports.goss_tracking_alloc(exports.goss_tracking_result_size());
     if (resultPtr === 0) throw new Error("tracking module allocation failed");
     return new FaceTracker(exports, handle, resultPtr, 0, 0);
   }
@@ -142,13 +142,13 @@ export class FaceTracker {
     const needed = width * height * 4;
     if (rgba.length < needed) throw new Error("frame shorter than its dimensions");
     if (this.frameCapacity < needed) {
-      if (this.framePtr !== 0) this.exports.ck_tracking_free(this.framePtr, this.frameCapacity);
-      this.framePtr = this.exports.ck_tracking_alloc(needed);
+      if (this.framePtr !== 0) this.exports.goss_tracking_free(this.framePtr, this.frameCapacity);
+      this.framePtr = this.exports.goss_tracking_alloc(needed);
       if (this.framePtr === 0) throw new Error("tracking module allocation failed");
       this.frameCapacity = needed;
     }
     new Uint8Array(this.exports.memory.buffer, this.framePtr, needed).set(rgba.subarray(0, needed));
-    if (this.exports.ck_tracking_process(this.instance, this.framePtr, width, height, timestampUs) !== 0) {
+    if (this.exports.goss_tracking_process(this.instance, this.framePtr, width, height, timestampUs) !== 0) {
       throw new Error("tracking process refused the frame");
     }
     return this.latest();
@@ -156,7 +156,7 @@ export class FaceTracker {
 
   /** The newest published result, parsed out of the frozen layout. */
   latest(): FaceResult | null {
-    if (this.exports.ck_tracking_result(this.instance, this.resultPtr) !== 0) return null;
+    if (this.exports.goss_tracking_result(this.instance, this.resultPtr) !== 0) return null;
     const view = new DataView(this.exports.memory.buffer, this.resultPtr);
     const floats = new Float32Array(this.exports.memory.buffer, this.resultPtr + 24, FACE_LANDMARK_COUNT * 3 + FACE_BLENDSHAPE_COUNT);
     return {
@@ -170,8 +170,8 @@ export class FaceTracker {
   }
 
   destroy(): void {
-    this.exports.ck_tracking_destroy(this.instance);
-    if (this.framePtr !== 0) this.exports.ck_tracking_free(this.framePtr, this.frameCapacity);
-    this.exports.ck_tracking_free(this.resultPtr, this.exports.ck_tracking_result_size());
+    this.exports.goss_tracking_destroy(this.instance);
+    if (this.framePtr !== 0) this.exports.goss_tracking_free(this.framePtr, this.frameCapacity);
+    this.exports.goss_tracking_free(this.resultPtr, this.exports.goss_tracking_result_size());
   }
 }

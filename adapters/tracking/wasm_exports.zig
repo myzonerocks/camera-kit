@@ -60,25 +60,25 @@ fn anchorTotal(engine: *const runtime.Engine) ?usize {
     return @intCast(runtime.c.TfLiteTensorDim(tensor, 1));
 }
 
-/// Allocation the embedder pairs with ck_tracking_free; how bundle and
+/// Allocation the embedder pairs with goss_tracking_free; how bundle and
 /// frame bytes reach this module's memory.
-pub export fn ck_tracking_alloc(size: usize) ?[*]u8 {
+pub export fn goss_tracking_alloc(size: usize) ?[*]u8 {
     if (size == 0) return null;
     const slice = gpa.alloc(u8, size) catch return null;
     return slice.ptr;
 }
 
-pub export fn ck_tracking_free(ptr: ?[*]u8, size: usize) void {
+pub export fn goss_tracking_free(ptr: ?[*]u8, size: usize) void {
     const p = ptr orelse return;
     if (size == 0) return;
     gpa.free(p[0..size]);
 }
 
-pub export fn ck_tracking_result_size() usize {
+pub export fn goss_tracking_result_size() usize {
     return @sizeOf(face.Result);
 }
 
-pub export fn ck_tracking_create(task_ptr: ?[*]const u8, task_len: usize) ?*Instance {
+pub export fn goss_tracking_create(task_ptr: ?[*]const u8, task_len: usize) ?*Instance {
     const task_source = task_ptr orelse return null;
     if (task_len == 0) return null;
 
@@ -138,7 +138,7 @@ pub export fn ck_tracking_create(task_ptr: ?[*]const u8, task_len: usize) ?*Inst
     return instance;
 }
 
-pub export fn ck_tracking_destroy(instance: ?*Instance) void {
+pub export fn goss_tracking_destroy(instance: ?*Instance) void {
     const tracking = instance orelse return;
     tracking.blendshapes_engine.deinit();
     tracking.landmarks_engine.deinit();
@@ -158,9 +158,9 @@ fn presenceScore(raw: f32) f32 {
 }
 
 /// Runs the whole pipeline over one packed RGBA frame and publishes the
-/// result for ck_tracking_result. Synchronous by design: the Worker this
+/// result for goss_tracking_result. Synchronous by design: the Worker this
 /// runs in is the off-main-thread guarantee.
-pub export fn ck_tracking_process(instance: ?*Instance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
+pub export fn goss_tracking_process(instance: ?*Instance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
     const tracking = instance orelse return status_invalid;
     const pixels = rgba orelse return status_invalid;
     if (width == 0 or height == 0) return status_invalid;
@@ -227,7 +227,7 @@ pub export fn ck_tracking_process(instance: ?*Instance, rgba: ?[*]const u8, widt
     return status_ok;
 }
 
-pub export fn ck_tracking_result(instance: ?*Instance, out: ?[*]u8) i32 {
+pub export fn goss_tracking_result(instance: ?*Instance, out: ?[*]u8) i32 {
     const tracking = instance orelse return status_invalid;
     const destination = out orelse return status_invalid;
     if (!tracking.has_result) return status_again;

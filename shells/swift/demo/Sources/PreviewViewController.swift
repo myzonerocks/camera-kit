@@ -10,12 +10,12 @@ final class MetalView: UIView {
 }
 
 final class PreviewViewController: UIViewController {
-    private let log = Logger(subsystem: "kit.camera.demo", category: "preview")
+    private let log = Logger(subsystem: "com.gosslens.demo", category: "preview")
     private let camera = CameraController()
     private let statusLabel = UILabel()
     private let beautyStack = UIStackView()
     private let faceLayer = CAShapeLayer()
-    private var faceResult = ck_face_result()
+    private var faceResult = goss_face_result()
     private var lastFaceSerial: UInt64 = 0
 
     private var engine: OpaquePointer?
@@ -49,7 +49,7 @@ final class PreviewViewController: UIViewController {
             statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
         ])
 
-        let version = ck_abi_version()
+        let version = goss_abi_version()
         log.info("ck abi \(version >> 16).\(version & 0xffff)")
         guard version >> 16 == 0 else {
             statusLabel.text = "abi major mismatch"
@@ -70,11 +70,11 @@ final class PreviewViewController: UIViewController {
         setupBeautyControls()
     }
 
-    // Each slider reaches ck_session_set_beauty directly; the effect
+    // Each slider reaches goss_session_set_beauty directly; the effect
     // shows up in the live preview itself, composited on the render
     // thread through the GPU bridge (Metal write, gpupixel GL read, back
     // out through Metal) - no CPU round trip through
-    // ck_session_beautify_frame involved.
+    // goss_session_beautify_frame involved.
     private func setupBeautyControls() {
         beautyStack.axis = .vertical
         beautyStack.spacing = 4
@@ -106,7 +106,7 @@ final class PreviewViewController: UIViewController {
     }
 
     @objc private func beautySliderChanged(_ slider: UISlider) {
-        _ = ck_session_set_beauty(session, Int32(slider.tag), slider.value)
+        _ = goss_session_set_beauty(session, Int32(slider.tag), slider.value)
     }
 
     private var conformanceStarted = false
@@ -123,7 +123,7 @@ final class PreviewViewController: UIViewController {
         // setup, just feeding a fixed corpus frame instead of live
         // camera - see ConformanceRunner. Own engine/session instances,
         // so the normal live-preview path below never starts.
-        if CommandLine.arguments.contains("-CKConformance") {
+        if CommandLine.arguments.contains("-GossConformance") {
             if !conformanceStarted, pixelWidth > 0 {
                 conformanceStarted = true
                 ConformanceRunner.run(metalLayer: metalView.metalLayer, width: pixelWidth, height: pixelHeight)
@@ -134,31 +134,31 @@ final class PreviewViewController: UIViewController {
         if engine == nil, pixelWidth > 0 {
             startEngine(pixelWidth: pixelWidth, pixelHeight: pixelHeight)
         } else if engine != nil {
-            ck_engine_resize(engine, pixelWidth, pixelHeight)
+            goss_engine_resize(engine, pixelWidth, pixelHeight)
         }
     }
 
     private func startEngine(pixelWidth: UInt32, pixelHeight: UInt32) {
         var engineOut: OpaquePointer?
-        guard ck_engine_create(nil, &engineOut) == CK_OK else {
+        guard goss_engine_create(nil, &engineOut) == GOSS_OK else {
             statusLabel.text = "engine create failed"
             return
         }
         engine = engineOut
 
-        var desc = ck_renderer_desc(
+        var desc = goss_renderer_desc(
             native_window_handle: Unmanaged.passUnretained(metalView.metalLayer).toOpaque(),
             width: pixelWidth,
             height: pixelHeight
         )
-        guard ck_engine_init_renderer(engine, &desc) == CK_OK else {
+        guard goss_engine_init_renderer(engine, &desc) == GOSS_OK else {
             statusLabel.text = "renderer init failed"
             log.error("renderer init failed")
             return
         }
 
         var sessionOut: OpaquePointer?
-        guard ck_session_create(engine, nil, &sessionOut) == CK_OK else {
+        guard goss_session_create(engine, nil, &sessionOut) == GOSS_OK else {
             statusLabel.text = "session create failed"
             return
         }
@@ -177,21 +177,21 @@ final class PreviewViewController: UIViewController {
         let frameTimeUs = UInt32(max(0, (start - lastFrameStart) * 1_000_000))
         lastFrameStart = start
 
-        _ = ck_session_report_frame(session, frameTimeUs, ck_thermal(rawValue: UInt32(ProcessInfo.processInfo.thermalState.ckThermal)))
+        _ = goss_session_report_frame(session, frameTimeUs, goss_thermal(rawValue: UInt32(ProcessInfo.processInfo.thermalState.ckThermal)))
         drawFaceOverlay()
         tickLens(dtUs: frameTimeUs)
-        guard ck_engine_render_frame(engine, session) == CK_OK else { return }
+        guard goss_engine_render_frame(engine, session) == GOSS_OK else { return }
         renderedFrames += 1
         fpsWindowFrames += 1
 
         let now = CFAbsoluteTimeGetCurrent()
         if now - fpsWindowStart >= 2.0 {
             let fps = Double(fpsWindowFrames) / (now - fpsWindowStart)
-            log.info("CKDEMO fps \(String(format: "%.1f", fps)) rendered \(self.renderedFrames) submitted \(self.camera.submittedFrames) state \(self.camera.state.rawValue)")
+            log.info("GOSSDEMO fps \(String(format: "%.1f", fps)) rendered \(self.renderedFrames) submitted \(self.camera.submittedFrames) state \(self.camera.state.rawValue)")
             statusLabel.text = String(format: "capture %@  %.1f fps", camera.state.rawValue, fps)
             if !proofLogged, camera.submittedFrames > 60, fps > 20 {
                 proofLogged = true
-                log.info("CKDEMO preview active: \(self.camera.submittedFrames) camera frames rendered at \(String(format: "%.1f", fps)) fps")
+                log.info("GOSSDEMO preview active: \(self.camera.submittedFrames) camera frames rendered at \(String(format: "%.1f", fps)) fps")
             }
             fpsWindowStart = now
             fpsWindowFrames = 0
@@ -201,7 +201,7 @@ final class PreviewViewController: UIViewController {
     /// Landmarks arrive in sensor pixels; the sensor sits one quarter turn
     /// from portrait, the same turn the preview applies.
     private func drawFaceOverlay() {
-        guard ck_session_face_result(session, &faceResult) == CK_OK else { return }
+        guard goss_session_face_result(session, &faceResult) == GOSS_OK else { return }
         guard faceResult.frame_serial != lastFaceSerial else { return }
         lastFaceSerial = faceResult.frame_serial
         guard faceResult.landmark_count > 0, faceResult.presence >= 0.5 else {
@@ -234,10 +234,10 @@ final class PreviewViewController: UIViewController {
     /// was new keeps the lens's own animation ramps advancing smoothly
     /// at display refresh rate rather than at tracking cadence.
     private func tickLens(dtUs: UInt32) {
-        var signals = ck_lens_signals()
+        var signals = goss_lens_signals()
         signals.has_face = faceResult.presence >= 0.5 && faceResult.landmark_count > 0
         signals.blendshapes = faceResult.blendshapes
-        _ = ck_session_tick_lens(session, dtUs, &signals)
+        _ = goss_session_tick_lens(session, dtUs, &signals)
     }
 
     @objc private func appDidEnterBackground() {

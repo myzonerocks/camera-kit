@@ -16,9 +16,9 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         case failed
     }
 
-    private let log = Logger(subsystem: "kit.camera.demo", category: "capture")
+    private let log = Logger(subsystem: "com.gosslens.demo", category: "capture")
     private let captureSession = AVCaptureSession()
-    private let outputQueue = DispatchQueue(label: "kit.camera.demo.capture")
+    private let outputQueue = DispatchQueue(label: "com.gosslens.demo.capture")
     private var textureCache: CVMetalTextureCache?
     private var engineSession: OpaquePointer?
 
@@ -73,7 +73,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             return
         }
         let status = bundleData.withUnsafeBytes { raw in
-            ck_session_enable_face_tracking(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count, 0)
+            goss_session_enable_face_tracking(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count, 0)
         }
         log.info("face tracking enable status \(status.rawValue)")
     }
@@ -87,7 +87,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             log.info("beauty resources not present")
             return
         }
-        let status = ck_session_enable_beauty(engineSession, resourceRoot)
+        let status = goss_session_enable_beauty(engineSession, resourceRoot)
         log.info("beauty enable status \(status.rawValue)")
     }
 
@@ -102,7 +102,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             return
         }
         let status = manifestData.withUnsafeBytes { raw in
-            ck_session_activate_lens(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+            goss_session_activate_lens(engineSession, raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
         }
         log.info("lens activate status \(status.rawValue)")
     }
@@ -212,28 +212,28 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         inflight[inflightIndex] = [pixelBuffer, yRef, uvRef, yTexture, uvTexture]
         inflightIndex = (inflightIndex + 1) % inflight.count
 
-        var standard: UInt32 = CK_COLOR_BT709.rawValue
+        var standard: UInt32 = GOSS_COLOR_BT709.rawValue
         if let matrix = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String {
             if matrix == (kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String) {
-                standard = CK_COLOR_BT601.rawValue
+                standard = GOSS_COLOR_BT601.rawValue
             } else if matrix == (kCVImageBufferYCbCrMatrix_ITU_R_2020 as String) {
-                standard = CK_COLOR_BT2020.rawValue
+                standard = GOSS_COLOR_BT2020.rawValue
             }
         }
 
-        var flags: UInt32 = rotationQuarterTurns << CK_FRAME_ROTATION_SHIFT
-        if mirrored { flags |= CK_FRAME_FLAG_MIRROR }
+        var flags: UInt32 = rotationQuarterTurns << GOSS_FRAME_ROTATION_SHIFT
+        if mirrored { flags |= GOSS_FRAME_FLAG_MIRROR }
 
-        var desc = ck_frame_desc(
+        var desc = goss_frame_desc(
             width: UInt32(width),
             height: UInt32(height),
-            pixel_format: CK_PIXEL_NV12.rawValue,
+            pixel_format: GOSS_PIXEL_NV12.rawValue,
             color_standard: standard,
-            color_range: CK_COLOR_RANGE_VIDEO.rawValue,
+            color_range: GOSS_COLOR_RANGE_VIDEO.rawValue,
             flags: flags,
             timestamp_us: Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000)
         )
-        var planes = ck_frame_planes(
+        var planes = goss_frame_planes(
             plane_count: 2,
             reserved: 0,
             planes: (
@@ -242,7 +242,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                 0
             )
         )
-        if ck_session_submit_frame(engineSession, &desc, &planes) == CK_OK {
+        if goss_session_submit_frame(engineSession, &desc, &planes) == GOSS_OK {
             submittedFrames += 1
         }
 
@@ -253,7 +253,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                let uvBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1) {
                 let yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
                 let uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
-                _ = ck_session_track_frame(
+                _ = goss_session_track_frame(
                     engineSession, &desc,
                     yBase.assumingMemoryBound(to: UInt8.self), UInt32(yStride),
                     uvBase.assumingMemoryBound(to: UInt8.self), UInt32(uvStride)

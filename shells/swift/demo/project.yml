@@ -1,9 +1,9 @@
-name: CameraKitDemo
+name: GosslensDemo
 options:
   deploymentTarget:
     iOS: "17.0"
 targets:
-  CameraKitDemo:
+  GosslensDemo:
     type: application
     platform: iOS
     sources:
@@ -28,7 +28,7 @@ targets:
         optional: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: kit.camera.demo
+        PRODUCT_BUNDLE_IDENTIFIER: com.gosslens.demo
         DEVELOPMENT_TEAM: 9ZCMLRAW4V
         CODE_SIGN_STYLE: Automatic
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging.h
@@ -36,7 +36,7 @@ targets:
         "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": ["$(PROJECT_DIR)/../../../zig-out/ios"]
         "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": ["$(PROJECT_DIR)/../../../zig-out/ios-simulator"]
         OTHER_LDFLAGS:
-          - "-lcamerakit"
+          - "-lgosslens"
           - "-lgpupixel"
           - "-lyuv"
           - "-lbgfx"

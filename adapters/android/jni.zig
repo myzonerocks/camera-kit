@@ -1,4 +1,4 @@
-//! The Android binding: JNI exports over the ck_ ABI, written in Zig and
+//! The Android binding: JNI exports over the goss_ ABI, written in Zig and
 //! compiled into the same shared library as the core, so one build system
 //! produces the whole .so. The layer holds no logic beyond marshalling;
 //! JNIEnv is touched only for the two capabilities Java cannot hand over as
@@ -26,24 +26,24 @@ fn getDirectBufferAddress(env: *JniEnv, buffer: jobject) ?[*]u8 {
 
 var attached_window: ?*anyopaque = null;
 
-export fn Java_kit_camera_CameraKit_nativeAbiVersion(env: *JniEnv, cls: jobject) i32 {
+export fn Java_com_gosslens_Gosslens_nativeAbiVersion(env: *JniEnv, cls: jobject) i32 {
     _ = env;
     _ = cls;
-    return @bitCast(abi.ck_abi_version());
+    return @bitCast(abi.goss_abi_version());
 }
 
-export fn Java_kit_camera_CameraKit_nativeEngineCreate(env: *JniEnv, cls: jobject) i64 {
+export fn Java_com_gosslens_Gosslens_nativeEngineCreate(env: *JniEnv, cls: jobject) i64 {
     _ = env;
     _ = cls;
     var engine: ?*abi.Engine = null;
-    if (abi.ck_engine_create(null, @ptrCast(&engine)) != .ok) return 0;
+    if (abi.goss_engine_create(null, @ptrCast(&engine)) != .ok) return 0;
     return @bitCast(@as(u64, @intFromPtr(engine.?)));
 }
 
-export fn Java_kit_camera_CameraKit_nativeEngineDestroy(env: *JniEnv, cls: jobject, engine: i64) void {
+export fn Java_com_gosslens_Gosslens_nativeEngineDestroy(env: *JniEnv, cls: jobject, engine: i64) void {
     _ = env;
     _ = cls;
-    abi.ck_engine_destroy(engineFromHandle(engine));
+    abi.goss_engine_destroy(engineFromHandle(engine));
     if (attached_window) |window| {
         ANativeWindow_release(window);
         attached_window = null;
@@ -60,7 +60,7 @@ fn sessionFromHandle(handle: i64) ?*abi.Session {
     return @ptrFromInt(@as(usize, @intCast(handle)));
 }
 
-export fn Java_kit_camera_CameraKit_nativeInitRenderer(env: *JniEnv, cls: jobject, engine: i64, surface: jobject, width: i32, height: i32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeInitRenderer(env: *JniEnv, cls: jobject, engine: i64, surface: jobject, width: i32, height: i32) i32 {
     _ = cls;
     const window = ANativeWindow_fromSurface(env, surface) orelse return @intFromEnum(abi.Status.invalid_argument);
     attached_window = window;
@@ -69,42 +69,42 @@ export fn Java_kit_camera_CameraKit_nativeInitRenderer(env: *JniEnv, cls: jobjec
         .width = @intCast(width),
         .height = @intCast(height),
     };
-    return @intFromEnum(abi.ck_engine_init_renderer(engineFromHandle(engine), &desc));
+    return @intFromEnum(abi.goss_engine_init_renderer(engineFromHandle(engine), &desc));
 }
 
-export fn Java_kit_camera_CameraKit_nativeResize(env: *JniEnv, cls: jobject, engine: i64, width: i32, height: i32) void {
+export fn Java_com_gosslens_Gosslens_nativeResize(env: *JniEnv, cls: jobject, engine: i64, width: i32, height: i32) void {
     _ = env;
     _ = cls;
-    abi.ck_engine_resize(engineFromHandle(engine), @intCast(width), @intCast(height));
+    abi.goss_engine_resize(engineFromHandle(engine), @intCast(width), @intCast(height));
 }
 
-export fn Java_kit_camera_CameraKit_nativeRequestScreenshot(env: *JniEnv, cls: jobject, engine: i64, path_buffer: jobject, path_len: i32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeRequestScreenshot(env: *JniEnv, cls: jobject, engine: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
     const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    return @intFromEnum(abi.ck_engine_request_screenshot(engineFromHandle(engine), path, @intCast(path_len)));
+    return @intFromEnum(abi.goss_engine_request_screenshot(engineFromHandle(engine), path, @intCast(path_len)));
 }
 
-export fn Java_kit_camera_CameraKit_nativeRenderFrame(env: *JniEnv, cls: jobject, engine: i64, session: i64) i32 {
+export fn Java_com_gosslens_Gosslens_nativeRenderFrame(env: *JniEnv, cls: jobject, engine: i64, session: i64) i32 {
     _ = env;
     _ = cls;
-    return @intFromEnum(abi.ck_engine_render_frame(engineFromHandle(engine), sessionFromHandle(session)));
+    return @intFromEnum(abi.goss_engine_render_frame(engineFromHandle(engine), sessionFromHandle(session)));
 }
 
-export fn Java_kit_camera_CameraKit_nativeSessionCreate(env: *JniEnv, cls: jobject, engine: i64) i64 {
+export fn Java_com_gosslens_Gosslens_nativeSessionCreate(env: *JniEnv, cls: jobject, engine: i64) i64 {
     _ = env;
     _ = cls;
     var session: ?*abi.Session = null;
-    if (abi.ck_session_create(engineFromHandle(engine), null, @ptrCast(&session)) != .ok) return 0;
+    if (abi.goss_session_create(engineFromHandle(engine), null, @ptrCast(&session)) != .ok) return 0;
     return @bitCast(@as(u64, @intFromPtr(session.?)));
 }
 
-export fn Java_kit_camera_CameraKit_nativeSessionDestroy(env: *JniEnv, cls: jobject, session: i64) void {
+export fn Java_com_gosslens_Gosslens_nativeSessionDestroy(env: *JniEnv, cls: jobject, session: i64) void {
     _ = env;
     _ = cls;
-    abi.ck_session_destroy(sessionFromHandle(session));
+    abi.goss_session_destroy(sessionFromHandle(session));
 }
 
-export fn Java_kit_camera_CameraKit_nativeSubmitFrameCopy(
+export fn Java_com_gosslens_Gosslens_nativeSubmitFrameCopy(
     env: *JniEnv,
     cls: jobject,
     session: i64,
@@ -131,10 +131,10 @@ export fn Java_kit_camera_CameraKit_nativeSubmitFrameCopy(
         .flags = @bitCast(flags),
         .timestamp_us = timestamp_us,
     };
-    return @intFromEnum(abi.ck_session_submit_frame_copy(sessionFromHandle(session), &desc, y, @intCast(y_stride), uv, @intCast(uv_stride)));
+    return @intFromEnum(abi.goss_session_submit_frame_copy(sessionFromHandle(session), &desc, y, @intCast(y_stride), uv, @intCast(uv_stride)));
 }
 
-export fn Java_kit_camera_CameraKit_nativeSubmitHardwareBuffer(
+export fn Java_com_gosslens_Gosslens_nativeSubmitHardwareBuffer(
     env: *JniEnv,
     cls: jobject,
     session: i64,
@@ -157,22 +157,22 @@ export fn Java_kit_camera_CameraKit_nativeSubmitHardwareBuffer(
         .flags = @bitCast(flags),
         .timestamp_us = timestamp_us,
     };
-    return @intFromEnum(abi.ck_session_submit_hardware_buffer(sessionFromHandle(session), &desc, buffer));
+    return @intFromEnum(abi.goss_session_submit_hardware_buffer(sessionFromHandle(session), &desc, buffer));
 }
 
-export fn Java_kit_camera_CameraKit_nativeEnableFaceTracking(env: *JniEnv, cls: jobject, session: i64, task_buffer: jobject, task_len: i32, threads: i32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeEnableFaceTracking(env: *JniEnv, cls: jobject, session: i64, task_buffer: jobject, task_len: i32, threads: i32) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, task_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    return @intFromEnum(abi.ck_session_enable_face_tracking(sessionFromHandle(session), bytes, @intCast(task_len), threads));
+    return @intFromEnum(abi.goss_session_enable_face_tracking(sessionFromHandle(session), bytes, @intCast(task_len), threads));
 }
 
-export fn Java_kit_camera_CameraKit_nativeDisableFaceTracking(env: *JniEnv, cls: jobject, session: i64) void {
+export fn Java_com_gosslens_Gosslens_nativeDisableFaceTracking(env: *JniEnv, cls: jobject, session: i64) void {
     _ = env;
     _ = cls;
-    abi.ck_session_disable_face_tracking(sessionFromHandle(session));
+    abi.goss_session_disable_face_tracking(sessionFromHandle(session));
 }
 
-export fn Java_kit_camera_CameraKit_nativeTrackFrame(
+export fn Java_com_gosslens_Gosslens_nativeTrackFrame(
     env: *JniEnv,
     cls: jobject,
     session: i64,
@@ -198,38 +198,38 @@ export fn Java_kit_camera_CameraKit_nativeTrackFrame(
         .flags = 0,
         .timestamp_us = timestamp_us,
     };
-    return @intFromEnum(abi.ck_session_track_frame(sessionFromHandle(session), &desc, y, @intCast(y_stride), uv, @intCast(uv_stride)));
+    return @intFromEnum(abi.goss_session_track_frame(sessionFromHandle(session), &desc, y, @intCast(y_stride), uv, @intCast(uv_stride)));
 }
 
 /// The result buffer is a direct buffer of at least the frozen result
 /// size; the shell reads the fields straight out of it.
-export fn Java_kit_camera_CameraKit_nativeFaceResult(env: *JniEnv, cls: jobject, session: i64, result_buffer: jobject) i32 {
+export fn Java_com_gosslens_Gosslens_nativeFaceResult(env: *JniEnv, cls: jobject, session: i64, result_buffer: jobject) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, result_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const result: *abi.FaceResult = @ptrCast(@alignCast(bytes));
-    return @intFromEnum(abi.ck_session_face_result(sessionFromHandle(session), result));
+    return @intFromEnum(abi.goss_session_face_result(sessionFromHandle(session), result));
 }
 
-export fn Java_kit_camera_CameraKit_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
     _ = path_len;
     const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    return @intFromEnum(abi.ck_session_enable_beauty(sessionFromHandle(session), @ptrCast(path)));
+    return @intFromEnum(abi.goss_session_enable_beauty(sessionFromHandle(session), @ptrCast(path)));
 }
 
-export fn Java_kit_camera_CameraKit_nativeDisableBeauty(env: *JniEnv, cls: jobject, session: i64) void {
+export fn Java_com_gosslens_Gosslens_nativeDisableBeauty(env: *JniEnv, cls: jobject, session: i64) void {
     _ = env;
     _ = cls;
-    abi.ck_session_disable_beauty(sessionFromHandle(session));
+    abi.goss_session_disable_beauty(sessionFromHandle(session));
 }
 
-export fn Java_kit_camera_CameraKit_nativeSetBeauty(env: *JniEnv, cls: jobject, session: i64, effect: i32, value: f32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeSetBeauty(env: *JniEnv, cls: jobject, session: i64, effect: i32, value: f32) i32 {
     _ = env;
     _ = cls;
-    return @intFromEnum(abi.ck_session_set_beauty(sessionFromHandle(session), effect, value));
+    return @intFromEnum(abi.goss_session_set_beauty(sessionFromHandle(session), effect, value));
 }
 
-export fn Java_kit_camera_CameraKit_nativeBeautifyFrame(
+export fn Java_com_gosslens_Gosslens_nativeBeautifyFrame(
     env: *JniEnv,
     cls: jobject,
     session: i64,
@@ -241,30 +241,30 @@ export fn Java_kit_camera_CameraKit_nativeBeautifyFrame(
     _ = cls;
     const source = getDirectBufferAddress(env, rgba_in) orelse return @intFromEnum(abi.Status.invalid_argument);
     const destination = getDirectBufferAddress(env, rgba_out) orelse return @intFromEnum(abi.Status.invalid_argument);
-    return @intFromEnum(abi.ck_session_beautify_frame(sessionFromHandle(session), source, @intCast(width), @intCast(height), destination));
+    return @intFromEnum(abi.goss_session_beautify_frame(sessionFromHandle(session), source, @intCast(width), @intCast(height), destination));
 }
 
-export fn Java_kit_camera_CameraKit_nativeActivateLens(env: *JniEnv, cls: jobject, session: i64, manifest_buffer: jobject, manifest_len: i32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeActivateLens(env: *JniEnv, cls: jobject, session: i64, manifest_buffer: jobject, manifest_len: i32) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, manifest_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
-    return @intFromEnum(abi.ck_session_activate_lens(sessionFromHandle(session), bytes, @intCast(manifest_len)));
+    return @intFromEnum(abi.goss_session_activate_lens(sessionFromHandle(session), bytes, @intCast(manifest_len)));
 }
 
-export fn Java_kit_camera_CameraKit_nativeDeactivateLens(env: *JniEnv, cls: jobject, session: i64) void {
+export fn Java_com_gosslens_Gosslens_nativeDeactivateLens(env: *JniEnv, cls: jobject, session: i64) void {
     _ = env;
     _ = cls;
-    abi.ck_session_deactivate_lens(sessionFromHandle(session));
+    abi.goss_session_deactivate_lens(sessionFromHandle(session));
 }
 
-export fn Java_kit_camera_CameraKit_nativeTickLens(env: *JniEnv, cls: jobject, session: i64, dt_us: i32, signals_buffer: jobject) i32 {
+export fn Java_com_gosslens_Gosslens_nativeTickLens(env: *JniEnv, cls: jobject, session: i64, dt_us: i32, signals_buffer: jobject) i32 {
     _ = cls;
     const bytes = getDirectBufferAddress(env, signals_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const signals: *const abi.LensSignals = @ptrCast(@alignCast(bytes));
-    return @intFromEnum(abi.ck_session_tick_lens(sessionFromHandle(session), @intCast(dt_us), signals));
+    return @intFromEnum(abi.goss_session_tick_lens(sessionFromHandle(session), @intCast(dt_us), signals));
 }
 
-export fn Java_kit_camera_CameraKit_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
+export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;
-    return abi.ck_session_report_frame(sessionFromHandle(session), @intCast(frame_time_us), thermal);
+    return abi.goss_session_report_frame(sessionFromHandle(session), @intCast(frame_time_us), thermal);
 }

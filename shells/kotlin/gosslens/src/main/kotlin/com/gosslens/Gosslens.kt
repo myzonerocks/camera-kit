@@ -1,14 +1,14 @@
-package kit.camera
+package com.gosslens
 
 import android.view.Surface
 import java.nio.ByteBuffer
 
-// The Kotlin face of the ck_ ABI. The native names mirror the C surface one
+// The Kotlin face of the goss_ ABI. The native names mirror the C surface one
 // to one and carry no logic; Session and Engine below are the idiomatic
 // wrappers the app consumes.
-object CameraKit {
+object Gosslens {
     init {
-        System.loadLibrary("camerakit")
+        System.loadLibrary("gosslens")
     }
 
     external fun nativeAbiVersion(): Int
@@ -86,17 +86,17 @@ object CameraKit {
 class Engine private constructor(internal val handle: Long) : AutoCloseable {
     companion object {
         fun create(): Engine {
-            val handle = CameraKit.nativeEngineCreate()
+            val handle = Gosslens.nativeEngineCreate()
             check(handle != 0L) { "engine create failed" }
             return Engine(handle)
         }
     }
 
     fun initRenderer(surface: Surface, width: Int, height: Int) {
-        check(CameraKit.nativeInitRenderer(handle, surface, width, height) == 0) { "renderer init failed" }
+        check(Gosslens.nativeInitRenderer(handle, surface, width, height) == 0) { "renderer init failed" }
     }
 
-    fun resize(width: Int, height: Int) = CameraKit.nativeResize(handle, width, height)
+    fun resize(width: Int, height: Int) = Gosslens.nativeResize(handle, width, height)
 
     /** Requests a screenshot of the next presented frame, written as
      * [path] plus a ".tga" suffix the renderer's own callback appends -
@@ -107,13 +107,13 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
         val buffer = ByteBuffer.allocateDirect(bytes.size)
         buffer.put(bytes)
         buffer.rewind()
-        return CameraKit.nativeRequestScreenshot(handle, buffer, bytes.size) == 0
+        return Gosslens.nativeRequestScreenshot(handle, buffer, bytes.size) == 0
     }
 
     fun renderFrame(session: Session?): Boolean =
-        CameraKit.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
+        Gosslens.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
 
-    override fun close() = CameraKit.nativeEngineDestroy(handle)
+    override fun close() = Gosslens.nativeEngineDestroy(handle)
 }
 
 /** One tracking result read back from the core. The buffer mirrors the
@@ -121,7 +121,7 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
  * allocating per frame. */
 class FaceResult {
     internal val buffer: ByteBuffer =
-        ByteBuffer.allocateDirect(CameraKit.FACE_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(Gosslens.FACE_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
     var frameSerial: Long = 0; private set
     var timestampUs: Long = 0; private set
@@ -129,8 +129,8 @@ class FaceResult {
     var landmarkCount: Int = 0; private set
 
     /** x, y frame pixels and z, three floats per landmark. */
-    val landmarks = FloatArray(CameraKit.FACE_LANDMARK_COUNT * 3)
-    val blendshapes = FloatArray(CameraKit.FACE_BLENDSHAPE_COUNT)
+    val landmarks = FloatArray(Gosslens.FACE_LANDMARK_COUNT * 3)
+    val blendshapes = FloatArray(Gosslens.FACE_BLENDSHAPE_COUNT)
 
     internal fun parse() {
         buffer.rewind()
@@ -146,13 +146,13 @@ class FaceResult {
 }
 
 /** The live signals one tick evaluates a lens's compiled triggers
- * against. The buffer mirrors the frozen ck_lens_signals layout
+ * against. The buffer mirrors the frozen goss_lens_signals layout
  * (booleans and a reserved byte, then the padding to the first double
  * at offset 8, then blendshapes at offset 24) - absolute puts, not
  * relative, so this doesn't depend on writing the padding by hand. */
 class LensSignals {
     internal val buffer: ByteBuffer =
-        ByteBuffer.allocateDirect(CameraKit.LENS_SIGNALS_BYTES).order(java.nio.ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(Gosslens.LENS_SIGNALS_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
     /** blendshapes may be shorter than FACE_BLENDSHAPE_COUNT; the rest
      * reads as zero. Pass hasFace = false when no face is tracked -
@@ -166,7 +166,7 @@ class LensSignals {
         buffer.putDouble(8, worldTrackingState)
         buffer.putDouble(16, audioLevel)
         val floats = buffer.duplicate().order(buffer.order()).asFloatBuffer()
-        for (i in 0 until CameraKit.FACE_BLENDSHAPE_COUNT) {
+        for (i in 0 until Gosslens.FACE_BLENDSHAPE_COUNT) {
             floats.put(6 + i, if (i < blendshapes.size) blendshapes[i] else 0f)
         }
     }
@@ -175,7 +175,7 @@ class LensSignals {
 class Session private constructor(internal val handle: Long) : AutoCloseable {
     companion object {
         fun create(engine: Engine): Session {
-            val handle = CameraKit.nativeSessionCreate(engine.handle)
+            val handle = Gosslens.nativeSessionCreate(engine.handle)
             check(handle != 0L) { "session create failed" }
             return Session(handle)
         }
@@ -191,19 +191,19 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         rotationDegrees: Int,
         mirrored: Boolean,
         timestampUs: Long,
-    ): Boolean = CameraKit.nativeSubmitFrameCopy(
+    ): Boolean = Gosslens.nativeSubmitFrameCopy(
         handle, y, yStride, uv, uvStride, width, height,
-        CameraKit.flagsFor(rotationDegrees, mirrored),
+        Gosslens.flagsFor(rotationDegrees, mirrored),
         1, 0, timestampUs,
     ) == 0
 
     fun reportFrame(frameTimeUs: Int, thermal: Int): Int =
-        CameraKit.nativeReportFrame(handle, frameTimeUs, thermal)
+        Gosslens.nativeReportFrame(handle, frameTimeUs, thermal)
 
     fun enableFaceTracking(taskBundle: ByteBuffer): Boolean =
-        CameraKit.nativeEnableFaceTracking(handle, taskBundle, taskBundle.remaining(), 0) == 0
+        Gosslens.nativeEnableFaceTracking(handle, taskBundle, taskBundle.remaining(), 0) == 0
 
-    fun disableFaceTracking() = CameraKit.nativeDisableFaceTracking(handle)
+    fun disableFaceTracking() = Gosslens.nativeDisableFaceTracking(handle)
 
     fun trackFrame(
         y: ByteBuffer,
@@ -213,7 +213,7 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         width: Int,
         height: Int,
         timestampUs: Long,
-    ): Boolean = CameraKit.nativeTrackFrame(
+    ): Boolean = Gosslens.nativeTrackFrame(
         handle, y, yStride, uv, uvStride, width, height, 1, 0, timestampUs,
     ) == 0
 
@@ -225,23 +225,23 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         buffer.put(bytes)
         buffer.put(0)
         buffer.rewind()
-        return CameraKit.nativeEnableBeauty(handle, buffer, bytes.size) == 0
+        return Gosslens.nativeEnableBeauty(handle, buffer, bytes.size) == 0
     }
 
-    fun disableBeauty() = CameraKit.nativeDisableBeauty(handle)
+    fun disableBeauty() = Gosslens.nativeDisableBeauty(handle)
 
     /** Effects in order: smooth 0, whiten 1, thin face 2, big eye 3,
      * lipstick 4, blush 5; values clamp to zero and one. */
     fun setBeauty(effect: Int, value: Float): Boolean =
-        CameraKit.nativeSetBeauty(handle, effect, value) == 0
+        Gosslens.nativeSetBeauty(handle, effect, value) == 0
 
     fun beautifyFrame(rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Boolean =
-        CameraKit.nativeBeautifyFrame(handle, rgbaIn, rgbaOut, width, height) == 0
+        Gosslens.nativeBeautifyFrame(handle, rgbaIn, rgbaOut, width, height) == 0
 
     /** Fills [result] with the newest tracking output; false until the
      * worker publishes its first result. */
     fun faceResult(result: FaceResult): Boolean {
-        val status = CameraKit.nativeFaceResult(handle, result.buffer)
+        val status = Gosslens.nativeFaceResult(handle, result.buffer)
         if (status != 0) return false
         result.parse()
         return true
@@ -253,16 +253,16 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         val buffer = ByteBuffer.allocateDirect(manifestJson.size)
         buffer.put(manifestJson)
         buffer.rewind()
-        return CameraKit.nativeActivateLens(handle, buffer, manifestJson.size) == 0
+        return Gosslens.nativeActivateLens(handle, buffer, manifestJson.size) == 0
     }
 
-    fun deactivateLens() = CameraKit.nativeDeactivateLens(handle)
+    fun deactivateLens() = Gosslens.nativeDeactivateLens(handle)
 
     /** Advances the active lens by [dtUs] of real time and applies
      * whatever effect values its triggers/ramps changed to the beauty
      * chain, if one is enabled. False with no active lens. */
     fun tickLens(dtUs: Int, signals: LensSignals): Boolean =
-        CameraKit.nativeTickLens(handle, dtUs, signals.buffer) == 0
+        Gosslens.nativeTickLens(handle, dtUs, signals.buffer) == 0
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,
@@ -271,11 +271,11 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         rotationDegrees: Int,
         mirrored: Boolean,
         timestampUs: Long,
-    ): Boolean = CameraKit.nativeSubmitHardwareBuffer(
+    ): Boolean = Gosslens.nativeSubmitHardwareBuffer(
         handle, buffer, width, height,
-        CameraKit.flagsFor(rotationDegrees, mirrored),
+        Gosslens.flagsFor(rotationDegrees, mirrored),
         1, 0, timestampUs,
     ) == 0
 
-    override fun close() = CameraKit.nativeSessionDestroy(handle)
+    override fun close() = Gosslens.nativeSessionDestroy(handle)
 }

@@ -41,7 +41,7 @@
 #import <OpenGLES/ES2/gl.h>
 #endif
 
-extern "C" int32_t ck_beauty_process_external_texture(void* handle,
+extern "C" int32_t goss_beauty_process_external_texture(void* handle,
                                                        uint32_t gl_texture,
                                                        int32_t sampler_kind,
                                                        int32_t width,
@@ -529,18 +529,18 @@ struct AppleInputSurface {
 
 extern "C" {
 
-void* ck_beauty_interop_create(void) {
+void* goss_beauty_interop_create(void) {
   return new (std::nothrow) AppleInterop();
 }
 
-void ck_beauty_interop_destroy(void* handle) {
+void goss_beauty_interop_destroy(void* handle) {
   delete static_cast<AppleInterop*>(handle);
 }
 
 // Composites source_texture into the shared surface and returns the
 // CVPixelBufferRef, unretained: valid until the next call on this handle
-// or ck_beauty_interop_destroy, never released by the caller.
-void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
+// or goss_beauty_interop_destroy, never released by the caller.
+void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
                                   int32_t width, int32_t height) {
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* interop = static_cast<AppleInterop*>(handle);
@@ -572,11 +572,11 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
   return ok ? interop->pixel_buffer : nullptr;
 }
 
-void* ck_beauty_input_create(void) {
+void* goss_beauty_input_create(void) {
   return new (std::nothrow) AppleInputSurface();
 }
 
-void ck_beauty_input_destroy(void* handle) {
+void goss_beauty_input_destroy(void* handle) {
   delete static_cast<AppleInputSurface*>(handle);
 }
 
@@ -584,8 +584,8 @@ void ck_beauty_input_destroy(void* handle) {
 // device (bgfx's own MTL::Device, reinterpreted from the raw pointer the
 // caller already extracted from bgfx_get_internal_data) and returns the
 // id<MTLTexture> view of it, unretained: valid until the next call that
-// actually resizes, or ck_beauty_input_destroy.
-void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
+// actually resizes, or goss_beauty_input_destroy.
+void* goss_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* input = static_cast<AppleInputSurface*>(handle);
   id<MTLDevice> mtl_device = (__bridge id<MTLDevice>)device;
@@ -595,11 +595,11 @@ void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t
 
 // Runs on gpupixel's own GL thread by dispatching through
 // SyncRunWithContext itself - the caller never needs to know that detail,
-// matching ck_beauty_interop_composite's own contract. Imports the shared
+// matching goss_beauty_interop_composite's own contract. Imports the shared
 // surface bgfx just wrote into and pushes it through the beauty chain via
-// ck_beauty_process_external_texture (beauty_shim.cc); returns 0 on
-// success, matching ck_beauty_process's own status convention.
-int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
+// goss_beauty_process_external_texture (beauty_shim.cc); returns 0 on
+// success, matching goss_beauty_process's own status convention.
+int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
                                 int32_t width, int32_t height,
                                 const float* landmarks106) {
   if (input_handle == nullptr || beauty_handle == nullptr) return 1;
@@ -611,7 +611,7 @@ int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
       ok = false;
       return;
     }
-    ok = ck_beauty_process_external_texture(
+    ok = goss_beauty_process_external_texture(
              beauty_handle, input->GLName(), input->SamplerKind(),
              width, height, landmarks106) == 0;
   });
@@ -623,9 +623,9 @@ int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
 #else  // Every other apple-adjacent target this file might compile for.
 
 extern "C" {
-void* ck_beauty_interop_create(void) { return nullptr; }
-void ck_beauty_interop_destroy(void* handle) { (void)handle; }
-void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
+void* goss_beauty_interop_create(void) { return nullptr; }
+void goss_beauty_interop_destroy(void* handle) { (void)handle; }
+void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
                                   int32_t width, int32_t height) {
   (void)handle;
   (void)source_texture;
@@ -633,16 +633,16 @@ void* ck_beauty_interop_composite(void* handle, uint32_t source_texture,
   (void)height;
   return nullptr;
 }
-void* ck_beauty_input_create(void) { return nullptr; }
-void ck_beauty_input_destroy(void* handle) { (void)handle; }
-void* ck_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
+void* goss_beauty_input_create(void) { return nullptr; }
+void goss_beauty_input_destroy(void* handle) { (void)handle; }
+void* goss_beauty_input_surface(void* handle, void* device, int32_t width, int32_t height) {
   (void)handle;
   (void)device;
   (void)width;
   (void)height;
   return nullptr;
 }
-int32_t ck_beauty_input_process(void* input_handle, void* beauty_handle,
+int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
                                 int32_t width, int32_t height,
                                 const float* landmarks106) {
   (void)input_handle;

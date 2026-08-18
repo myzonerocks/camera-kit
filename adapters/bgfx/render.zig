@@ -547,7 +547,7 @@ pub const Renderer = struct {
     /// (camera ingress submits on one call, render samples on a later
     /// one); createExternalTarget's caller is the one case that would
     /// otherwise create a handle and immediately draw into it inside the
-    /// same ck_engine_render_frame, before bgfx has ever had a frame
+    /// same goss_engine_render_frame, before bgfx has ever had a frame
     /// boundary to actually create it. Returns null on that still-
     /// pending case so the caller can retry next frame instead of
     /// caching a handle that silently never points at the real texture.

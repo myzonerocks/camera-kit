@@ -1,12 +1,12 @@
-package kit.camera.demo
+package com.gosslens.demo
 
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.view.View
-import kit.camera.FaceResult
-import kit.camera.Session
+import com.gosslens.FaceResult
+import com.gosslens.Session
 
 /** Draws the latest tracking result over the preview. Landmarks arrive in
  * sensor pixels; the view rotates them by the frame's quarter turns and
@@ -30,7 +30,7 @@ class FaceOverlayView(context: Context) : View(context) {
         strokeWidth = 3f
         strokeCap = Paint.Cap.ROUND
     }
-    private val points = FloatArray(kit.camera.CameraKit.FACE_LANDMARK_COUNT * 2)
+    private val points = FloatArray(com.gosslens.Gosslens.FACE_LANDMARK_COUNT * 2)
 
     fun frameGeometry(width: Int, height: Int, rotation: Int) {
         frameWidth = width

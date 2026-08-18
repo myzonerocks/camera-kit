@@ -6,7 +6,7 @@
  			const uint32_t offset = idx * 2 + 0;
 -			WGPU_CHECK(wgpuCommandEncoderWriteTimestamp(s_renderWGPU->m_cmd.m_commandEncoder, m_querySet, offset) );
 +			BX_UNUSED(offset);
-+			// camera-kit patch: encoder.writeTimestamp no longer exists in
++			// gosslens patch: encoder.writeTimestamp no longer exists in
 +			// shipping WebGPU - see third_party/bgfx/patches/README.md.
  
  			return idx;
@@ -17,7 +17,7 @@
  		const uint32_t offset = _idx * 2 + 1;
 -		WGPU_CHECK(wgpuCommandEncoderWriteTimestamp(s_renderWGPU->m_cmd.m_commandEncoder, m_querySet, offset) );
 +		BX_UNUSED(offset);
-+		// camera-kit patch: see begin() above.
++		// gosslens patch: see begin() above.
  
  		m_control.consume(1);
  	}

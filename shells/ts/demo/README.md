@@ -13,13 +13,13 @@ From the repo root:
     zig build wasm-emscripten-webgpu
     zig build tracking-wasm
     zig build fetch-models
-    cp zig-out/wasm/camerakit_tracking.wasm shells/ts/demo/
+    cp zig-out/wasm/gosslens_tracking.wasm shells/ts/demo/
     cp .models/face_landmarker.task .models/corpus/face_frontal_b.jpg .models/corpus/no_face_control.jpg shells/ts/demo/
     cd shells/ts/demo
     bun build ./tracking-worker.ts --outfile=./tracking-worker.js --format=esm
 
 wasm-emscripten and wasm-emscripten-webgpu each copy their own
-camerakit_web.js/.wasm output straight into shells/ts/demo/ (WebGL2)
+gosslens_web.js/.wasm output straight into shells/ts/demo/ (WebGL2)
 and shells/ts/demo/webgpu/ (WebGPU) as part of the build itself, so
 there's no separate cp step for those two and no way to silently keep
 testing a stale binary after a source change - main.ts picks between
