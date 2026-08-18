@@ -1107,9 +1107,11 @@ pub export fn ck_engine_render_frame(engine: ?*Engine, session: ?*Session) Statu
 /// the same two out params, and the call fails with invalid_argument
 /// rather than truncating silently if out_capacity is smaller.
 /// render.Renderer.readTexture only enqueues a read - bgfx's own
-/// command-buffer model (bgfx_p.h's Context::readTexture) defers the
-/// actual copy to the next bgfx_frame() call after the one it's queued
-/// in, so a second frame() after the enqueue is what actually runs it.
+/// documented contract (bgfx_p.h's Context::readTexture) is that its
+/// return value is the frame number bgfx_frame() must reach before the
+/// buffer is safe to read, backend-dependent and not always the same
+/// small number of extra calls, so this loops on frame()'s own return
+/// value rather than assuming a fixed count.
 pub export fn ck_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -1143,8 +1145,8 @@ pub export fn ck_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_
     if (full_size == 0) return .ok;
     if (out_capacity < full_size) return .invalid_argument;
 
-    render.Renderer.readTexture(target.texture, data);
-    _ = r.frame();
+    const ready_frame = render.Renderer.readTexture(target.texture, data);
+    while (r.frame() < ready_frame) {}
     return .ok;
 }
 

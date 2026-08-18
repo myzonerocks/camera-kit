@@ -1020,14 +1020,14 @@ pub const Renderer = struct {
     /// Reads a texture's pixels back into `data`, which must be at
     /// least as large as the texture's own byte size (width * height *
     /// bytes-per-pixel for a plain 2D RGBA8 texture, the only shape
-    /// this project reads back today). Whether this blocks until the
-    /// data is ready is a per-backend property of bgfx's own
-    /// implementation, not something this wrapper controls - the
-    /// WebGPU backend's own readTexture pumps wgpuInstanceProcessEvents
-    /// internally until its buffer map completes, so data is valid
-    /// immediately on return there.
-    pub fn readTexture(texture: TextureHandle, data: [*]u8) void {
-        _ = c.bgfx_read_texture(texture, data, 0, 0);
+    /// this project reads back today). Only enqueues the read - per
+    /// bgfx's own documented contract, the return value is the frame
+    /// number bgfx_frame() must reach before `data` is safe to read;
+    /// the caller is responsible for calling frame() until its own
+    /// return value reaches it, not assuming any fixed number of
+    /// extra calls.
+    pub fn readTexture(texture: TextureHandle, data: [*]u8) u32 {
+        return c.bgfx_read_texture(texture, data, 0, 0);
     }
 };
 
