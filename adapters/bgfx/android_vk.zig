@@ -493,7 +493,10 @@ pub const Converter = struct {
         var commands: [ring_depth]c.VkCommandBuffer = undefined;
         try check(c.vkAllocateCommandBuffers(device, &command_alloc, &commands));
 
-        var fences: [ring_depth]c.VkFence = undefined;
+        var fences: [ring_depth]c.VkFence = @splat(null);
+        errdefer for (fences) |fence| {
+            if (fence != null) c.vkDestroyFence(device, fence, null);
+        };
         var fence_info: c.VkFenceCreateInfo = std.mem.zeroes(c.VkFenceCreateInfo);
         fence_info.sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fence_info.flags = c.VK_FENCE_CREATE_SIGNALED_BIT;
@@ -565,7 +568,6 @@ pub const Converter = struct {
         converter.slot = (slot + 1) % ring_depth;
 
         try check(c.vkWaitForFences(device, 1, &converter.fences[slot], c.VK_TRUE, std.math.maxInt(u64)));
-        try check(c.vkResetFences(device, 1, &converter.fences[slot]));
         converter.imports[slot].deinit(device);
 
         if (width != converter.width or height != converter.height) {
@@ -576,6 +578,12 @@ pub const Converter = struct {
         converter.imports[slot] = import;
         converter.updateSet(slot, import);
         try converter.record(slot, import, width, height);
+
+        // Reset only once every fallible step above has passed: an error
+        // return with the fence already reset leaves it unsignaled
+        // forever, deadlocking the frame thread when the ring wraps back
+        // to this slot (UnsupportedFormat is an expected runtime case).
+        try check(c.vkResetFences(device, 1, &converter.fences[slot]));
 
         var submit: c.VkSubmitInfo = std.mem.zeroes(c.VkSubmitInfo);
         submit.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;

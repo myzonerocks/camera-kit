@@ -34,7 +34,7 @@ pub const face_point_vec4_count = 53;
 pub const TextureHandle = c.bgfx_texture_handle_t;
 
 /// The affine color conversion as one homogeneous matrix for the shader.
-pub fn yuvTransform(conversion: math.color.Conversion) math.Mat4 {
+fn yuvTransform(conversion: math.color.Conversion) math.Mat4 {
     return conversion.homogeneous();
 }
 
@@ -173,6 +173,12 @@ pub const Renderer = struct {
                 vk_context = android_vk.Context.init() catch null;
             }
         }
+        // On any failure below, the adapter-owned device dies only after
+        // bgfx (which adopted it) has shut down - errdefers run in
+        // reverse declaration order, so this one runs last.
+        errdefer if (is_android) {
+            if (vk_context) |*ctx| ctx.deinit();
+        };
         bgfx_init.type = if (builtin.os.tag == .macos or builtin.os.tag == .ios)
             c.BGFX_RENDERER_TYPE_METAL
         else if (is_android)
@@ -274,8 +280,8 @@ pub const Renderer = struct {
                 if (android_vk.Converter.init(ctx)) |converter| {
                     zero_copy = .{ .converter = converter };
                 } else |_| {
-                    var mutable = ctx;
-                    mutable.deinit();
+                    // The errdefer chain shuts bgfx down before the
+                    // device it adopted dies - never inline here.
                     return error.RendererInit;
                 }
             }
