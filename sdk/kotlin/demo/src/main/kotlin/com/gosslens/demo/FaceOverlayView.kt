@@ -24,6 +24,7 @@ class FaceOverlayView(context: Context) : View(context) {
     private var frameWidth = 0
     private var frameHeight = 0
     private var rotationDegrees = 0
+    private var mirrored = false
 
     private val pointPaint = Paint().apply {
         color = Color.WHITE
@@ -32,10 +33,11 @@ class FaceOverlayView(context: Context) : View(context) {
     }
     private val points = FloatArray(com.gosslens.Gosslens.FACE_LANDMARK_COUNT * 2)
 
-    fun frameGeometry(width: Int, height: Int, rotation: Int) {
+    fun frameGeometry(width: Int, height: Int, rotation: Int, mirror: Boolean) {
         frameWidth = width
         frameHeight = height
         rotationDegrees = rotation
+        mirrored = mirror
     }
 
     /** Called once per render tick from the choreographer thread. */
@@ -69,7 +71,10 @@ class FaceOverlayView(context: Context) : View(context) {
                 3 -> { rotatedX = y; rotatedY = frameWidth - x }
                 else -> { rotatedX = x; rotatedY = y }
             }
-            points[write] = rotatedX * scaleX
+            // Landmarks are raw sensor space; a mirrored preview flips
+            // its horizontal axis, so the overlay flips with it.
+            val viewX = if (mirrored) width - rotatedX * scaleX else rotatedX * scaleX
+            points[write] = viewX
             points[write + 1] = rotatedY * scaleY
             write += 2
         }

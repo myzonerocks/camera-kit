@@ -60,6 +60,11 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     @Volatile
     private var zeroCopyRefused = false
 
+    // One mirror decision for every consumer - both submit paths and the
+    // face overlay - matching the front camera this demo binds below.
+    // The preview must not flip depending on which submit path engaged.
+    private val mirrorPreview = true
+
     // The conformance run reuses this same real window/renderer setup,
     // just feeding a fixed corpus frame instead of live camera - see
     // ConformanceRunner. Set via `am start --ez GossConformance true`, the
@@ -276,7 +281,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                                 val submitted = session.submitHardwareBuffer(
                                     hardwareBuffer,
                                     width, height,
-                                    rotationDegrees, false,
+                                    rotationDegrees, mirrorPreview,
                                     timestampUs,
                                 )
                                 hardwareBuffer.close()
@@ -358,7 +363,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                             val submitted = session.submitFrameCopy(
                                 ySubmit, yStride, uvSubmit, uvStride,
                                 width, height,
-                                rotationDegrees, mirrored = true,
+                                rotationDegrees, mirrored = mirrorPreview,
                                 timestampUs,
                             )
                             if (submitted) {
@@ -367,7 +372,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                             }
                         }
                     }
-                    overlay.frameGeometry(it.width, it.height, it.imageInfo.rotationDegrees)
+                    overlay.frameGeometry(it.width, it.height, it.imageInfo.rotationDegrees, mirrorPreview)
                     session.trackFrame(
                         yCopy, y.rowStride, uvCopy, uvStride,
                         it.width, it.height,

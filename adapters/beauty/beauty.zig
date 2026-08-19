@@ -31,7 +31,7 @@ extern fn goss_beauty_interop_create() ?*anyopaque;
 extern fn goss_beauty_interop_destroy(handle: ?*anyopaque) void;
 extern fn goss_beauty_interop_composite(handle: ?*anyopaque, source_texture: u32, width: i32, height: i32) ?*anyopaque;
 // Apple only, no Android sibling - Android's composite() already returns
-// an AHardwareBuffer wrapExternalTexture's Vulkan sibling imports directly.
+// an AHardwareBuffer wrapAndroidBeautyOutput imports directly.
 extern fn goss_beauty_interop_native_texture(handle: ?*anyopaque, device: ?*anyopaque) ?*anyopaque;
 
 const is_apple = builtin.os.tag == .macos or builtin.os.tag == .ios;
@@ -78,7 +78,7 @@ pub fn composite(interop: *Interop, beauty: *Beauty, width: u32, height: u32) ?*
 
 /// bgfx's own Metal-side view of composite()'s most recent output -
 /// composite() itself returns a CVPixelBufferRef (for CPU readback), not
-/// something wrapExternalTexture can bind. Call right after composite();
+/// something a bgfx texture override can bind. Call right after composite();
 /// device is render.Renderer.nativeDevice(). No-op off Apple.
 pub fn interopNativeTexture(interop: *Interop, device: ?*anyopaque) ?*anyopaque {
     if (!is_apple) return null;
@@ -183,8 +183,8 @@ pub fn inputSurfaceDestroy(gpa: std.mem.Allocator, surface: *InputSurface) void 
 
 /// (Re)creates the shared surface against device (bgfx's own native
 /// device handle, render.Renderer.nativeDevice) sized to width/height,
-/// and returns bgfx's own view of it - a native texture pointer
-/// wrapExternalTexture can bind with no copy. Unretained: valid until
+/// and returns bgfx's own view of it - a native texture pointer the
+/// renderer's override wraps can bind with no copy. Unretained: valid until
 /// the next call that actually resizes, or inputSurfaceDestroy.
 pub fn inputSurfaceNativeTexture(surface: *InputSurface, device: ?*anyopaque, width: u32, height: u32) ?*anyopaque {
     return goss_beauty_input_surface(surface.handle, device, @intCast(width), @intCast(height));

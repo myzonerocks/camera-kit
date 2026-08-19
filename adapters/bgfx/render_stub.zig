@@ -69,16 +69,6 @@ pub const Renderer = struct {
         _ = height;
     }
 
-    pub fn wrapExternalTexture(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize, render_target: bool) TextureHandle {
-        _ = r;
-        _ = width;
-        _ = height;
-        _ = format;
-        _ = native_ptr;
-        _ = render_target;
-        return .{};
-    }
-
     pub fn wrapExternalRenderTarget(r: *Renderer, pt: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) ?TextureHandle {
         _ = r;
         _ = pt;

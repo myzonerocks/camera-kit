@@ -26,10 +26,11 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private var textureCache: CVMetalTextureCache?
     private var session: Session?
 
-    // The plane textures of the two most recent frames stay retained so the
-    // GPU can still sample the frame in flight while the next one arrives.
-    private var inflight: [[Any]] = [[], []]
-    private var inflightIndex = 0
+    // Main-thread only: the two most recently SUBMITTED frames' platform
+    // objects. Advancing on successful submits rather than captures means
+    // a stall can never recycle a frame the engine still samples; the
+    // submit hop's capture list keeps each frame alive until it lands.
+    private var retainedFrames: [[Any]] = [[], []]
 
     private(set) var state: State = .idle
     private(set) var submittedFrames = 0
@@ -41,13 +42,23 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     var onStateChange: ((State) -> Void)?
 
     private var activeObserver: NSObjectProtocol?
+    private var engineFeaturesEnabled = false
 
     // gpupixel's context creation silently no-ops with no retry while
     // the app isn't foreground-active (GPXObjcHelper's s_isAppActive) -
     // viewDidLayoutSubviews routinely calls this before that's true,
     // losing the one shot for good. Wait for real activation first.
+    // Runs the enables exactly once: every foreground re-entry calls
+    // start() again, and re-running them would reset the active lens
+    // and pile up one leaked observer per cycle.
     private func enableEngineFeaturesWhenActive() {
+        if let observer = activeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            activeObserver = nil
+        }
+        guard !engineFeaturesEnabled else { return }
         if UIApplication.shared.applicationState == .active {
+            engineFeaturesEnabled = true
             enableFaceTracking()
             enableBeauty()
             activateLens()
@@ -61,6 +72,8 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
                 NotificationCenter.default.removeObserver(observer)
                 self.activeObserver = nil
             }
+            guard !self.engineFeaturesEnabled else { return }
+            self.engineFeaturesEnabled = true
             self.enableFaceTracking()
             self.enableBeauty()
             self.activateLens()
@@ -114,9 +127,14 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             }
             self.captureSession.addInput(input)
             self.captureSession.commitConfiguration()
-            self.position = newPosition
-            self.mirrored = newPosition == .front
+            // rotationQuarterTurns is read on this queue (captureOutput);
+            // position/mirrored are read on main (the face overlay), so
+            // each updates on its reader's own thread.
             self.rotationQuarterTurns = newPosition == .front ? 1 : 3
+            DispatchQueue.main.async {
+                self.position = newPosition
+                self.mirrored = newPosition == .front
+            }
         }
     }
 
@@ -171,7 +189,14 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
 
+    // The AVCaptureSession notification observers fire on the session's
+    // own posting thread; state and onStateChange (which touches UIKit)
+    // are main-thread concerns, so everything funnels through one hop.
     private func transition(to newState: State) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.transition(to: newState) }
+            return
+        }
         state = newState
         log.info("capture state \(newState.rawValue)")
         onStateChange?(newState)
@@ -234,7 +259,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
         outputQueue.async {
             self.captureSession.startRunning()
-            DispatchQueue.main.async { self.transition(to: .running) }
+            self.transition(to: self.captureSession.isRunning ? .running : .failed)
         }
     }
 
@@ -251,7 +276,8 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         transition(to: .failed)
         outputQueue.async {
             self.captureSession.startRunning()
-            DispatchQueue.main.async { self.transition(to: .running) }
+            let restarted = self.captureSession.isRunning
+            self.transition(to: restarted ? .running : .failed)
         }
     }
 
@@ -263,8 +289,6 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-        frameWidth = width
-        frameHeight = height
 
         var yTextureRef: CVMetalTexture?
         var uvTextureRef: CVMetalTexture?
@@ -274,11 +298,6 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
               let yTexture = CVMetalTextureGetTexture(yRef),
               let uvTexture = CVMetalTextureGetTexture(uvRef)
         else { return }
-
-        // Keep this frame's platform objects alive until the frame after
-        // next has rendered.
-        inflight[inflightIndex] = [pixelBuffer, yRef, uvRef, yTexture, uvTexture]
-        inflightIndex = (inflightIndex + 1) % inflight.count
 
         var standard: UInt32 = GOSS_COLOR_BT709.rawValue
         if let matrix = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String {
@@ -295,15 +314,17 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         let uvPlane = UInt64(UInt(bitPattern: Unmanaged.passUnretained(uvTexture).toOpaque()))
 
         // bgfx runs on the main thread only, so this hops off the capture
-        // queue; yRef/uvRef ride along since planes only holds raw pointer
-        // values, and inflight's ring could recycle its slot - freeing the
-        // MTLTexture these point at - before this block runs otherwise.
-        DispatchQueue.main.async { [weak self, session, yRef, uvRef] in
+        // queue; the capture list retains this frame's platform objects
+        // (planes only carries raw pointer values) until they land in
+        // retainedFrames on a successful submit.
+        DispatchQueue.main.async { [weak self, session, pixelBuffer, yRef, uvRef] in
             guard let self else { return }
             if (try? session.submitFrame(planes: [yPlane, uvPlane], width: UInt32(width), height: UInt32(height), pixelFormat: GOSS_PIXEL_NV12.rawValue, colorStandard: standard, rotationDegrees: rotationDegrees, mirrored: self.mirrored, timestampUs: timestampUs)) != nil {
                 self.submittedFrames += 1
+                self.frameWidth = width
+                self.frameHeight = height
+                self.retainedFrames = [[pixelBuffer, yRef, uvRef], self.retainedFrames[0]]
             }
-            _ = (yRef, uvRef)
         }
 
         // Tracking reads the same frame's planes on the CPU; the worker
