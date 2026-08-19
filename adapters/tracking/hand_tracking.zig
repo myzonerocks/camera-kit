@@ -263,7 +263,9 @@ fn regionOverlap(a: sampler.Region, b: sampler.Region) f32 {
 
 fn detectHands(tracking: *HandTracking, image: sampler.Frame) void {
     const square = sampler.frameSquare(image.width, image.height);
-    sampler.sampleRegion(image, square, .symmetric, tracking.detector_side, tracking.detector_tensor);
+    // The palm detector reads zero-to-one input, unlike the face
+    // detector's symmetric range - the shipped graph's own tensor range.
+    sampler.sampleRegion(image, square, .unit, tracking.detector_side, tracking.detector_tensor);
     tracking.detector_engine.writeInput(0, std.mem.sliceAsBytes(tracking.detector_tensor)) catch return;
     tracking.detector_engine.invoke() catch return;
     const raw_boxes = tracking.detector_engine.outputFloats(0) catch return;

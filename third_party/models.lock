@@ -25,6 +25,12 @@
             .license = "Apache-2.0",
         },
         .{
+            .name = "gesture_recognizer.task",
+            .url = "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
+            .sha256 = "97952348cf6a6a4915c2ea1496b4b37ebabc50cbbf80571435643c455f2b0482",
+            .license = "Apache-2.0",
+        },
+        .{
             .name = "corpus/face_frontal_a.jpg",
             .url = "https://upload.wikimedia.org/wikipedia/commons/b/bd/Official_portrait_of_NASA_astronaut_Jack_Hathaway_%28jsc2025e068207_alt%29.jpg",
             .sha256 = "107a9a03a1a1114a082382a3d505bbeee3d4ed0cc0dd89aabad405ea586b7dd9",
@@ -34,6 +40,12 @@
             .name = "corpus/face_frontal_b.jpg",
             .url = "https://upload.wikimedia.org/wikipedia/commons/9/9c/Kalpana_Chawla%2C_NASA_photo_portrait_in_orange_suit.jpg",
             .sha256 = "1934e3673544a04adb45c6a97f5c179c64a7a7f50db033e841a1a1b4457d4303",
+            .license = "Public-domain-US-government",
+        },
+        .{
+            .name = "corpus/hand_raised.jpg",
+            .url = "https://upload.wikimedia.org/wikipedia/commons/7/7c/FEMA_-_37092_-_FEMA_Deputy_Administrator_Johnson_is_sworn_in_at_DHS_Headquarter.jpg",
+            .sha256 = "5a5be96a54bfa78f1ec3fe3d93318958c3945f5a4971c7a0aad2e26f00c664de",
             .license = "Public-domain-US-government",
         },
         .{

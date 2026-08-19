@@ -60,8 +60,13 @@ const char* kBlitVertexShader =
     "  textureCoordinate = inputTextureCoordinate.xy;\n"
     "}\n";
 
+// GLSL ES requires a fragment float precision and desktop GLSL 1.20
+// rejects the qualifier outright; the same source serves iOS and macOS,
+// so the ES-only guard picks per compile.
 const char* kBlitFragmentShader =
+    "#ifdef GL_ES\n"
     "precision mediump float;\n"
+    "#endif\n"
     "varying vec2 textureCoordinate;\n"
     "uniform sampler2D inputTexture;\n"
     "void main() {\n"

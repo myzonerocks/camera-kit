@@ -12,6 +12,7 @@ const runtime = @import("runtime");
 const detector = @import("detector");
 const sampler = @import("sampler");
 const face = @import("face");
+const hand = @import("hand");
 const tracker = @import("tracker");
 
 const abi = @import("abi");
@@ -382,6 +383,187 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (gap_drift > 0.1) return 1;
     }
 
+    // The hand pipeline over the pinned corpus: the raised-palm frame
+    // must detect a palm and land 21 in-bounds landmarks with the lock
+    // holding through a tracking pass; the control frame must not.
+    {
+        const hand_task_bytes = try std.Io.Dir.cwd().readFileAlloc(
+            harness_io,
+            ".models/hand_landmarker.task",
+            gpa,
+            .limited(16 << 20),
+        );
+        defer gpa.free(hand_task_bytes);
+        const hand_task = try bundle.Bundle.open(hand_task_bytes);
+        const palm_entry = try hand_task.find("hand_detector.tflite");
+        const hand_landmarks_entry = try hand_task.find("hand_landmarks_detector.tflite");
+        const palm_bytes = try hand_task.payload(gpa, palm_entry);
+        defer palm_bytes.deinit(gpa);
+        const hand_landmark_bytes = try hand_task.payload(gpa, hand_landmarks_entry);
+        defer hand_landmark_bytes.deinit(gpa);
+
+        var palm_engine = try runtime.Engine.init(palm_bytes.bytes, 2);
+        defer palm_engine.deinit();
+        var hand_landmarks_engine = try runtime.Engine.init(hand_landmark_bytes.bytes, 2);
+        defer hand_landmarks_engine.deinit();
+        try reportEngine("hand_detector", &palm_engine);
+        try reportEngine("hand_landmarks_detector", &hand_landmarks_engine);
+
+        var palm_dims: [8]i32 = undefined;
+        const palm_box_dims = try palm_engine.outputDims(0, &palm_dims);
+        if (palm_box_dims.len < 2) return error.UnexpectedModel;
+        const palm_total: usize = @intCast(palm_box_dims[1]);
+        const palm_side: u32 = blk: {
+            const tensor = runtime.c.TfLiteInterpreterGetInputTensor(palm_engine.interpreter, 0) orelse
+                return error.UnexpectedModel;
+            break :blk @intCast(runtime.c.TfLiteTensorDim(tensor, 1));
+        };
+        const palm_plan = detector.planForModel(palm_side, palm_total) orelse return error.UnexpectedModel;
+        const palm_anchors = try gpa.alloc(detector.Anchor, palm_total);
+        defer gpa.free(palm_anchors);
+        detector.generateAnchors(palm_side, palm_plan, palm_anchors);
+        const palm_tensor = try gpa.alloc(f32, @as(usize, palm_side) * palm_side * 3);
+        defer gpa.free(palm_tensor);
+        const hand_side: u32 = blk: {
+            const tensor = runtime.c.TfLiteInterpreterGetInputTensor(hand_landmarks_engine.interpreter, 0) orelse
+                return error.UnexpectedModel;
+            break :blk @intCast(runtime.c.TfLiteTensorDim(tensor, 1));
+        };
+        const hand_tensor = try gpa.alloc(f32, @as(usize, hand_side) * hand_side * 3);
+        defer gpa.free(hand_tensor);
+        const palm_candidates = try gpa.alloc(detector.palm.Detection, 16);
+        defer gpa.free(palm_candidates);
+
+        for ([_]struct { path: []const u8, hands: bool }{
+            .{ .path = ".models/corpus/hand_raised.jpg", .hands = true },
+            .{ .path = ".models/corpus/no_face_control.jpg", .hands = false },
+        }) |case| {
+            const corpus = try loadCorpusFrame(gpa, case.path);
+            defer corpus.deinit();
+            const image = corpus.frame;
+            const square = sampler.frameSquare(image.width, image.height);
+
+            // Zero-to-one input, the palm detector's own tensor range -
+            // not the face detector's symmetric range.
+            sampler.sampleRegion(image, square, .unit, palm_side, palm_tensor);
+            try palm_engine.writeInput(0, std.mem.sliceAsBytes(palm_tensor));
+            try palm_engine.invoke();
+            const palms = detector.palm.decode(
+                try palm_engine.outputFloats(0),
+                try palm_engine.outputFloats(1),
+                palm_anchors,
+                @floatFromInt(palm_side),
+                0.5,
+                palm_candidates,
+            );
+            try out.print("{s}: {d}x{d}, palm detections {d}\n", .{ case.path, image.width, image.height, palms.len });
+            try out.flush();
+            if (!case.hands) {
+                if (palms.len != 0) return 1;
+                continue;
+            }
+            if (palms.len == 0) return 1;
+
+            const crop = hand.regionFromDetection(palms[0], square);
+            sampler.sampleRegion(image, crop, .unit, hand_side, hand_tensor);
+            try hand_landmarks_engine.writeInput(0, std.mem.sliceAsBytes(hand_tensor));
+            try hand_landmarks_engine.invoke();
+            const hand_raw = (try hand_landmarks_engine.outputFloats(1))[0];
+            const hand_presence = if (hand_raw < 0.0 or hand_raw > 1.0)
+                1.0 / (1.0 + @exp(-hand_raw))
+            else
+                hand_raw;
+            const handedness_raw = (try hand_landmarks_engine.outputFloats(2))[0];
+            const handedness = if (handedness_raw < 0.0 or handedness_raw > 1.0)
+                1.0 / (1.0 + @exp(-handedness_raw))
+            else
+                handedness_raw;
+
+            var hand_landmarks: [hand.landmark_count]hand.Landmark = undefined;
+            hand.decodeLandmarks(try hand_landmarks_engine.outputFloats(0), crop, @floatFromInt(hand_side), &hand_landmarks);
+            var inside: usize = 0;
+            for (hand_landmarks) |landmark| {
+                const slack_x = @as(f32, @floatFromInt(image.width)) * 0.1;
+                const slack_y = @as(f32, @floatFromInt(image.height)) * 0.1;
+                if (landmark.x > -slack_x and landmark.x < @as(f32, @floatFromInt(image.width)) + slack_x and
+                    landmark.y > -slack_y and landmark.y < @as(f32, @floatFromInt(image.height)) + slack_y)
+                {
+                    inside += 1;
+                }
+            }
+            const finger_span = @abs(hand_landmarks[12].y - hand_landmarks[0].y);
+            try out.print(
+                "  hand presence {d:.3}, handedness {d:.3}, landmarks inside {d}/{d}, wrist-to-middle-tip {d:.0}px\n",
+                .{ hand_presence, handedness, inside, hand_landmarks.len, finger_span },
+            );
+            try out.flush();
+            if (hand_presence < 0.5) return 1;
+            if (inside != hand_landmarks.len) return 1;
+            if (finger_span < crop.side * 0.05) return 1;
+
+            // Tracking pass: the next crop comes from these landmarks
+            // alone, no detector run, and must keep the lock.
+            const refined = hand.regionFromLandmarks(&hand_landmarks);
+            sampler.sampleRegion(image, refined, .unit, hand_side, hand_tensor);
+            try hand_landmarks_engine.writeInput(0, std.mem.sliceAsBytes(hand_tensor));
+            try hand_landmarks_engine.invoke();
+            const tracked_raw = (try hand_landmarks_engine.outputFloats(1))[0];
+            const tracked_presence = if (tracked_raw < 0.0 or tracked_raw > 1.0)
+                1.0 / (1.0 + @exp(-tracked_raw))
+            else
+                tracked_raw;
+            try out.print("  hand tracking pass: presence {d:.3}\n", .{tracked_presence});
+            try out.flush();
+            if (tracked_presence < 0.5) return 1;
+        }
+
+        // The same frame through the public surface: enable, one
+        // track_frame, polled goss_session_hand_result.
+        const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+        defer abi.destroyEngine(engine);
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const enable_hand = abi.goss_session_enable_hand_tracking(session, hand_task_bytes.ptr, hand_task_bytes.len, 2);
+        if (enable_hand != .ok) {
+            try out.print("abi enable hand tracking: {s}\n", .{@tagName(enable_hand)});
+            try out.flush();
+            return 1;
+        }
+        const corpus = try loadCorpusFrame(gpa, ".models/corpus/hand_raised.jpg");
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = 2000,
+        };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2) != .ok) return 1;
+        var hand_result: hand.Result = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_hand_result(session, &hand_result) == .again) {
+            std.Thread.yield() catch {};
+            polls += 1;
+            if (polls > 100_000_000) {
+                try out.print("abi hand result: timed out\n", .{});
+                try out.flush();
+                return 1;
+            }
+        }
+        try out.print(
+            "abi hand surface: serial {d}, hands {d}, presence {d:.3}, timestamp {d}\n",
+            .{ hand_result.frame_serial, hand_result.hand_count, hand_result.hands[0].presence, hand_result.timestamp_us },
+        );
+        try out.flush();
+        if (hand_result.hand_count == 0) return 1;
+        if (hand_result.hands[0].presence < 0.5) return 1;
+        if (hand_result.timestamp_us != 2000) return 1;
+    }
+
     // The same portrait through the public surface: session, worker
     // thread, NV12 planes, polled result. This is the path an SDK runs.
     {
@@ -728,7 +910,11 @@ pub fn main(init_args: std.process.Init) !u8 {
         var composite_delta: u64 = 0;
         for (0..image.height) |row| {
             const row_bytes = base[row * stride ..][0 .. image.width * 4];
-            const cpu_row = out_b[row * image.width * 4 ..][0 .. image.width * 4];
+            // The composite blit vertically flips on egress, undoing the
+            // live path's flipped GPU ingest. This chain was fed through
+            // the CPU path, which ingests upright, so the composite is
+            // the CPU readback's vertical mirror - compare accordingly.
+            const cpu_row = out_b[(image.height - 1 - row) * image.width * 4 ..][0 .. image.width * 4];
             var col: usize = 0;
             while (col < image.width * 4) : (col += 4) {
                 // The shared surface is BGRA; gpupixel's CPU readback is RGBA.

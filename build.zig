@@ -604,6 +604,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "detector", .module = detector_module },
                 .{ .name = "sampler", .module = sampler_module },
                 .{ .name = "face", .module = face_module },
+                .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "tracker", .module = tracker_module },
                 .{ .name = "math", .module = math_module },
                 .{ .name = "abi", .module = abi_tracking_module },
