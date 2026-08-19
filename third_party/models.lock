@@ -25,6 +25,12 @@
             .license = "Apache-2.0",
         },
         .{
+            .name = "pose_landmarker_full.task",
+            .url = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+            .sha256 = "5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1",
+            .license = "Apache-2.0",
+        },
+        .{
             .name = "selfie_multiclass.tflite",
             .url = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
             .sha256 = "c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0",
@@ -52,6 +58,12 @@
             .name = "corpus/hand_raised.jpg",
             .url = "https://upload.wikimedia.org/wikipedia/commons/7/7c/FEMA_-_37092_-_FEMA_Deputy_Administrator_Johnson_is_sworn_in_at_DHS_Headquarter.jpg",
             .sha256 = "5a5be96a54bfa78f1ec3fe3d93318958c3945f5a4971c7a0aad2e26f00c664de",
+            .license = "Public-domain-US-government",
+        },
+        .{
+            .name = "corpus/body_standing.jpg",
+            .url = "https://upload.wikimedia.org/wikipedia/commons/e/e7/Schirra_with_hands_on_hips.jpg",
+            .sha256 = "d6f43830290d428125a885db5a1ba451ea8671d976487f8962ad0cab6c114421",
             .license = "Public-domain-US-government",
         },
         .{

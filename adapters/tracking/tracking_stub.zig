@@ -5,6 +5,7 @@
 const std = @import("std");
 const face = @import("face");
 const hand = @import("hand");
+const pose = @import("pose");
 const math = @import("math");
 
 pub const supported = false;
@@ -96,3 +97,47 @@ pub fn readResult(tracking: *Tracking, out: *face.Result) bool {
     _ = out;
     return false;
 }
+
+/// The pose worker's refusing twin, same surface as the real one.
+pub const pose_worker = struct {
+    pub const PoseTracking = struct {};
+
+    pub fn create(gpa: std.mem.Allocator, task_bytes: []const u8, threads: i32) CreateError!*PoseTracking {
+        _ = gpa;
+        _ = task_bytes;
+        _ = threads;
+        return error.Unsupported;
+    }
+
+    pub fn destroy(tracking: *PoseTracking) void {
+        _ = tracking;
+    }
+
+    pub fn submitNv12(
+        tracking: *PoseTracking,
+        width: u32,
+        height: u32,
+        timestamp_us: i64,
+        conversion: math.color.Conversion,
+        y: [*]const u8,
+        y_stride: u32,
+        uv: [*]const u8,
+        uv_stride: u32,
+    ) void {
+        _ = tracking;
+        _ = width;
+        _ = height;
+        _ = timestamp_us;
+        _ = conversion;
+        _ = y;
+        _ = y_stride;
+        _ = uv;
+        _ = uv_stride;
+    }
+
+    pub fn readResult(tracking: *PoseTracking, out: *pose.Result) bool {
+        _ = tracking;
+        _ = out;
+        return false;
+    }
+};
