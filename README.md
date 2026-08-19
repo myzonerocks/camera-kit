@@ -1,6 +1,6 @@
 # Gosslens
 
-An open camera and AR engine with a Zig core and three thin SDKs: Swift for
+A camera and AR engine with a Zig core and three thin SDKs: Swift for
 iOS, Kotlin for Android, TypeScript for the web. The core owns the frame
 graph, the lens runtime, the effect pipeline, tracking, and the portable
 media contract behind a single C ABI. The SDKs own capture, GPU surfaces,
@@ -8,8 +8,8 @@ native hardware media APIs, and platform tracking, and nothing else.
 
 The goal is the full surface a modern camera app expects — beauty and
 makeup, face/hand/body tracking, segmentation, world anchoring, scripted
-and physics-driven lenses, capture output — built in the open, on device,
-with no lock-in. The build order lives in [docs/ROADMAP.md](docs/ROADMAP.md).
+and physics-driven lenses, capture output — on device, with no lock-in.
+The build order lives in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Everything runs on device. The core makes no network calls and carries no
 analytics. A camera frame never leaves the process.

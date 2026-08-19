@@ -4,10 +4,9 @@ Gosslens is one Zig camera engine with three thin SDKs: Swift for iOS,
 Kotlin for Android, TypeScript for the web. The core owns portable engine
 behavior. Platform code owns only what the platform has to own.
 
-It is built in the open as a full camera and AR engine: camera
-manipulation, face/hand/body understanding, segmentation, world anchoring,
-physics-driven and scripted lens content, and a portable media rail, all
-behind one frozen C ABI. Capability growth reuses the rails below — the
+It is a full camera and AR engine: camera manipulation, face/hand/body
+understanding, segmentation, world anchoring, physics-driven and scripted
+lens content, and a portable media rail, all behind one frozen C ABI. Capability growth reuses the rails below — the
 tracking module's model path, the lens format's nodes and triggers, the
 bgfx graph — so a new capability is a new model or node on an existing
 seam, not new machinery.
