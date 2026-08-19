@@ -178,11 +178,15 @@ deeper fails validation closed.
 ### 6.2 Actions
 
 `param_ramp` (animate a parameter to a target over a duration, one of the
-curve primitives in 6.3), `param_set` (immediate), `show` / `hide` (a node
-by id), `play_animation` (a named glTF animation clip), `swap_subgraph`
-(splice a different set of this lens's own nodes in place of a named
-group — still edit-time, deferred to the next frame boundary so it never
-tears a frame), `reset_timer` (name a timer signal back to zero).
+curve primitives in 6.3), `param_set` (immediate), `play_animation` (a
+named glTF animation clip), `reset_timer` (name a timer signal back to
+zero). Reserved, accepted by the validator but not yet executed by the
+runtime: `show` / `hide` (a node by id) and `swap_subgraph` (splice a
+different set of this lens's own nodes in place of a named group —
+edit-time, deferred to the next frame boundary so it never tears a
+frame). A 1.0 runtime treats the reserved actions as no-ops; a lens
+must not depend on them until a spec revision moves them out of this
+paragraph.
 
 ### 6.3 Parameter animation
 
@@ -253,12 +257,14 @@ never through code.**
 ## 9. Conformance
 
 A lens exercises exactly one distinct capability class per the reference
-set (`lenses/reference/`): beauty-baseline (capabilities: face; the beauty
-node type), face-mask (capabilities: face; a glTF model anchored to
-landmarks), background-swap (capabilities: segmentation), trigger-anim
+set (`lenses/reference/`). Shipped today: shader-tint (no capabilities; a
+plain shader pass), beauty-baseline (capabilities: face; the beauty node
+type), background-swap (capabilities: segmentation), trigger-anim
 (capabilities: none required; a timer-driven trigger playing a glTF
-animation clip, proving 6.2/6.3 without needing a live face), world-anchor
-(capabilities: world). Each reference lens runs through the conformance
+animation clip, proving 6.2/6.3 without needing a live face). Planned to
+complete the set: face-mask (capabilities: face; a glTF model anchored
+to landmarks, blocked on head-pose estimation) and world-anchor
+(capabilities: world, blocked on the world-tracking seam). Each reference lens runs through the conformance
 harness on all three platforms and is asserted bit-stable per platform
 (pixel output) and value-stable across platforms for anything
 resolution-independent (trigger fire timing, parameter curve values at

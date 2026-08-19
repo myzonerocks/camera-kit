@@ -117,7 +117,9 @@ file must move together.
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_abi_version` | `Gosslens.abiVersion()` | all SDKs |
-| `goss_color_yuv_to_rgb` | `Gosslens.yuvToRgb(y, u, v)` | all SDKs |
+| `goss_color_yuv_to_rgb` | `Gosslens.yuvToRgb(colorStandard, colorRange)`, returning the conversion matrix | all SDKs |
+| `goss_alloc` | ABI buffer plumbing for the wasm boundary; no public SDK operation | web internal |
+| `goss_free` | ABI buffer plumbing for the wasm boundary; no public SDK operation | web internal |
 
 ### Engine
 
@@ -134,13 +136,13 @@ file must move together.
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_engine_request_screenshot` | `requestScreenshot(path)` | debug/test where supported |
-| `goss_engine_capture_frame` | `captureFrame()` | supported SDKs |
+| `goss_engine_capture_frame` | `captureFrame()`, returning pixels plus the renderer's real width and height | supported SDKs |
 
 ### Session lifecycle
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_create` | `Session.create(engine)` | all SDKs |
+| `goss_session_create` | `Session.create(engine, config)` | all SDKs |
 | `goss_session_destroy` | `destroy()`; Kotlin may use `close()` | all SDKs |
 
 ### Frame submission
@@ -148,9 +150,9 @@ file must move together.
 | ABI function | Public operation | Scope |
 |---|---|---|
 | `goss_session_submit_frame` | `submitFrame(desc, planes)` | native zero-copy-capable SDKs |
-| `goss_session_submit_frame_copy` | `submitFrameCopy(y, yStride, uv, uvStride, width, height, rotationDegrees, mirrored, timestampUs)` | platforms that expose this copy path |
+| `goss_session_submit_frame_copy` | `submitFrameCopy(y, yStride, uv, uvStride, width, height, rotationDegrees, mirrored, colorStandard, colorRange, timestampUs)` | platforms that expose this copy path |
 | `goss_session_submit_hardware_buffer` | `submitHardwareBuffer(buffer, width, height, rotationDegrees, mirrored, timestampUs)` | Android |
-| `goss_session_submit_frame_rgba_copy` | `submitFrameRgbaCopy(rgba, width, height, mirror)` | Web |
+| `goss_session_submit_frame_rgba_copy` | `submitFrameRgbaCopy(rgba, stride, width, height, pixelFormat, rotationDegrees, mirrored, timestampUs)` | copy-path SDKs |
 
 ### Events and degradation
 
@@ -167,7 +169,7 @@ file must move together.
 | `goss_session_disable_face_tracking` | `disableFaceTracking()` | native tracking path |
 | `goss_session_track_frame` | `trackFrame(y, yStride, uv, uvStride, width, height, timestampUs)` | native tracking path |
 | `goss_session_face_result` | `faceResult(result)` | native tracking path |
-| `goss_session_set_face_landmarks` | `setFaceLandmarks(landmarks, sourceWidth, sourceHeight)` | Web analysis-producer path |
+| `goss_session_set_face_landmarks` | `setFaceLandmarks(points)` | Web analysis-producer path |
 
 ### Segmentation
 
@@ -194,8 +196,8 @@ complete parameter list.**
 | convenience | `setBigEye(amount)` | supported SDKs |
 | convenience | `setLipstick(amount)` | supported SDKs |
 | convenience | `setBlush(amount)` | supported SDKs |
-| `goss_session_set_beauty_lut` | `setBeautyLut(lutData)` | Web ABI path; `loadWhitenLuts(url)` may exist as I/O sugar |
-| `goss_session_set_beauty_makeup_texture` | `setBeautyMakeupTexture(kind, textureData)` | Web ABI path; `loadMakeupTextures(url)` may exist as I/O sugar |
+| `goss_session_set_beauty_lut` | `setBeautyLut(slot, rgba, width, height)` | Web ABI path; `loadWhitenLuts(url)` may exist as I/O sugar |
+| `goss_session_set_beauty_makeup_texture` | `setBeautyMakeupTexture(effect, rgba, width, height)` | Web ABI path; `loadMakeupTextures(url)` may exist as I/O sugar |
 | `goss_session_beautify_frame` | `beautifyFrame(rgbaIn, rgbaOut, width, height)` | supported SDKs |
 
 ### LensRegistry

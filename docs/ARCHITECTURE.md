@@ -27,7 +27,7 @@ into a cleaner-looking tree for its own sake.
       beauty/                   GPUPixel and beauty interop
       bgfx/                     rendering backend and shader plumbing
       gltf/                     cgltf asset loading
-      image/                    image operations; libyuv lives here
+      image/                    image operations; libyuv's planned home
       tracking/                 tracking/inference vendor boundary
       media/                    portable codec/container backends; additive
 
@@ -88,9 +88,10 @@ CPU materialization is a fallback:
 
     camera/native buffer -> adapters/image -> libyuv -> CPU consumer
 
-libyuv is the single CPU image-conversion authority. CPU YUV/RGB conversion,
-scaling, and rotation go through the existing `adapters/image/` boundary. Code
-must not grow a second private converter in tracking, media, capture, or an SDK.
+libyuv, once vendored as part of the media rail, is the single CPU
+image-conversion authority. CPU YUV/RGB conversion, scaling, and rotation go
+through the existing `adapters/image/` boundary. Code must not grow a second
+private converter in tracking, media, capture, or an SDK.
 "Central" means one CPU conversion path. It does not mean every frame is copied
 through libyuv.
 
@@ -121,6 +122,13 @@ Allowed without a separate policy change:
 - Zlib
 - an explicitly approved permissive equivalent with substantially the same
   proprietary-use posture
+
+Explicitly approved exceptions, recorded per component under `third_party/`
+and enforced by the vendor sync's license check: Eigen under MPL-2.0
+(file-level copyleft on Eigen's own files only, consumed unmodified),
+fft2d under the Ooura permission notice, and the Emscripten Python
+runtime under PSF-2.0. Each was reviewed against the proprietary-use
+posture above; an exception here never widens the general allowlist.
 
 Blocked:
 
