@@ -144,7 +144,7 @@ pub const Renderer = struct {
         return .{};
     }
 
-    pub fn submitPreview(r: *Renderer, view_id: u8, preview: PreviewFrame, rotation_degrees: u32, mirror: bool) void {
+    pub fn submitPreview(r: *Renderer, view_id: u16, preview: PreviewFrame, rotation_degrees: u32, mirror: bool) void {
         _ = r;
         _ = view_id;
         _ = preview;
@@ -152,21 +152,21 @@ pub const Renderer = struct {
         _ = mirror;
     }
 
-    pub fn submitShaderPass(r: *Renderer, view_id: u8, program: ProgramHandle, input_texture: TextureHandle) void {
+    pub fn submitShaderPass(r: *Renderer, view_id: u16, program: ProgramHandle, input_texture: TextureHandle) void {
         _ = r;
         _ = view_id;
         _ = program;
         _ = input_texture;
     }
 
-    pub fn submitLutPass(r: *Renderer, view_id: u8, input_texture: TextureHandle, lut_texture: TextureHandle) void {
+    pub fn submitLutPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, lut_texture: TextureHandle) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = lut_texture;
     }
 
-    pub fn submitBlendPass(r: *Renderer, view_id: u8, input_texture: TextureHandle, background_texture: TextureHandle, mask_texture: TextureHandle) void {
+    pub fn submitBlendPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, background_texture: TextureHandle, mask_texture: TextureHandle) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
@@ -174,14 +174,14 @@ pub const Renderer = struct {
         _ = mask_texture;
     }
 
-    pub fn submitBlurPass(r: *Renderer, view_id: u8, input_texture: TextureHandle, step: [2]f32) void {
+    pub fn submitBlurPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, step: [2]f32) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
         _ = step;
     }
 
-    pub fn submitBeautyFace(r: *Renderer, view_id: u8, input_texture: TextureHandle, mean_texture: TextureHandle, lookup_gray: TextureHandle, lookup_origin: TextureHandle, lookup_skin: TextureHandle, lookup_custom: TextureHandle, smooth_amount: f32, whiten_amount: f32) void {
+    pub fn submitBeautyFace(r: *Renderer, view_id: u16, input_texture: TextureHandle, mean_texture: TextureHandle, lookup_gray: TextureHandle, lookup_origin: TextureHandle, lookup_skin: TextureHandle, lookup_custom: TextureHandle, smooth_amount: f32, whiten_amount: f32) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
@@ -194,7 +194,7 @@ pub const Renderer = struct {
         _ = whiten_amount;
     }
 
-    pub fn submitBeautyReshape(r: *Renderer, view_id: u8, input_texture: TextureHandle, face_points: *const [face_point_vec4_count * 4]f32, aspect_ratio: f32, thin_face_amount: f32, big_eye_amount: f32) void {
+    pub fn submitBeautyReshape(r: *Renderer, view_id: u16, input_texture: TextureHandle, face_points: *const [face_point_vec4_count * 4]f32, aspect_ratio: f32, thin_face_amount: f32, big_eye_amount: f32) void {
         _ = r;
         _ = view_id;
         _ = input_texture;
@@ -204,11 +204,11 @@ pub const Renderer = struct {
         _ = big_eye_amount;
     }
 
-    // 111 tracked points, two floats each - face_mesh.canonical_uv.len
+    // 111 tracked points, two floats each - makeup_mesh.canonical_uv.len
     // in the real module, mirrored as a literal here rather than
-    // importing face_mesh into a stub that otherwise has zero
+    // importing makeup_mesh into a stub that otherwise has zero
     // dependencies of its own.
-    pub fn submitMakeup(r: *Renderer, view_id: u8, background_texture: TextureHandle, makeup_texture: TextureHandle, uv_buffer: VertexBufferHandle, positions: *const [222]f32, intensity: f32) void {
+    pub fn submitMakeup(r: *Renderer, view_id: u16, background_texture: TextureHandle, makeup_texture: TextureHandle, uv_buffer: VertexBufferHandle, positions: *const [222]f32, intensity: f32) void {
         _ = r;
         _ = view_id;
         _ = background_texture;
@@ -364,7 +364,7 @@ pub const Renderer = struct {
         return error.RendererUnavailable;
     }
 
-    pub fn setViewTarget(view_id: u8, target: ?OffscreenTarget, width: u16, height: u16) void {
+    pub fn setViewTarget(view_id: u16, target: ?OffscreenTarget, width: u16, height: u16) void {
         _ = view_id;
         _ = target;
         _ = width;

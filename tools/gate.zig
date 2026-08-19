@@ -84,16 +84,16 @@ const banned_tokens = [_][]const u8{
 
 // A comment states what the code does and why; it never narrates the
 // investigation that led here (what was checked, how confident the
-// author is, when it happened) or cites another tracked document by
-// name. These markers catch that shape on added comment lines - this
-// project's own recurring mistake, not a hypothetical.
+// author is, when it happened) or cites a planning document. These
+// markers catch that shape on added comment lines - this project's own
+// recurring mistake, not a hypothetical. Local-only material is caught
+// by its directory, never by enumerating its filenames here.
 const verbose_comment_markers = [_][]const u8{
-    "verified",       "confirmed",       "not assumed",
-    "found that",     "found a real",    "real finding",
-    "real question",  "real, proven",    "real and proven",
-    "owner-directed", "owner-ordered",   "DECISIONS.md",
-    "SPEC.md",        "ENGINEERING.md",  "COMPLETION-BAR.md",
-    "No-Gated-On-You", "DEFERRAL-LOOPHOLES", "API-CONFORMANCE.md",
+    "verified",       "confirmed",     "not assumed",
+    "found that",     "found a real",  "real finding",
+    "real question",  "real, proven",  "real and proven",
+    "owner-directed", "owner-ordered", "SPEC.md",
+    "docs/private",
 };
 
 // A comment explains the one thing a reader can't already see; it is
@@ -482,8 +482,10 @@ fn isGeneratedWrapperScript(path: []const u8) bool {
 
 // Markdown is prose, not source - its `#` headings and `*` bullets look
 // like comment syntax to this scanner but are the document itself.
+// Patch files carry verbatim upstream diff content, not authored
+// comments, so they get the same pass.
 fn isProseFile(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".md");
+    return std.mem.endsWith(u8, path, ".md") or std.mem.endsWith(u8, path, ".patch");
 }
 
 // A `#`-led line that is real C/ObjC code (#define, #include, #if...),
@@ -504,9 +506,14 @@ fn isPreprocessorDirective(trimmed: []const u8) bool {
 
 fn isCommentLine(line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t");
+    // A `*` line is a block-comment continuation only when the star
+    // stands alone or is followed by a space or `/` - a pointer store
+    // like `*ptr = x;` is code, not commentary.
+    const star_continuation = std.mem.startsWith(u8, trimmed, "*") and
+        (trimmed.len == 1 or trimmed[1] == ' ' or trimmed[1] == '/');
     return std.mem.startsWith(u8, trimmed, "//") or
         std.mem.startsWith(u8, trimmed, "///") or
-        std.mem.startsWith(u8, trimmed, "*") or
+        star_continuation or
         (std.mem.startsWith(u8, trimmed, "#") and !isPreprocessorDirective(trimmed));
 }
 
@@ -613,6 +620,12 @@ test "comment lines are recognized across languages" {
     try std.testing.expect(isCommentLine("/// a doc comment"));
     try std.testing.expect(isCommentLine("  # a shell comment"));
     try std.testing.expect(!isCommentLine("    const x = 1;"));
+    // A block-comment continuation is a star alone or star-space; a
+    // pointer store is code.
+    try std.testing.expect(isCommentLine(" * continuation text"));
+    try std.testing.expect(isCommentLine(" */"));
+    try std.testing.expect(!isCommentLine("*previous_program = 0;"));
+    try std.testing.expect(!isCommentLine("  *ptr += 1;"));
 }
 
 test "preprocessor directives are not comments, even though they share a shell comment's # marker" {
@@ -632,16 +645,17 @@ test "generated wrapper scripts are recognized, hand-written scripts are not" {
     try std.testing.expect(!isGeneratedWrapperScript("sdk/kotlin/demo/prove-emulator.sh"));
 }
 
-test "markdown is prose, source is not" {
+test "markdown and patches are prose, source is not" {
     try std.testing.expect(isProseFile("NOTICE.md"));
     try std.testing.expect(isProseFile("docs/API.md"));
+    try std.testing.expect(isProseFile("third_party/bgfx/patches/0001-webgpu-timer-query-noop.patch"));
     try std.testing.expect(!isProseFile("core/abi/abi.zig"));
     try std.testing.expect(!isProseFile("adapters/beauty/beauty_shim.cc"));
 }
 
 test "verbose comment markers are caught, plain ones are not" {
     try std.testing.expect(findVerboseMarker("// verified this is correct") != null);
-    try std.testing.expect(findVerboseMarker("// see DECISIONS.md for context") != null);
+    try std.testing.expect(findVerboseMarker("// see docs/private/notes.md for context") != null);
     try std.testing.expect(findVerboseMarker("// found 2026-08-17 that this works") != null);
     try std.testing.expect(findVerboseMarker("// converts YUV to RGB via a fixed matrix") == null);
 }

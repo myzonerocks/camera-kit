@@ -1976,8 +1976,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
     if (s.active_lens == null) return .again;
-    const effects = runtime.tick(&s.active_lens.?, s.engine.gpa, dt_us, toTriggerSignals(sig)) catch return .out_of_memory;
-    defer s.engine.gpa.free(effects);
+    // Borrowed from the lens's own activation-sized storage, valid
+    // until the next tick - nothing to free, nothing allocated.
+    const effects = runtime.tick(&s.active_lens.?, dt_us, toTriggerSignals(sig));
     applyLensEffects(s, effects);
     return .ok;
 }

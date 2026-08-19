@@ -226,6 +226,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     harness_io = init_args.io;
     const gpa = init_args.gpa;
 
+    // Screenshots land under zig-out/, which a clean checkout does not
+    // have until the first install step runs.
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out");
+
     // Parse the asset through the same adapter a lens bundle uses.
     const glb = try buildTexturedQuadGlb(gpa);
     defer gpa.free(glb);
