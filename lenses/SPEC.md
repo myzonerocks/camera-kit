@@ -138,8 +138,8 @@ compose the runtime's built-in ones (capture input, beauty filters, shader
 passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing).
 Splice happens once, at lens activation, not per frame; unsplice reverses
 it exactly, freeing every resource the splice allocated. Both are edit-time
-operations on the graph's edit-time API (Part 3 of the engineering brief),
-never touching the frame-time path.
+operations on the graph's edit-time API, never touching the frame-time
+path.
 
 ## 6. Triggers
 
@@ -210,13 +210,22 @@ shared by every lens shader pass: `a_position`/`a_texcoord0` in,
 fragment shader is GLSL source written to that contract (bgfx's shader
 dialect: `$input v_texcoord0`, `#include <bgfx_shader.sh>`).
 
+A `shader.pass` node may also name a segmentation mask channel with a
+`mask` field: `person`, `background`, `hair`, `body_skin`, `face_skin`,
+`clothes`, or `others`. The shader then reads it through
+`SAMPLER2D(s_texMask, 2)` beside the frame's own `s_texColor`. When the
+running session cannot provide the channel — segmentation disabled, or a
+single-class model without it — the sampler serves the all-foreground
+default, the same degradation rule every capability follows. An unknown
+channel name fails validation.
+
 Compilation happens at package time, not on the device: the engine's pinned
 shader toolchain runs wherever a bundle is built or validated, producing
 compiled bytecode for every platform profile a conforming runtime ships
 (Metal / SPIR-V / ESSL), under the same resource limits the engine's own
-shaders compile under (Part 1.4/14 of the engineering history — bounded
-compile time, no toolchain escape hatches, compiler diagnostics surfaced
-as validation errors naming the source file and line). A shader that
+shaders compile under — bounded compile time, no toolchain escape
+hatches, compiler diagnostics surfaced as validation errors naming the
+source file and line. A shader that
 fails to compile fails the bundle's validation; there is no partial
 lens. The runtime never compiles GLSL — it loads whichever precompiled
 profile matches its own active graphics backend and hands the bytes
@@ -259,7 +268,8 @@ never through code.**
 
 A lens exercises exactly one distinct capability class per the reference
 set (`lenses/reference/`). Shipped today: shader-tint (no capabilities; a
-plain shader pass), beauty-baseline (capabilities: face; the beauty node
+plain shader pass), hair-recolor (capabilities: segmentation; a shader
+pass reading the hair mask channel), beauty-baseline (capabilities: face; the beauty node
 type), background-swap (capabilities: segmentation), trigger-anim
 (capabilities: none required; a timer-driven trigger playing a glTF
 animation clip, proving 6.2/6.3 without needing a live face). Planned to
