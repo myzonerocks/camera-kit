@@ -168,6 +168,12 @@ pub const Lens = struct {
     /// reads, not a value a trigger's action starts).
     timer_names: [][]u8,
     timer_elapsed_us: []u64,
+    /// tick()'s working and output storage, sized once at activation so
+    /// the per-frame path allocates nothing: timer snapshot, per-param
+    /// touch flags, and room for every parameter-bound effect at once.
+    tick_timer_values: []trigger.TimerValue,
+    tick_touched: []bool,
+    tick_applied: []AppliedEffect,
 
     pub fn deinit(self: *Lens, g: *graph.Graph) void {
         for (self.nodes) |n| g.removeNode(n.graph_index);
@@ -180,6 +186,9 @@ pub const Lens = struct {
         for (self.timer_names) |name| self.gpa.free(name);
         self.gpa.free(self.timer_names);
         self.gpa.free(self.timer_elapsed_us);
+        self.gpa.free(self.tick_timer_values);
+        self.gpa.free(self.tick_touched);
+        self.gpa.free(self.tick_applied);
         self.manifest.deinit();
         self.* = undefined;
     }
@@ -431,6 +440,20 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     errdefer gpa.free(timer_elapsed_us);
     @memset(timer_elapsed_us, 0);
 
+    const tick_timer_values = try gpa.alloc(trigger.TimerValue, timer_names.items.len);
+    errdefer gpa.free(tick_timer_values);
+    const tick_touched = try gpa.alloc(bool, param_values.len);
+    errdefer gpa.free(tick_touched);
+    var bound_count: usize = 0;
+    for (nodes) |node| {
+        for (node.bindings) |binding| {
+            const source = binding orelse continue;
+            if (source == .parameter) bound_count += 1;
+        }
+    }
+    const tick_applied = try gpa.alloc(AppliedEffect, bound_count);
+    errdefer gpa.free(tick_applied);
+
     return .{
         .gpa = gpa,
         .manifest = lens_manifest,
@@ -441,6 +464,9 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .nodes = nodes,
         .timer_names = try timer_names.toOwnedSlice(gpa),
         .timer_elapsed_us = timer_elapsed_us,
+        .tick_timer_values = tick_timer_values,
+        .tick_touched = tick_touched,
+        .tick_applied = tick_applied,
     };
 }
 
@@ -497,18 +523,15 @@ fn clampToParam(p: manifest.Parameter, value: f32) f32 {
 /// starting value until the next tick. show/hide/swap_subgraph are
 /// still not wired to anything (real remaining work, tracked
 /// separately from this lens's own scope).
-pub fn tick(lens: *Lens, gpa: std.mem.Allocator, real_dt_us: u32, signals: trigger.Signals) std.mem.Allocator.Error![]AppliedEffect {
+pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const AppliedEffect {
     for (lens.timer_elapsed_us) |*elapsed| elapsed.* += real_dt_us;
-    const timer_values = try gpa.alloc(trigger.TimerValue, lens.timer_names.len);
-    defer gpa.free(timer_values);
     for (lens.timer_names, lens.timer_elapsed_us, 0..) |name, elapsed_us, i| {
-        timer_values[i] = .{ .name = name, .seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0 };
+        lens.tick_timer_values[i] = .{ .name = name, .seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0 };
     }
     var live_signals = signals;
-    live_signals.timers = timer_values;
+    live_signals.timers = lens.tick_timer_values;
 
-    var touched_params = try gpa.alloc(bool, lens.param_values.len);
-    defer gpa.free(touched_params);
+    const touched_params = lens.tick_touched;
     @memset(touched_params, false);
 
     for (lens.compiled_triggers, 0..) |*expr, i| {
@@ -532,16 +555,18 @@ pub fn tick(lens: *Lens, gpa: std.mem.Allocator, real_dt_us: u32, signals: trigg
         if (node.model_elapsed_us) |*elapsed| elapsed.* += real_dt_us;
     }
 
-    var out: std.ArrayList(AppliedEffect) = .empty;
-    errdefer out.deinit(gpa);
+    // Borrowed from the lens's own activation-sized storage, valid until
+    // the next tick - the frame path allocates nothing.
+    var count: usize = 0;
     for (lens.nodes) |node| {
         for (node.bindings, 0..) |binding, slot| {
             const source = binding orelse continue;
             if (source != .parameter or !touched_params[source.parameter]) continue;
-            try out.append(gpa, .{ .effect = @enumFromInt(slot), .value = lens.param_values[source.parameter] });
+            lens.tick_applied[count] = .{ .effect = @enumFromInt(slot), .value = lens.param_values[source.parameter] };
+            count += 1;
         }
     }
-    return out.toOwnedSlice(gpa);
+    return lens.tick_applied[0..count];
 }
 
 fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) void {
@@ -891,28 +916,28 @@ test "a trigger firing on the rising edge starts a ramp that settles, does not r
 
     // Rising edge: the ramp starts and gets its first real advance
     // within this same tick, landing strictly between start and target.
-    const first = try tick(&lens, t.allocator, animation.fixed_step_us, signals_open);
-    defer t.allocator.free(first);
+    // Copy values out before the next tick - the returned slice borrows
+    // the lens's own storage and the next call overwrites it.
+    const first = tick(&lens, animation.fixed_step_us, signals_open);
     try t.expectEqual(@as(usize, 1), first.len);
-    try t.expect(first[0].value > 0.0 and first[0].value < 1.0);
+    const first_value = first[0].value;
+    try t.expect(first_value > 0.0 and first_value < 1.0);
     try t.expect(lens.trigger_was_true[0]);
 
     // Still true: does not refire - a level-triggered restart would
     // reset the ramp's progress back toward the start every frame.
-    const second = try tick(&lens, t.allocator, animation.fixed_step_us, signals_open);
-    defer t.allocator.free(second);
-    try t.expect(second[0].value > first[0].value);
+    const second = tick(&lens, animation.fixed_step_us, signals_open);
+    try t.expect(second[0].value > first_value);
 
     // Enough further ticks for the 200ms linear ramp to fully settle.
     var settle: usize = 0;
     while (settle < 40) : (settle += 1) {
-        const drained = try tick(&lens, t.allocator, animation.fixed_step_us, signals_open);
-        t.allocator.free(drained);
+        _ = tick(&lens, animation.fixed_step_us, signals_open);
     }
     try t.expectEqual(@as(f32, 1.0), lens.param_values[0]);
     try t.expect(lens.ramps[0] == null);
 
     // Falling edge resets the trigger's own state, ready to fire again.
-    _ = try tick(&lens, t.allocator, animation.fixed_step_us, signals_closed);
+    _ = tick(&lens, animation.fixed_step_us, signals_closed);
     try t.expect(!lens.trigger_was_true[0]);
 }
