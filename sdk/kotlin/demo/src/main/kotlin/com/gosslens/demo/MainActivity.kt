@@ -296,7 +296,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                                     hardwareBuffer,
                                     width, height,
                                     rotationDegrees, mirrorPreview,
-                                    timestampUs,
+                                    timestampUs = timestampUs,
                                 )
                                 hardwareBuffer.close()
                                 if (submitted) {
@@ -381,7 +381,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                                 ySubmit, yStride, uvSubmit, uvStride,
                                 width, height,
                                 rotationDegrees, mirrored = mirrorPreview,
-                                timestampUs,
+                                timestampUs = timestampUs,
                             )
                             pendingCopySubmits.decrementAndGet()
                             if (submitted) {
@@ -394,7 +394,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                     session.trackFrame(
                         yCopy, y.rowStride, uvCopy, uvStride,
                         it.width, it.height,
-                        it.imageInfo.timestamp / 1000,
+                        timestampUs = it.imageInfo.timestamp / 1000,
                     )
                 }
             }

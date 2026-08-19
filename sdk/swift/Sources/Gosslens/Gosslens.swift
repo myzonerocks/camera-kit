@@ -11,10 +11,10 @@ public enum Gosslens {
 
     /// Any-thread, pure. The YCbCr to RGB conversion for a standard and
     /// range as one column-major homogeneous matrix.
-    public static func yuvToRgb(standard: UInt32, range: UInt32) throws -> [Float] {
+    public static func yuvToRgb(colorStandard: ColorStandard, colorRange: ColorRange) throws -> [Float] {
         var matrix = [Float](repeating: 0, count: 16)
         try matrix.withUnsafeMutableBufferPointer { buffer in
-            try checked(goss_color_yuv_to_rgb(standard, range, buffer.baseAddress))
+            try checked(goss_color_yuv_to_rgb(colorStandard.rawValue, colorRange.rawValue, buffer.baseAddress))
         }
         return matrix
     }

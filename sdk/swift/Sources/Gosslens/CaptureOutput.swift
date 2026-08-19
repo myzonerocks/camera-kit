@@ -13,14 +13,16 @@ extension Engine {
     }
 
     /// Debug/test tooling only. Renders and presents like renderFrame,
-    /// and reads the composited output back as RGBA8, row 0 first.
-    public func captureFrame(session: Session?, width: UInt32, height: UInt32) throws -> [UInt8] {
+    /// and reads the composited output back as RGBA8, row 0 first, at
+    /// the renderer's real dimensions - the returned width and height,
+    /// which the caller's requested size only bounds.
+    public func captureFrame(session: Session?, width: UInt32, height: UInt32) throws -> (pixels: [UInt8], width: UInt32, height: UInt32) {
         var data = [UInt8](repeating: 0, count: Int(width) * Int(height) * 4)
         var outWidth: UInt32 = 0
         var outHeight: UInt32 = 0
         try data.withUnsafeMutableBufferPointer { buffer in
             try checked(goss_engine_capture_frame(handle, session?.handle, buffer.baseAddress, buffer.count, &outWidth, &outHeight))
         }
-        return data
+        return (data, outWidth, outHeight)
     }
 }

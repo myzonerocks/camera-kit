@@ -9,6 +9,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import com.gosslens.Engine
+import com.gosslens.Gosslens
 import com.gosslens.Session
 
 // Mirrors harness/conformance.zig's own determinism check (the same
@@ -166,7 +167,9 @@ object ConformanceRunner {
                 val submitted = session.submitFrameCopy(
                     yBuffer, corpus.width, uvBuffer, uvStride,
                     corpus.width, corpus.height,
-                    rotationDegrees = 0, mirrored = false, timestampUs = 1000,
+                    rotationDegrees = 0, mirrored = false,
+                    colorStandard = Gosslens.COLOR_BT601, colorRange = Gosslens.RANGE_FULL,
+                    timestampUs = 1000,
                 )
                 if (!submitted) return null
 

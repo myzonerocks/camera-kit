@@ -296,12 +296,12 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
               let uvTexture = CVMetalTextureGetTexture(uvRef)
         else { return }
 
-        var standard: UInt32 = GOSS_COLOR_BT709.rawValue
+        var standard: ColorStandard = .bt709
         if let matrix = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String {
             if matrix == (kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String) {
-                standard = GOSS_COLOR_BT601.rawValue
+                standard = .bt601
             } else if matrix == (kCVImageBufferYCbCrMatrix_ITU_R_2020 as String) {
-                standard = GOSS_COLOR_BT2020.rawValue
+                standard = .bt2020
             }
         }
 
@@ -316,7 +316,8 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         // retainedFrames on a successful submit.
         DispatchQueue.main.async { [weak self, session, pixelBuffer, yRef, uvRef] in
             guard let self else { return }
-            if (try? session.submitFrame(planes: [yPlane, uvPlane], width: UInt32(width), height: UInt32(height), pixelFormat: GOSS_PIXEL_NV12.rawValue, colorStandard: standard, rotationDegrees: rotationDegrees, mirrored: self.mirrored, timestampUs: timestampUs)) != nil {
+            let desc = FrameDesc(width: UInt32(width), height: UInt32(height), pixelFormat: .nv12, colorStandard: standard, rotationDegrees: rotationDegrees, mirrored: self.mirrored, timestampUs: timestampUs)
+            if (try? session.submitFrame(desc: desc, planes: [yPlane, uvPlane])) != nil {
                 self.submittedFrames += 1
                 self.frameWidth = width
                 self.frameHeight = height

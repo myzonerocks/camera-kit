@@ -47,8 +47,8 @@ enum ConformanceRunner {
             report("GOSSCONFORMANCE FAIL: corpus frame missing or undecodable")
             return
         }
-        let pathA = NSTemporaryDirectory() + "ckconformance-a"
-        let pathB = NSTemporaryDirectory() + "ckconformance-b"
+        let pathA = NSTemporaryDirectory() + "gossconformance-a"
+        let pathB = NSTemporaryDirectory() + "gossconformance-b"
         guard let hashA = renderOnce(metalLayer: metalLayer, width: width, height: height, corpus: corpus, outPath: pathA) else {
             report("GOSSCONFORMANCE FAIL: first render failed")
             return
@@ -172,8 +172,8 @@ enum ConformanceRunner {
                     y: yBuf.baseAddress!, yStride: corpus.width,
                     uv: uvBuf.baseAddress!, uvStride: uvStride,
                     width: corpus.width, height: corpus.height,
-                    rotationDegrees: 0, mirrored: false, timestampUs: 1000,
-                    colorStandard: GOSS_COLOR_BT601.rawValue, colorRange: GOSS_COLOR_RANGE_FULL.rawValue
+                    rotationDegrees: 0, mirrored: false,
+                    colorStandard: .bt601, colorRange: .full, timestampUs: 1000
                 )
             }
         }

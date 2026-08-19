@@ -10,19 +10,9 @@ public struct SessionConfig {
     }
 }
 
-private func frameDesc(width: UInt32, height: UInt32, pixelFormat: UInt32, colorStandard: UInt32, colorRange: UInt32, rotationDegrees: UInt32, mirrored: Bool, timestampUs: Int64) -> goss_frame_desc {
-    var flags = (rotationDegrees / 90) << GOSS_FRAME_ROTATION_SHIFT
-    if mirrored { flags |= GOSS_FRAME_FLAG_MIRROR }
-    return goss_frame_desc(
-        width: width, height: height,
-        pixel_format: pixelFormat, color_standard: colorStandard, color_range: colorRange,
-        flags: flags, timestamp_us: timestampUs
-    )
-}
-
-/// Per-preview runtime: frame submission, beauty, tracking, segmentation,
-/// telemetry. Confined to the graph thread, same as Engine - unchecked
-/// for the same reason (see Engine's own note).
+/// Per-preview runtime: frame submission, beauty, tracking, telemetry.
+/// Confined to the graph thread, same as Engine - unchecked for the
+/// same reason (see Engine's own note).
 public final class Session: @unchecked Sendable {
     let handle: OpaquePointer
     private var destroyed = false
@@ -57,35 +47,27 @@ public final class Session: @unchecked Sendable {
     /// Zero-copy: hands over up to three platform texture handles
     /// (MTLTexture and friends) as opaque pointer-sized values. The
     /// platform object must outlive the next rendered frame.
-    public func submitFrame(planes: [UInt64], width: UInt32, height: UInt32, pixelFormat: UInt32, colorStandard: UInt32 = GOSS_COLOR_BT709.rawValue, colorRange: UInt32 = GOSS_COLOR_RANGE_VIDEO.rawValue, rotationDegrees: UInt32, mirrored: Bool, timestampUs: Int64) throws {
-        var desc = frameDesc(width: width, height: height, pixelFormat: pixelFormat, colorStandard: colorStandard, colorRange: colorRange, rotationDegrees: rotationDegrees, mirrored: mirrored, timestampUs: timestampUs)
+    public func submitFrame(desc: FrameDesc, planes: [UInt64]) throws {
+        var raw = desc.raw
         let padded = planes + Array(repeating: UInt64(0), count: max(0, 3 - planes.count))
         var framePlanes = goss_frame_planes(plane_count: UInt32(planes.count), reserved: 0, planes: (padded[0], padded[1], padded[2]))
-        try checked(goss_session_submit_frame(handle, &desc, &framePlanes))
+        try checked(goss_session_submit_frame(handle, &raw, &framePlanes))
     }
 
     /// The CPU-copy path: copies NV12 planes into pooled textures.
     /// colorStandard/colorRange default to the common camera case
     /// (BT.709, video range); a debug/test corpus decoded at a
     /// different standard passes its own.
-    public func submitFrameCopy(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, rotationDegrees: UInt32, mirrored: Bool, timestampUs: Int64, colorStandard: UInt32 = GOSS_COLOR_BT709.rawValue, colorRange: UInt32 = GOSS_COLOR_RANGE_VIDEO.rawValue) throws {
-        var desc = frameDesc(width: width, height: height, pixelFormat: GOSS_PIXEL_NV12.rawValue, colorStandard: colorStandard, colorRange: colorRange, rotationDegrees: rotationDegrees, mirrored: mirrored, timestampUs: timestampUs)
-        try checked(goss_session_submit_frame_copy(handle, &desc, y, yStride, uv, uvStride))
-    }
-
-    /// Zero-copy submission of a platform hardware buffer (AHardwareBuffer,
-    /// Android only). Any thrown status means this stream should fall back
-    /// to submitFrameCopy.
-    public func submitHardwareBuffer(_ buffer: UnsafeMutableRawPointer, width: UInt32, height: UInt32, rotationDegrees: UInt32, mirrored: Bool, timestampUs: Int64) throws {
-        var desc = frameDesc(width: width, height: height, pixelFormat: GOSS_PIXEL_NV12.rawValue, colorStandard: GOSS_COLOR_BT709.rawValue, colorRange: GOSS_COLOR_RANGE_VIDEO.rawValue, rotationDegrees: rotationDegrees, mirrored: mirrored, timestampUs: timestampUs)
-        try checked(goss_session_submit_hardware_buffer(handle, &desc, buffer))
+    public func submitFrameCopy(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, rotationDegrees: UInt32, mirrored: Bool, colorStandard: ColorStandard = .bt709, colorRange: ColorRange = .video, timestampUs: Int64) throws {
+        var raw = FrameDesc(width: width, height: height, pixelFormat: .nv12, colorStandard: colorStandard, colorRange: colorRange, rotationDegrees: rotationDegrees, mirrored: mirrored, timestampUs: timestampUs).raw
+        try checked(goss_session_submit_frame_copy(handle, &raw, y, yStride, uv, uvStride))
     }
 
     /// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a canvas
     /// or video element's own byte buffer.
-    public func submitFrameRgbaCopy(rgba: UnsafePointer<UInt8>, width: UInt32, height: UInt32, stride: UInt32, mirrored: Bool, pixelFormat: UInt32 = GOSS_PIXEL_RGBA8.rawValue, timestampUs: Int64 = 0) throws {
-        var desc = frameDesc(width: width, height: height, pixelFormat: pixelFormat, colorStandard: GOSS_COLOR_BT709.rawValue, colorRange: GOSS_COLOR_RANGE_VIDEO.rawValue, rotationDegrees: 0, mirrored: mirrored, timestampUs: timestampUs)
-        try checked(goss_session_submit_frame_rgba_copy(handle, &desc, rgba, stride))
+    public func submitFrameRgbaCopy(rgba: UnsafePointer<UInt8>, stride: UInt32, width: UInt32, height: UInt32, pixelFormat: PixelFormat = .rgba8, rotationDegrees: UInt32 = 0, mirrored: Bool = false, timestampUs: Int64 = 0) throws {
+        var raw = FrameDesc(width: width, height: height, pixelFormat: pixelFormat, rotationDegrees: rotationDegrees, mirrored: mirrored, timestampUs: timestampUs).raw
+        try checked(goss_session_submit_frame_rgba_copy(handle, &raw, rgba, stride))
     }
 
     // MARK: - Telemetry
@@ -94,8 +76,9 @@ public final class Session: @unchecked Sendable {
     /// current thermal pressure. Returns the degradation level in
     /// effect for the next frame.
     @discardableResult
-    public func reportFrame(frameTimeUs: UInt32, thermal: goss_thermal) -> goss_degrade_level {
-        goss_session_report_frame(handle, frameTimeUs, thermal)
+    public func reportFrame(frameTimeUs: UInt32, thermal: Thermal) -> DegradeLevel {
+        let raw = goss_session_report_frame(handle, frameTimeUs, goss_thermal(rawValue: thermal.rawValue))
+        return DegradeLevel(rawValue: raw.rawValue) ?? .passthrough
     }
 
     // MARK: - Face tracking
@@ -110,27 +93,15 @@ public final class Session: @unchecked Sendable {
         goss_session_disable_face_tracking(handle)
     }
 
-    public func trackFrame(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, timestampUs: Int64) throws {
-        var desc = frameDesc(width: width, height: height, pixelFormat: GOSS_PIXEL_NV12.rawValue, colorStandard: GOSS_COLOR_BT709.rawValue, colorRange: GOSS_COLOR_RANGE_VIDEO.rawValue, rotationDegrees: 0, mirrored: false, timestampUs: timestampUs)
-        try checked(goss_session_track_frame(handle, &desc, y, yStride, uv, uvStride))
+    public func trackFrame(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: ColorStandard = .bt709, colorRange: ColorRange = .video, timestampUs: Int64) throws {
+        var raw = FrameDesc(width: width, height: height, pixelFormat: .nv12, colorStandard: colorStandard, colorRange: colorRange, timestampUs: timestampUs).raw
+        try checked(goss_session_track_frame(handle, &raw, y, yStride, uv, uvStride))
     }
 
     public func setFaceLandmarks(points: [Float]) throws {
         try points.withUnsafeBufferPointer { buffer in
             try checked(goss_session_set_face_landmarks(handle, buffer.baseAddress, UInt32(points.count / 3)))
         }
-    }
-
-    // MARK: - Segmentation
-
-    public func enableSegmentation(modelBytes: Data, threads: Int32) throws {
-        try modelBytes.withUnsafeBytes { buffer in
-            try checked(goss_session_enable_segmentation(handle, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count, threads))
-        }
-    }
-
-    public func disableSegmentation() {
-        goss_session_disable_segmentation(handle)
     }
 
     // MARK: - Beauty
@@ -164,9 +135,13 @@ public final class Session: @unchecked Sendable {
         try checked(goss_session_set_beauty_makeup_texture(handle, effect, rgba, width, height))
     }
 
-    public func beautifyFrame(rgbaIn: [UInt8], width: UInt32, height: UInt32) throws -> [UInt8] {
-        var rgbaOut = [UInt8](repeating: 0, count: rgbaIn.count)
-        try checked(goss_session_beautify_frame(handle, rgbaIn, width, height, &rgbaOut))
-        return rgbaOut
+    /// CPU beauty pass over one RGBA frame into a caller-owned output
+    /// buffer, at least width * height * 4 bytes.
+    public func beautifyFrame(rgbaIn: [UInt8], rgbaOut: inout [UInt8], width: UInt32, height: UInt32) throws {
+        let bytes = Int(width) * Int(height) * 4
+        guard rgbaIn.count >= bytes, rgbaOut.count >= bytes else { throw GossStatus.invalidArgument }
+        try rgbaOut.withUnsafeMutableBufferPointer { out in
+            try checked(goss_session_beautify_frame(handle, rgbaIn, width, height, out.baseAddress))
+        }
     }
 }

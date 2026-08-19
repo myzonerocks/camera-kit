@@ -4,6 +4,15 @@
 
 const port = 9333;
 const pageUrl = process.argv[2] ?? "http://localhost:8932/index.html";
+
+// The lens proof fetches ./beauty-baseline.manifest.json from the served
+// demo directory. It's built output (gitignored), not a source file -
+// materialized here from the tracked reference bundle so a fresh clone
+// proves without a manual copy step.
+await Bun.write(
+  new URL("./beauty-baseline.manifest.json", import.meta.url),
+  Bun.file(new URL("../../../lenses/reference/beauty-baseline/manifest.json", import.meta.url)),
+);
 const chrome = Bun.spawn(
   [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",

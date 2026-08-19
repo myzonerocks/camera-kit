@@ -1,25 +1,35 @@
 import CGosslens
 
-/// One face tracking result. landmarks holds landmarkCount * 3 floats
-/// (x, y in frame pixels, z in the same scale); blendshapes holds 52
-/// scores in zero to one. An empty landmarks means no face this frame.
-public struct FaceResult {
-    public var frameSerial: UInt64
-    public var timestampUs: Int64
-    public var presence: Float
-    public var landmarks: [Float]
-    public var blendshapes: [Float]
+/// One reusable tracking readout. landmarks holds landmarkCount * 3
+/// valid floats (x, y in frame pixels, z in the same scale); blendshapes
+/// holds 52 scores in zero to one. landmarkCount zero means no face.
+public final class FaceResult {
+    public private(set) var frameSerial: UInt64 = 0
+    public private(set) var timestampUs: Int64 = 0
+    public private(set) var presence: Float = 0
+    public private(set) var landmarkCount: Int = 0
+    public private(set) var landmarks: [Float]
+    public private(set) var blendshapes: [Float]
 
-    init(_ raw: goss_face_result) {
+    var raw = goss_face_result()
+
+    public init() {
+        landmarks = [Float](repeating: 0, count: Int(GOSS_FACE_LANDMARK_COUNT) * 3)
+        blendshapes = [Float](repeating: 0, count: Int(GOSS_FACE_BLENDSHAPE_COUNT))
+    }
+
+    /// Lifts raw's fields into the preallocated arrays - no per-frame
+    /// allocation as long as the caller reuses one instance.
+    func parse() {
         frameSerial = raw.frame_serial
         timestampUs = raw.timestamp_us
         presence = raw.presence
-        let count = Int(raw.landmark_count) * 3
-        landmarks = withUnsafeBytes(of: raw.landmarks) { buffer in
-            Array(buffer.bindMemory(to: Float.self).prefix(count))
+        landmarkCount = Int(raw.landmark_count)
+        withUnsafeBytes(of: raw.landmarks) { source in
+            landmarks.withUnsafeMutableBytes { $0.copyMemory(from: source) }
         }
-        blendshapes = withUnsafeBytes(of: raw.blendshapes) { buffer in
-            Array(buffer.bindMemory(to: Float.self))
+        withUnsafeBytes(of: raw.blendshapes) { source in
+            blendshapes.withUnsafeMutableBytes { $0.copyMemory(from: source) }
         }
     }
 }
@@ -27,16 +37,15 @@ public struct FaceResult {
 /// Tracking/telemetry readouts, reached directly off Session rather
 /// than their own handle type.
 extension Session {
-    /// Reads the newest tracking result. Throws .again until the
-    /// tracking worker has published its first result.
-    public func faceResult() throws -> FaceResult {
-        var result = goss_face_result()
-        try checked(goss_session_face_result(handle, &result))
-        return FaceResult(result)
+    /// Fills result with the newest tracking output. Throws .again until
+    /// the tracking worker has published its first result.
+    public func faceResult(_ result: FaceResult) throws {
+        try checked(goss_session_face_result(handle, &result.raw))
+        result.parse()
     }
 
     /// The degradation level currently in effect.
-    public func degradeLevel() -> goss_degrade_level {
-        goss_session_degrade_level(handle)
+    public func degradeLevel() -> DegradeLevel {
+        DegradeLevel(rawValue: goss_session_degrade_level(handle).rawValue) ?? .passthrough
     }
 }
