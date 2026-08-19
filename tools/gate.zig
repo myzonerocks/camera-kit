@@ -263,7 +263,7 @@ const Gate = struct {
                 current_path = if (std.mem.startsWith(u8, rest, "b/")) rest["b/".len..] else rest;
                 continue;
             }
-            const is_added = std.mem.startsWith(u8, line, "+") and !std.mem.startsWith(u8, line, "+++") and !isGeneratedWrapperScript(current_path);
+            const is_added = std.mem.startsWith(u8, line, "+") and !std.mem.startsWith(u8, line, "+++") and !isGeneratedWrapperScript(current_path) and !isProseFile(current_path);
             const content = if (is_added) line[1..] else "";
             const is_added_comment = is_added and isCommentLine(content);
 
@@ -480,6 +480,12 @@ fn isGeneratedWrapperScript(path: []const u8) bool {
     return std.mem.endsWith(u8, path, "/gradlew") or std.mem.eql(u8, path, "gradlew");
 }
 
+// Markdown is prose, not source - its `#` headings and `*` bullets look
+// like comment syntax to this scanner but are the document itself.
+fn isProseFile(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".md");
+}
+
 // A `#`-led line that is real C/ObjC code (#define, #include, #if...),
 // not a shell/Python/YAML comment - the two share a leading marker.
 fn isPreprocessorDirective(trimmed: []const u8) bool {
@@ -624,6 +630,13 @@ test "generated wrapper scripts are recognized, hand-written scripts are not" {
     try std.testing.expect(isGeneratedWrapperScript("sdk/kotlin/gradlew"));
     try std.testing.expect(isGeneratedWrapperScript("gradlew"));
     try std.testing.expect(!isGeneratedWrapperScript("sdk/kotlin/demo/prove-emulator.sh"));
+}
+
+test "markdown is prose, source is not" {
+    try std.testing.expect(isProseFile("NOTICE.md"));
+    try std.testing.expect(isProseFile("docs/API.md"));
+    try std.testing.expect(!isProseFile("core/abi/abi.zig"));
+    try std.testing.expect(!isProseFile("adapters/beauty/beauty_shim.cc"));
 }
 
 test "verbose comment markers are caught, plain ones are not" {
