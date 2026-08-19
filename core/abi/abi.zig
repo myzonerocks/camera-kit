@@ -232,6 +232,10 @@ pub const Session = struct {
     /// alone.
     beauty_input_target: ?render.Renderer.OffscreenTarget = null,
     beauty_input_native: ?*anyopaque = null,
+    beauty_input_persistent: render.Renderer.PersistentTexture = .{},
+    /// Apple's beauty output handle - rebind every frame like camera
+    /// ingress does, not cached-and-overridden-once like Android's below.
+    beauty_output_persistent: render.Renderer.PersistentTexture = .{},
     beauty_output_texture: ?render.TextureHandle = null,
     beauty_output_native: ?*anyopaque = null,
     /// beauty.face/beauty.reshape/beauty.lipstick/beauty.blusher's own
@@ -435,7 +439,7 @@ fn beautyActive(s: *const Session) bool {
 /// returning input_texture unchanged if any step fails - the SPEC's
 /// rule for a node whose capability is unavailable holding its default
 /// state, same as blend.pass's mask.
-fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, width: u16, height: u16, input_texture: render.TextureHandle) render.TextureHandle {
+fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, width: u16, height: u16, rotation: u32, mirror: bool, input_texture: render.TextureHandle) render.TextureHandle {
     const chain = s.beauty_chain.?;
 
     const input_surface = s.beauty_input orelse blk: {
@@ -472,9 +476,12 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
         const wrapped = if (android_vulkan)
             r.createAndroidBeautyRenderTarget(width, height, native_texture) orelse return input_texture
         else
-            r.wrapExternalRenderTarget(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(native_texture)) orelse return input_texture;
+            r.wrapExternalRenderTarget(&s.beauty_input_persistent, width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(native_texture)) orelse return input_texture;
         s.beauty_input_target = render.Renderer.createExternalTarget(wrapped) catch {
-            r.destroyTexture(wrapped);
+            // android's handle is this call's own to destroy; the
+            // persistent one beauty_input_persistent owns survives to
+            // retry next frame instead of dangling under it.
+            if (android_vulkan) r.destroyTexture(wrapped);
             return input_texture;
         };
         s.beauty_input_native = native_texture;
@@ -487,17 +494,23 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
         if (s.face_tracking) |worker| {
             if (tracking.readResult(worker, &result)) tracked = &result;
         }
-        if (beauty.processTexture(input_surface, chain, width, height, tracked)) {
-            if (beauty.composite(interop, chain, width, height)) |composited| {
-                if (s.beauty_output_texture == null or s.beauty_output_native != composited) {
-                    if (s.beauty_output_texture) |old| r.destroyTexture(old);
-                    s.beauty_output_texture = if (android_vulkan)
-                        r.wrapAndroidBeautyOutput(width, height, composited)
-                    else
-                        r.wrapExternalTexture(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(composited), false);
-                    s.beauty_output_native = composited;
+        const processed = beauty.processTexture(input_surface, chain, width, height, rotation, mirror, tracked);
+        if (processed) {
+            const composited = beauty.composite(interop, chain, width, height);
+            if (composited) |c| {
+                if (android_vulkan) {
+                    if (s.beauty_output_texture == null or s.beauty_output_native != c) {
+                        if (s.beauty_output_texture) |old| r.destroyTexture(old);
+                        s.beauty_output_texture = r.wrapAndroidBeautyOutput(width, height, c);
+                        s.beauty_output_native = c;
+                    }
+                    if (s.beauty_output_texture) |output| beautified = output;
+                } else if (beauty.interopNativeTexture(interop, device)) |metal_texture| {
+                    // metal_texture's override needs a frame gap to land,
+                    // same as camera ingress - rebind every frame rather
+                    // than caching a still-pending one.
+                    beautified = s.beauty_output_persistent.rebind(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(metal_texture));
                 }
-                if (s.beauty_output_texture) |output| beautified = output;
             }
         }
     }
@@ -759,7 +772,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         input_texture = if (is_web)
             try applyWebBeautyChain(r, s, &next_view_id, width, height, input_texture)
         else
-            applyBeautyCompositing(r, s, &next_view_id, width, height, input_texture);
+            applyBeautyCompositing(r, s, &next_view_id, width, height, rotation, mirror, input_texture);
     }
 
     var drawn: usize = 0;
@@ -939,6 +952,8 @@ fn destroyBeautyCompositing(session: *Session) void {
     if (session.beauty_input_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.beauty_input_target = null;
     session.beauty_input_native = null;
+    session.beauty_input_persistent.deinit();
+    session.beauty_output_persistent.deinit();
     if (session.engine.renderer) |*r| {
         if (session.beauty_output_texture) |tex| r.destroyTexture(tex);
     }

@@ -30,6 +30,11 @@ extern fn goss_beauty_output_texture(handle: ?*anyopaque) u32;
 extern fn goss_beauty_interop_create() ?*anyopaque;
 extern fn goss_beauty_interop_destroy(handle: ?*anyopaque) void;
 extern fn goss_beauty_interop_composite(handle: ?*anyopaque, source_texture: u32, width: i32, height: i32) ?*anyopaque;
+// Apple only, no Android sibling - Android's composite() already returns
+// an AHardwareBuffer wrapExternalTexture's Vulkan sibling imports directly.
+extern fn goss_beauty_interop_native_texture(handle: ?*anyopaque, device: ?*anyopaque) ?*anyopaque;
+
+const is_apple = builtin.os.tag == .macos or builtin.os.tag == .ios;
 
 pub const Beauty = struct {
     handle: *anyopaque,
@@ -71,6 +76,15 @@ pub fn composite(interop: *Interop, beauty: *Beauty, width: u32, height: u32) ?*
     return goss_beauty_interop_composite(interop.handle, texture, @intCast(width), @intCast(height));
 }
 
+/// bgfx's own Metal-side view of composite()'s most recent output -
+/// composite() itself returns a CVPixelBufferRef (for CPU readback), not
+/// something wrapExternalTexture can bind. Call right after composite();
+/// device is render.Renderer.nativeDevice(). No-op off Apple.
+pub fn interopNativeTexture(interop: *Interop, device: ?*anyopaque) ?*anyopaque {
+    if (!is_apple) return null;
+    return goss_beauty_interop_native_texture(interop.handle, device);
+}
+
 pub fn create(gpa: std.mem.Allocator, resource_path: [*:0]const u8) error{ Unsupported, OutOfMemory }!*Beauty {
     const handle = goss_beauty_create(resource_path) orelse return error.Unsupported;
     const beauty = gpa.create(Beauty) catch {
@@ -90,10 +104,11 @@ pub fn set(beauty: *Beauty, effect: Effect, value: f32) void {
     goss_beauty_set(beauty.handle, @intFromEnum(effect), std.math.clamp(value, 0.0, 1.0));
 }
 
-/// Fills contour from a tracked face result's landmarks, scaled to the
-/// frame, or returns null while no usable face holds - the one contour-
-/// resolution rule both process() and processTexture() apply.
-fn contourFromResult(result: ?*const face.Result, width: u32, height: u32, contour: *[face106.point_count * 2]f32) ?[*]const f32 {
+/// Fills contour from a tracked face result's landmarks, or returns
+/// null while no usable face holds. Landmarks are raw sensor space; a
+/// frame drawn with the preview blit's rotation/mirror needs the same
+/// transform here - mirror first, then quarter turns, like the blit.
+fn contourFromResult(result: ?*const face.Result, width: u32, height: u32, rotation_quarter_turns: u32, mirror: bool, contour: *[face106.point_count * 2]f32) ?[*]const f32 {
     const tracked = result orelse return null;
     if (tracked.landmark_count_out != face.landmark_count or tracked.presence < 0.5) return null;
     var landmarks: [face.landmark_count]face.Landmark = undefined;
@@ -105,6 +120,23 @@ fn contourFromResult(result: ?*const face.Result, width: u32, height: u32, conto
         };
     }
     face106.fill(&landmarks, @floatFromInt(width), @floatFromInt(height), contour);
+    if (mirror or rotation_quarter_turns % 4 != 0) {
+        var at: usize = 0;
+        while (at < face106.point_count) : (at += 1) {
+            var x = contour[at * 2] * 2.0 - 1.0;
+            const y = 1.0 - contour[at * 2 + 1] * 2.0;
+            if (mirror) x = -x;
+            const rotated: [2]f32 = switch (rotation_quarter_turns % 4) {
+                0 => .{ x, y },
+                1 => .{ -y, x },
+                2 => .{ -x, -y },
+                3 => .{ y, -x },
+                else => unreachable,
+            };
+            contour[at * 2] = (rotated[0] + 1.0) * 0.5;
+            contour[at * 2 + 1] = (1.0 - rotated[1]) * 0.5;
+        }
+    }
     return contour;
 }
 
@@ -119,7 +151,7 @@ pub fn process(
     rgba_out: [*]u8,
 ) error{ProcessRefused}!void {
     var contour: [face106.point_count * 2]f32 = undefined;
-    const contour_ptr = contourFromResult(result, width, height, &contour);
+    const contour_ptr = contourFromResult(result, width, height, 0, false, &contour);
     if (goss_beauty_process(beauty.handle, rgba_in, @intCast(width), @intCast(height), contour_ptr, rgba_out) != 0) {
         return error.ProcessRefused;
     }
@@ -178,8 +210,20 @@ pub fn inputSurfaceHardwareBuffer(surface: *InputSurface, width: u32, height: u3
 /// with the tracked contour when a face holds - the GPU-input mirror of
 /// process(). Call after that write has been submitted for this frame;
 /// composite() then reads the result back out, same as the CPU path.
-pub fn processTexture(surface: *InputSurface, beauty: *Beauty, width: u32, height: u32, result: ?*const face.Result) bool {
+/// rotation_quarter_turns and mirror must match the caller's own
+/// preview blit, since that blit produced the frame in this surface.
+pub fn processTexture(surface: *InputSurface, beauty: *Beauty, width: u32, height: u32, rotation_quarter_turns: u32, mirror: bool, result: ?*const face.Result) bool {
     var contour: [face106.point_count * 2]f32 = undefined;
-    const contour_ptr = contourFromResult(result, width, height, &contour);
+    const contour_ptr = contourFromResult(result, width, height, rotation_quarter_turns, mirror, &contour);
+    if (contour_ptr != null) {
+        // The chain ingests the shared surface through a V-flipping blit
+        // (GL's bottom-up framebuffer convention), so it works on a
+        // vertically flipped image - the contour flips with it. The CPU
+        // path feeds raw rows straight in and never needs this.
+        var at: usize = 0;
+        while (at < face106.point_count) : (at += 1) {
+            contour[at * 2 + 1] = 1.0 - contour[at * 2 + 1];
+        }
+    }
     return goss_beauty_input_process(surface.handle, beauty.handle, @intCast(width), @intCast(height), contour_ptr) == 0;
 }

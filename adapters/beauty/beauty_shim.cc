@@ -153,6 +153,7 @@ class SourceExternalTexture : public gpupixel::Source {
     glVertexAttribPointer(tex_coord_attribute, 2, GL_FLOAT, 0, 0, kTexCoords);
 
     const uint32_t target = use_rect ? kRectangleTextureTarget : GL_TEXTURE_2D;
+
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(target, gl_texture);
     program->SetUniformValue("inputImageTexture", 0);
@@ -332,10 +333,17 @@ int32_t goss_beauty_process_external_texture(void* handle,
     return 1;
   }
   ApplyLandmarks(context, landmarks106);
-  if (!context->source_gpu->RenderExternalTexture(gl_texture, sampler_kind, width, height)) {
-    return 1;
-  }
-  return 0;
+  // The doc comment above promises a current context "the same way" the
+  // output side guarantees one for goss_beauty_interop_composite - a
+  // contract this function's own caller never actually honored, leaving
+  // every GL call below running wherever the caller happened to be.
+  bool ran = false;
+  bool ok = true;
+  gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    ran = true;
+    ok = context->source_gpu->RenderExternalTexture(gl_texture, sampler_kind, width, height);
+  });
+  return (ran && ok) ? 0 : 1;
 }
 
 // The GPU compositing bridge is platform-specific: interop_apple.mm on

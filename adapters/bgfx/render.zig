@@ -571,30 +571,22 @@ pub const Renderer = struct {
         }
     };
 
-    /// Same as wrapExternalTexture(render_target: true), except it
-    /// verifies the override actually landed instead of assuming it
-    /// did. bgfx_override_internal_texture_ptr documents returning 0
-    /// when the handle's own creation - itself an asynchronously queued
-    /// command, only processed on a later bgfx_frame() - has not been
-    /// picked up yet. Every wrapExternalTexture caller elsewhere creates
-    /// and uses its handle across a natural gap of at least one frame()
-    /// (camera ingress submits on one call, render samples on a later
-    /// one); createExternalTarget's caller is the one case that would
-    /// otherwise create a handle and immediately draw into it inside the
-    /// same goss_engine_render_frame, before bgfx has ever had a frame
-    /// boundary to actually create it. Returns null on that still-
-    /// pending case so the caller can retry next frame instead of
-    /// caching a handle that silently never points at the real texture.
-    pub fn wrapExternalRenderTarget(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize) ?c.bgfx_texture_handle_t {
+    /// Verifies the override actually landed, keeping pt's handle alive
+    /// across a still-pending resolve rather than a fresh one every
+    /// retry - a fresh handle can never clear bgfx's one-frame gap, so
+    /// it fails identically forever, not just the first time.
+    pub fn wrapExternalRenderTarget(r: *Renderer, pt: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) ?c.bgfx_texture_handle_t {
         _ = r;
-        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | c.BGFX_TEXTURE_RT;
-        const handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
-        const resolved = c.bgfx_override_internal_texture_ptr(handle, native_ptr, 0);
-        if (resolved == 0) {
-            c.bgfx_destroy_texture(handle);
-            return null;
+        if (pt.handle.idx == invalid_handle or pt.width != width or pt.height != height) {
+            if (pt.handle.idx != invalid_handle) c.bgfx_destroy_texture(pt.handle);
+            const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | c.BGFX_TEXTURE_RT;
+            pt.handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
+            pt.width = width;
+            pt.height = height;
         }
-        return handle;
+        const resolved = c.bgfx_override_internal_texture_ptr(pt.handle, native_ptr, 0);
+        if (resolved == 0) return null;
+        return pt.handle;
     }
 
     /// wrapExternalRenderTarget's Vulkan sibling: override is a no-op on

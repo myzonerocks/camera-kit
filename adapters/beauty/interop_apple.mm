@@ -61,6 +61,7 @@ const char* kBlitVertexShader =
     "}\n";
 
 const char* kBlitFragmentShader =
+    "precision mediump float;\n"
     "varying vec2 textureCoordinate;\n"
     "uniform sampler2D inputTexture;\n"
     "void main() {\n"
@@ -111,8 +112,7 @@ GLuint LinkProgram(const char* vertex_source, const char* fragment_source) {
 // attachment gets set up differs.
 bool DrawBlit(GLuint fbo, GLuint blit_program, GLuint source_texture,
               int32_t width, int32_t height) {
-  const GLenum fbo_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-  if (fbo_status != GL_FRAMEBUFFER_COMPLETE) return false;
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) return false;
 
   GLint previous_fbo = 0;
   glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_fbo);
@@ -126,7 +126,11 @@ bool DrawBlit(GLuint fbo, GLuint blit_program, GLuint source_texture,
   glUseProgram(blit_program);
 
   static const GLfloat position[] = {-1, -1, 1, -1, -1, 1, 1, 1};
-  static const GLfloat tex_coords[] = {0, 0, 1, 0, 0, 1, 1, 1};
+  // Y-flipped to match RenderExternalTexture's own input blit
+  // (beauty_shim.cc's kTexCoords) - without it, the GL-vs-Metal
+  // coordinate convention gpupixel corrects for on the way in never
+  // gets undone on the way back out.
+  static const GLfloat tex_coords[] = {0, 1, 1, 1, 0, 0, 1, 0};
   glEnableVertexAttribArray(0);
   glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, position);
   glEnableVertexAttribArray(1);
@@ -163,12 +167,16 @@ struct AppleInterop {
   CVOpenGLTextureCacheRef texture_cache = nullptr;
   CVPixelBufferRef pixel_buffer = nullptr;
   CVOpenGLTextureRef gl_texture = nullptr;
+  CVMetalTextureCacheRef metal_cache = nullptr;
+  CVMetalTextureRef metal_texture = nullptr;
   GLuint fbo = 0;
   GLuint blit_program = 0;
   int width = 0;
   int height = 0;
 
   ~AppleInterop() {
+    if (metal_texture) CFRelease(metal_texture);
+    if (metal_cache) CFRelease(metal_cache);
     if (gl_texture) CFRelease(gl_texture);
     if (pixel_buffer) CFRelease(pixel_buffer);
     if (texture_cache) CFRelease(texture_cache);
@@ -193,6 +201,10 @@ struct AppleInterop {
     if (gl_texture) {
       CFRelease(gl_texture);
       gl_texture = nullptr;
+    }
+    if (metal_texture) {
+      CFRelease(metal_texture);
+      metal_texture = nullptr;
     }
     if (pixel_buffer) {
       CFRelease(pixel_buffer);
@@ -225,6 +237,25 @@ struct AppleInterop {
 
   GLenum Target() const { return CVOpenGLTextureGetTarget(gl_texture); }
   GLuint Name() const { return CVOpenGLTextureGetName(gl_texture); }
+
+  // The id<MTLTexture> view of the same IOSurface the GL blit above just
+  // wrote into (see goss_beauty_interop_native_texture). Reused across
+  // frames like gl_texture: torn down and recreated only in
+  // EnsureSurface, when pixel_buffer itself changes.
+  void* EnsureMetalView(id<MTLDevice> device) {
+    if (device == nil || pixel_buffer == nullptr) return nullptr;
+    if (metal_texture) return (__bridge void*)CVMetalTextureGetTexture(metal_texture);
+    if (metal_cache == nullptr) {
+      CVReturn created = CVMetalTextureCacheCreate(
+          kCFAllocatorDefault, nullptr, device, nullptr, &metal_cache);
+      if (created != kCVReturnSuccess) return nullptr;
+    }
+    CVReturn texture_status = CVMetalTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault, metal_cache, pixel_buffer, nullptr,
+        MTLPixelFormatBGRA8Unorm, width, height, 0, &metal_texture);
+    if (texture_status != kCVReturnSuccess) return nullptr;
+    return (__bridge void*)CVMetalTextureGetTexture(metal_texture);
+  }
 };
 
 #else  // TARGET_OS_IOS
@@ -240,6 +271,8 @@ struct AppleInterop {
   GLuint blit_program = 0;
   int width = 0;
   int height = 0;
+  CVMetalTextureCacheRef metal_cache = nullptr;
+  CVMetalTextureRef metal_texture = nullptr;
 
   void ReleaseSurface() {
     auto* ctx = gpupixel::GPUPixelContext::GetInstance();
@@ -252,6 +285,10 @@ struct AppleInterop {
       glDeleteTextures(1, &texture);
       texture = 0;
     }
+    if (metal_texture) {
+      CFRelease(metal_texture);
+      metal_texture = nullptr;
+    }
     if (pixel_buffer) {
       CFRelease(pixel_buffer);
       pixel_buffer = nullptr;
@@ -260,6 +297,7 @@ struct AppleInterop {
 
   ~AppleInterop() {
     ReleaseSurface();
+    if (metal_cache) CFRelease(metal_cache);
     if (fbo) glDeleteFramebuffers(1, &fbo);
     if (blit_program) glDeleteProgram(blit_program);
   }
@@ -325,6 +363,24 @@ struct AppleInterop {
 
   GLenum Target() const { return GL_TEXTURE_2D; }
   GLuint Name() const { return texture; }
+
+  // Same Metal-side view as the macOS struct above, over the IOSurface-
+  // backed pixel_buffer ANGLE's EGL_IOSURFACE_ANGLE surface already
+  // shares with the GL texture DrawBlit wrote into.
+  void* EnsureMetalView(id<MTLDevice> device) {
+    if (device == nil || pixel_buffer == nullptr) return nullptr;
+    if (metal_texture) return (__bridge void*)CVMetalTextureGetTexture(metal_texture);
+    if (metal_cache == nullptr) {
+      CVReturn created = CVMetalTextureCacheCreate(
+          kCFAllocatorDefault, nullptr, device, nullptr, &metal_cache);
+      if (created != kCVReturnSuccess) return nullptr;
+    }
+    CVReturn texture_status = CVMetalTextureCacheCreateTextureFromImage(
+        kCFAllocatorDefault, metal_cache, pixel_buffer, nullptr,
+        MTLPixelFormatBGRA8Unorm, width, height, 0, &metal_texture);
+    if (texture_status != kCVReturnSuccess) return nullptr;
+    return (__bridge void*)CVMetalTextureGetTexture(metal_texture);
+  }
 };
 
 #endif
@@ -563,6 +619,14 @@ struct AppleInputSurface {
 
     glGenTextures(1, &gl_texture);
     glBindTexture(GL_TEXTURE_2D, gl_texture);
+    // A fresh texture defaults to GL_NEAREST_MIPMAP_LINEAR minification,
+    // which needs a mipmap chain this single-level EGL-bound surface
+    // never has - RenderExternalTexture's texture2D() sampling of an
+    // incomplete texture always returns black, regardless of real content.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     if (!eglBindTexImage(display, egl_surface, EGL_BACK_BUFFER)) {
       glDeleteTextures(1, &gl_texture);
       gl_texture = 0;
@@ -600,8 +664,14 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* interop = static_cast<AppleInterop*>(handle);
 
+  // ran tracks whether the lambda actually executed - SyncRunWithContext
+  // silently skips it while the app isn't foreground-active, and ok alone
+  // defaults to true, which would otherwise read as a successful composite
+  // of a pixel_buffer that was never touched this call.
+  bool ran = false;
   bool ok = true;
   gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    ran = true;
     if (!interop->EnsureSurface(width, height)) {
       ok = false;
       return;
@@ -624,7 +694,17 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
     ok = DrawBlit(interop->fbo, interop->blit_program, source_texture, width, height);
   });
 
-  return ok ? interop->pixel_buffer : nullptr;
+  return (ran && ok) ? interop->pixel_buffer : nullptr;
+}
+
+// bgfx's Metal-side view of what goss_beauty_interop_composite just
+// wrote - that function's own CVPixelBufferRef return is for CPU
+// readback, not something wrapExternalTexture can bind. Call right
+// after it succeeds, same frame; device is bgfx's own MTL::Device.
+void* goss_beauty_interop_native_texture(void* handle, void* device) {
+  if (handle == nullptr) return nullptr;
+  auto* interop = static_cast<AppleInterop*>(handle);
+  return interop->EnsureMetalView((__bridge id<MTLDevice>)device);
 }
 
 void* goss_beauty_input_create(void) {

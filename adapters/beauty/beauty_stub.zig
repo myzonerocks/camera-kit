@@ -71,6 +71,12 @@ pub fn composite(interop: *Interop, beauty: *Beauty, width: u32, height: u32) ?*
     return null;
 }
 
+pub fn interopNativeTexture(interop: *Interop, device: ?*anyopaque) ?*anyopaque {
+    _ = interop;
+    _ = device;
+    return null;
+}
+
 pub const InputSurface = struct {};
 
 pub fn inputSurfaceCreate(gpa: std.mem.Allocator) error{ Unsupported, OutOfMemory }!*InputSurface {
@@ -98,11 +104,13 @@ pub fn inputSurfaceHardwareBuffer(surface: *InputSurface, width: u32, height: u3
     return null;
 }
 
-pub fn processTexture(surface: *InputSurface, beauty: *Beauty, width: u32, height: u32, result: ?*const face.Result) bool {
+pub fn processTexture(surface: *InputSurface, beauty: *Beauty, width: u32, height: u32, rotation_quarter_turns: u32, mirror: bool, result: ?*const face.Result) bool {
     _ = surface;
     _ = beauty;
     _ = width;
     _ = height;
+    _ = rotation_quarter_turns;
+    _ = mirror;
     _ = result;
     return false;
 }
