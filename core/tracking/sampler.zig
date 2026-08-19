@@ -64,6 +64,27 @@ pub fn frameSquare(width: u32, height: u32) Region {
     };
 }
 
+pub const Landmark = struct { x: f32, y: f32, z: f32 };
+
+/// Maps a landmark model's raw output, in crop input pixels, back into
+/// frame pixels through the crop's rotation and scale - the inverse of
+/// sampleRegion's own mapping, shared by every landmark pipeline.
+pub fn decodeLandmarks(comptime count: usize, raw: []const f32, region: Region, input_side: f32, out: *[count]Landmark) void {
+    std.debug.assert(raw.len >= count * 3);
+    const cos = @cos(region.rotation);
+    const sin = @sin(region.rotation);
+    const scale = region.side / input_side;
+    for (out, 0..) |*landmark, at| {
+        const u = raw[at * 3] / input_side - 0.5;
+        const v = raw[at * 3 + 1] / input_side - 0.5;
+        landmark.* = .{
+            .x = region.center_x + (u * cos - v * sin) * region.side,
+            .y = region.center_y + (u * sin + v * cos) * region.side,
+            .z = raw[at * 3 + 2] * scale,
+        };
+    }
+}
+
 /// Fills `out` with side*side RGB float pixels sampled from the region.
 /// Samples falling outside the frame read as black, matching how the
 /// models were trained on border padding.

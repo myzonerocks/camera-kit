@@ -1281,6 +1281,7 @@ const TrackingCoreModules = struct {
     detector: *std.Build.Module,
     sampler: *std.Build.Module,
     face: *std.Build.Module,
+    hand: *std.Build.Module,
     tracker: *std.Build.Module,
 };
 
@@ -1312,6 +1313,15 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
             .{ .name = "detector", .module = detector_module },
         },
     });
+    const hand_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/hand.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_module },
+            .{ .name = "detector", .module = detector_module },
+        },
+    });
     const tracker_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/tracker.zig"),
         .target = target,
@@ -1326,6 +1336,7 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .detector = detector_module,
         .sampler = sampler_module,
         .face = face_module,
+        .hand = hand_module,
         .tracker = tracker_module,
     };
 }

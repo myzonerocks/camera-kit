@@ -177,8 +177,8 @@ pub export fn goss_tracking_process(instance: ?*Instance, rgba: ?[*]const u8, wi
         tracking.detector_engine.invoke() catch return status_invalid;
         const raw_boxes = tracking.detector_engine.outputFloats(0) catch return status_invalid;
         const raw_scores = tracking.detector_engine.outputFloats(1) catch return status_invalid;
-        var candidates: [16]detector.Detection = undefined;
-        const found = detector.decode(raw_boxes, raw_scores, tracking.anchors, @floatFromInt(tracking.detector_side), 0.5, &candidates);
+        var candidates: [16]detector.face.Detection = undefined;
+        const found = detector.face.decode(raw_boxes, raw_scores, tracking.anchors, @floatFromInt(tracking.detector_side), 0.5, &candidates);
         if (found.len == 0) {
             publishEmpty(tracking, timestamp_us);
             return status_ok;

@@ -235,9 +235,9 @@ pub fn main(init_args: std.process.Init) !u8 {
 
     const raw_boxes = try detector_engine.outputFloats(0);
     const raw_scores = try detector_engine.outputFloats(1);
-    const candidates = try gpa.alloc(detector.Detection, 32);
+    const candidates = try gpa.alloc(detector.face.Detection, 32);
     defer gpa.free(candidates);
-    const detections = detector.decode(raw_boxes, raw_scores, anchors, @floatFromInt(input_side), 0.5, candidates);
+    const detections = detector.face.decode(raw_boxes, raw_scores, anchors, @floatFromInt(input_side), 0.5, candidates);
 
     var buffer: [512]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(harness_io, &buffer);
@@ -268,7 +268,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         sampler.sampleRegion(image, sampler.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
         try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
         try detector_engine.invoke();
-        const found = detector.decode(
+        const found = detector.face.decode(
             try detector_engine.outputFloats(0),
             try detector_engine.outputFloats(1),
             anchors,
@@ -647,7 +647,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         sampler.sampleRegion(image, sampler.frameSquare(image.width, image.height), .symmetric, input_side, input_tensor);
         try detector_engine.writeInput(0, std.mem.sliceAsBytes(input_tensor));
         try detector_engine.invoke();
-        const found = detector.decode(
+        const found = detector.face.decode(
             try detector_engine.outputFloats(0),
             try detector_engine.outputFloats(1),
             anchors,
