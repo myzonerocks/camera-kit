@@ -93,6 +93,18 @@ public final class Session: @unchecked Sendable {
         goss_session_disable_face_tracking(handle)
     }
 
+    /// Stands the hand tracking worker up from a hand landmarker task
+    /// bundle; up to two hands publish per frame.
+    public func enableHandTracking(taskBundle: Data, threads: Int32) throws {
+        try taskBundle.withUnsafeBytes { buffer in
+            try checked(goss_session_enable_hand_tracking(handle, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count, threads))
+        }
+    }
+
+    public func disableHandTracking() {
+        goss_session_disable_hand_tracking(handle)
+    }
+
     public func trackFrame(y: UnsafePointer<UInt8>, yStride: UInt32, uv: UnsafePointer<UInt8>, uvStride: UInt32, width: UInt32, height: UInt32, colorStandard: ColorStandard = .bt709, colorRange: ColorRange = .video, timestampUs: Int64) throws {
         var raw = FrameDesc(width: width, height: height, pixelFormat: .nv12, colorStandard: colorStandard, colorRange: colorRange, timestampUs: timestampUs).raw
         try checked(goss_session_track_frame(handle, &raw, y, yStride, uv, uvStride))

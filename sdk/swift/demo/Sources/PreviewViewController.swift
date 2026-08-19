@@ -17,8 +17,11 @@ final class PreviewViewController: UIViewController {
     private let switchCameraButton = UIButton(type: .system)
     private let beautyStack = UIStackView()
     private let faceLayer = CAShapeLayer()
+    private let handLayer = CAShapeLayer()
     private let trackedFace = FaceResult()
+    private let trackedHands = HandResult()
     private var lastFaceSerial: UInt64 = 0
+    private var lastHandSerial: UInt64 = 0
 
     private var engine: Engine?
     private var session: Session?
@@ -79,6 +82,10 @@ final class PreviewViewController: UIViewController {
         faceLayer.fillColor = UIColor.white.cgColor
         faceLayer.strokeColor = nil
         view.layer.addSublayer(faceLayer)
+
+        handLayer.fillColor = UIColor.white.withAlphaComponent(0.8).cgColor
+        handLayer.strokeColor = nil
+        view.layer.addSublayer(handLayer)
 
         setupBeautyControls()
     }
@@ -193,6 +200,7 @@ final class PreviewViewController: UIViewController {
 
         session.reportFrame(frameTimeUs: frameTimeUs, thermal: ProcessInfo.processInfo.thermalState.gossThermal)
         drawFaceOverlay()
+        drawHandOverlay()
         tickLens(dtUs: frameTimeUs)
         guard (try? engine.renderFrame(session: session)) != nil else { return }
         renderedFrames += 1
@@ -241,6 +249,39 @@ final class PreviewViewController: UIViewController {
         faceLayer.path = path
     }
 
+    /// The same sensor-to-screen mapping the face overlay uses; hands
+    /// ride the same camera pose.
+    private func drawHandOverlay() {
+        guard let session, (try? session.handResult(trackedHands)) != nil else { return }
+        guard trackedHands.frameSerial != lastHandSerial else { return }
+        lastHandSerial = trackedHands.frameSerial
+        guard trackedHands.handCount > 0 else {
+            handLayer.path = nil
+            return
+        }
+
+        let path = CGMutablePath()
+        let bounds = view.bounds
+        let sensorWidth = CGFloat(max(camera.frameWidth, 1))
+        let sensorHeight = CGFloat(max(camera.frameHeight, 1))
+        let scaleX = bounds.width / sensorHeight
+        let scaleY = bounds.height / sensorWidth
+        for handAt in 0 ..< trackedHands.handCount {
+            let base = handAt * HandResult.landmarkCount * 3
+            for point in 0 ..< HandResult.landmarkCount {
+                let x = CGFloat(trackedHands.landmarks[base + point * 3])
+                let y = CGFloat(trackedHands.landmarks[base + point * 3 + 1])
+                var viewX = (sensorHeight - y) * scaleX
+                if camera.mirrored {
+                    viewX = bounds.width - viewX
+                }
+                let viewY = x * scaleY
+                path.addEllipse(in: CGRect(x: viewX - 2, y: viewY - 2, width: 4, height: 4))
+            }
+        }
+        handLayer.path = path
+    }
+
     /// Rides the same result drawFaceOverlay just refreshed - ticking
     /// every render frame regardless of whether that particular result
     /// was new keeps the lens's own animation ramps advancing smoothly
@@ -249,6 +290,7 @@ final class PreviewViewController: UIViewController {
         guard let session else { return }
         let signals = LensSignals(
             hasFace: trackedFace.presence >= 0.5 && trackedFace.landmarkCount > 0,
+            handsPresent: trackedHands.handCount > 0,
             blendshapes: trackedFace.blendshapes
         )
         try? session.tickLens(dtUs: dtUs, signals: signals)
