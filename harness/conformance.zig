@@ -355,6 +355,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     const gpa = init_args.gpa;
     harness_io = init_args.io;
 
+    // Screenshot comparisons land under zig-out/, which a clean
+    // checkout does not have until the first install step runs.
+    try std.Io.Dir.cwd().createDirPath(harness_io, "zig-out");
+
     var arg_it = std.process.Args.Iterator.init(init_args.minimal.args);
     _ = arg_it.next();
     const print_mode = if (arg_it.next()) |arg| std.mem.eql(u8, arg, "--print") else false;
