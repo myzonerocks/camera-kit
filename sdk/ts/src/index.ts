@@ -25,9 +25,62 @@ export const enum BeautyEffect {
   Blush = 5,
 }
 
+/// Platform thermal pressure. No browser API surfaces device thermal
+/// state, so web callers report nominal unless they know better.
+export const enum Thermal {
+  Nominal = 0,
+  Fair = 1,
+  Serious = 2,
+  Critical = 3,
+}
+
+/// Pixel layout of a submitted frame, mirroring the frozen C enum.
+export const enum PixelFormat {
+  Nv12 = 0,
+  Nv21 = 1,
+  I420 = 2,
+  Bgra8 = 3,
+  Rgba8 = 4,
+}
+
+export const enum ColorStandard {
+  Bt601 = 0,
+  Bt709 = 1,
+  Bt2020 = 2,
+}
+
+export const enum ColorRange {
+  Video = 0,
+  Full = 1,
+}
+
+/// The live signals one tick evaluates a lens's compiled triggers
+/// against. hasFace false means every face-driven signal reads as false
+/// regardless of what blendshapes holds.
+export interface LensSignals {
+  hasFace?: boolean;
+  handsPresent?: boolean;
+  tap?: boolean;
+  worldTrackingState?: number;
+  audioLevel?: number;
+  blendshapes?: Float32Array | readonly number[];
+}
+
+/// Frame-path pool bounds; omitted fields mean the built-in default.
+export interface EngineConfig {
+  texturePoolCapacity?: number;
+  stagingPoolCapacity?: number;
+}
+
+/// Whole-pipeline frame budget; omitted means the built-in default (30 fps).
+export interface SessionConfig {
+  frameBudgetUs?: number;
+}
+
 const FRAME_FLAG_MIRROR = 0x1;
 const FRAME_ROTATION_SHIFT = 8;
-const PIXEL_FORMAT_RGBA8 = 4;
+const LENS_SIGNALS_BYTES = 232;
+const FACE_BLENDSHAPE_COUNT = 52;
 export const FACE_LANDMARK_COUNT = 478;
 
 export type CaptureState = "idle" | "running" | "denied" | "failed" | "interrupted";
@@ -115,8 +168,14 @@ export async function pickEngineUrl(webgpuUrl: string | URL, webgl2Url: string |
 export class Gosslens {
   private constructor(
     private readonly mod: EngineModule,
-    readonly abiVersion: number,
+    private readonly version: number,
   ) {}
+
+  /// Any-thread. Compare the high 16 bits against the header's own
+  /// GOSS_ABI_MAJOR before creating anything - load() already has.
+  abiVersion(): number {
+    return this.version;
+  }
 
   /// Loads gosslens_web.js and checks its ABI major version. A
   /// dynamic import, not static: bun's bundler would otherwise inline
@@ -134,9 +193,9 @@ export class Gosslens {
   /// column-major homogeneous matrix. Unused today (canvas always
   /// yields RGBA already) - a real gap for any future debug/thumbnail
   /// path, kept wrapped so that path doesn't start from a raw ccall.
-  yuvToRgb(standard: number, range: number): Float32Array {
+  yuvToRgb(colorStandard: ColorStandard, colorRange: ColorRange): Float32Array {
     const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [64]);
-    this.mod.ccall("goss_color_yuv_to_rgb", "number", ["number", "number", "number"], [standard, range, ptr]);
+    this.mod.ccall("goss_color_yuv_to_rgb", "number", ["number", "number", "number"], [colorStandard, colorRange, ptr]);
     const out = new Float32Array(16);
     for (let i = 0; i < 16; i += 1) out[i] = this.mod.getValue(ptr + i * 4, "float");
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 64]);
@@ -155,32 +214,48 @@ export class Gosslens {
 /// single-thread confinement on every other SDK.
 export class Engine {
   private captureInFlight = false;
+  private canvas: HTMLCanvasElement | null = null;
+  /// Only set on the WebGL2 build - bgfx's WebGPU backend binds the
+  /// canvas to a 'webgpu' context instead, and a canvas can only ever
+  /// bind one context type for its lifetime. capturePixels() branches
+  /// on this: readPixels when set, goss_engine_capture_frame otherwise.
+  private gl: WebGL2RenderingContext | null = null;
 
   private constructor(
     private readonly mod: EngineModule,
     readonly handle: number,
-    private readonly canvas: HTMLCanvasElement,
-    /// Only set on the WebGL2 build - bgfx's WebGPU backend binds the
-    /// canvas to a 'webgpu' context instead, and a canvas can only ever
-    /// bind one context type for its lifetime. capturePixels() branches
-    /// on this: readPixels when set, goss_engine_capture_frame otherwise.
-    private readonly gl: WebGL2RenderingContext | null,
   ) {}
 
-  /// Stands the engine and its renderer up against canvas, which needs
-  /// a stable id: bgfx's own HTML5 backend resolves it via a #id
-  /// selector string (glcontext_html5.cpp), separate from the
-  /// Module.canvas binding Gosslens.load already made - both must agree.
-  static async create(gosslens: Gosslens, canvas: HTMLCanvasElement): Promise<Engine> {
-    if (!canvas.id) throw new Error("canvas needs a stable id for bgfx's own selector lookup");
+  static create(gosslens: Gosslens, config?: EngineConfig): Engine {
     const mod = gosslens.module;
-
+    let configPtr = 0;
+    if (config) {
+      configPtr = mod.ccall("goss_alloc", "number", ["number"], [8]);
+      mod.setValue(configPtr, config.texturePoolCapacity ?? 0, "i32");
+      mod.setValue(configPtr + 4, config.stagingPoolCapacity ?? 0, "i32");
+    }
     const engineOut = mod.ccall("goss_alloc", "number", ["number"], [4]);
-    const engineStatus = mod.ccall("goss_engine_create", "number", ["number", "number"], [0, engineOut]);
+    const engineStatus = mod.ccall("goss_engine_create", "number", ["number", "number"], [configPtr, engineOut]);
     const handle = mod.getValue(engineOut, "i32");
     mod.ccall("goss_free", null, ["number", "number"], [engineOut, 4]);
+    if (configPtr !== 0) mod.ccall("goss_free", null, ["number", "number"], [configPtr, 8]);
     if (engineStatus !== GOSS_OK) throw new Error(`engine create failed: ${engineStatus}`);
+    return new Engine(mod, handle);
+  }
 
+  /// @internal - Session needs the raw module to reach the ABI; nothing
+  /// outside this file should call ccall directly.
+  get module(): EngineModule {
+    return this.mod;
+  }
+
+  /// Brings the render backend up against canvas, which needs a stable
+  /// id: bgfx's own HTML5 backend resolves it via a #id selector string
+  /// (glcontext_html5.cpp), separate from the Module.canvas binding
+  /// Gosslens.load already made - both must agree.
+  async initRenderer(canvas: HTMLCanvasElement): Promise<void> {
+    if (!canvas.id) throw new Error("canvas needs a stable id for bgfx's own selector lookup");
+    const mod = this.mod;
     const selectorPtr = mod.stringToNewUTF8(`#${canvas.id}`);
     const rendererDescPtr = mod.ccall("goss_alloc", "number", ["number"], [12]);
     mod.setValue(rendererDescPtr, selectorPtr, "i32");
@@ -190,23 +265,20 @@ export class Engine {
     // itself, via emscripten_webgl_create_context - passing
     // webGLContextAttributes here has no effect regardless,
     // preserveDrawingBuffer stays false. Worked around in capturePixels.
-    const rendererStatus = await mod.ccall("goss_engine_init_renderer", "number", ["number", "number"], [handle, rendererDescPtr], { async: true });
+    const rendererStatus = await mod.ccall("goss_engine_init_renderer", "number", ["number", "number"], [this.handle, rendererDescPtr], { async: true });
     mod.ccall("goss_free", null, ["number", "number"], [rendererDescPtr, 12]);
     if (rendererStatus !== GOSS_OK) throw new Error(`renderer init failed: ${rendererStatus}`);
 
-    // The same canvas Emscripten's C++ side just created its own
-    // rendering context on - browsers return the existing context for
-    // a repeat getContext call on one canvas, so this is that same
-    // context, not a second independent one. Which type depends on
-    // which build was loaded: try webgpu first since a canvas already
-    // bound to 'webgpu' returns null (not the webgl2 context) from a
-    // mismatched getContext("webgl2") call.
-    const gl = canvas.getContext("webgpu") ? null : canvas.getContext("webgl2");
-
-    return new Engine(mod, handle, canvas, gl);
+    // Emscripten's C++ side just created this canvas's own rendering
+    // context; a repeat getContext returns that same context. webgpu
+    // first: a webgpu-bound canvas answers a mismatched
+    // getContext("webgl2") with null, never the wrong context.
+    this.canvas = canvas;
+    this.gl = canvas.getContext("webgpu") ? null : canvas.getContext("webgl2");
   }
 
   resize(width: number, height: number): void {
+    if (!this.canvas) throw new Error("initRenderer first");
     this.canvas.width = width;
     this.canvas.height = height;
     this.mod.ccall("goss_engine_resize", null, ["number", "number", "number"], [this.handle, width, height]);
@@ -223,6 +295,7 @@ export class Engine {
   /// a fresh render; WebGPU has no sync equivalent, so
   /// goss_engine_capture_frame runs async, mapping a GPU buffer.
   private async capturePixels(session: Session | null): Promise<{ pixels: Uint8Array; width: number; height: number }> {
+    if (!this.canvas) throw new Error("initRenderer first");
     if (this.gl) {
       const gl = this.gl;
       this.renderFrame(session);
@@ -336,6 +409,8 @@ export class Session {
   private framePixelsCapacity = 0;
   /// Fixed capacity: FACE_LANDMARK_COUNT never changes.
   private readonly landmarksPtr: number;
+  /// Fixed layout, reused every tick like the frame descriptor.
+  private readonly signalsPtr: number;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -343,14 +418,22 @@ export class Session {
   ) {
     this.frameDescPtr = mod.ccall("goss_alloc", "number", ["number"], [32]);
     this.landmarksPtr = mod.ccall("goss_alloc", "number", ["number"], [FACE_LANDMARK_COUNT * 3 * 4]);
+    this.signalsPtr = mod.ccall("goss_alloc", "number", ["number"], [LENS_SIGNALS_BYTES]);
   }
 
-  static create(engine: Engine, gosslens: Gosslens): Session {
-    const mod = gosslens.module;
+  static create(engine: Engine, config?: SessionConfig): Session {
+    const mod = engine.module;
+    let configPtr = 0;
+    if (config) {
+      configPtr = mod.ccall("goss_alloc", "number", ["number"], [8]);
+      mod.setValue(configPtr, config.frameBudgetUs ?? 0, "i32");
+      mod.setValue(configPtr + 4, 0, "i32");
+    }
     const sessionOut = mod.ccall("goss_alloc", "number", ["number"], [4]);
-    const status = mod.ccall("goss_session_create", "number", ["number", "number", "number"], [engine.handle, 0, sessionOut]);
+    const status = mod.ccall("goss_session_create", "number", ["number", "number", "number"], [engine.handle, configPtr, sessionOut]);
     const handle = mod.getValue(sessionOut, "i32");
     mod.ccall("goss_free", null, ["number", "number"], [sessionOut, 4]);
+    if (configPtr !== 0) mod.ccall("goss_free", null, ["number", "number"], [configPtr, 8]);
     if (status !== GOSS_OK) throw new Error(`session create failed: ${status}`);
     return new Session(mod, handle);
   }
@@ -405,17 +488,23 @@ export class Session {
     this.mod.ccall("goss_session_deactivate_lens", null, ["number"], [this.handle]);
   }
 
-  /// Advances the active lens's triggers/param ramps by dtUs. No face/
-  /// hands/tap/world/audio signal is live here - every signal reads as
-  /// false/zero, so only triggers with no `when` gate (or ones already
-  /// satisfied by a default) actually fire. Real signal wiring is
-  /// future work; this is enough to prove a lens activates and ticks
-  /// deterministically at all.
-  tickLens(dtUs: number): void {
-    const signalsPtr = this.mod.ccall("goss_alloc", "number", ["number"], [232]);
-    this.mod.HEAPU8.fill(0, signalsPtr, signalsPtr + 232);
-    this.mod.ccall("goss_session_tick_lens", "number", ["number", "number", "number"], [this.handle, dtUs, signalsPtr]);
-    this.mod.ccall("goss_free", null, ["number", "number"], [signalsPtr, 232]);
+  /// Advances the active lens's triggers/param ramps by dtUs, evaluating
+  /// them against signals - omitted fields read as false/zero, so a bare
+  /// tickLens(dtUs) only fires triggers with no `when` gate.
+  tickLens(dtUs: number, signals: LensSignals = {}): void {
+    const ptr = this.signalsPtr;
+    this.mod.HEAPU8.fill(0, ptr, ptr + LENS_SIGNALS_BYTES);
+    this.mod.HEAPU8[ptr] = signals.hasFace ? 1 : 0;
+    this.mod.HEAPU8[ptr + 1] = signals.handsPresent ? 1 : 0;
+    this.mod.HEAPU8[ptr + 2] = signals.tap ? 1 : 0;
+    this.mod.setValue(ptr + 8, signals.worldTrackingState ?? 0, "double");
+    this.mod.setValue(ptr + 16, signals.audioLevel ?? 0, "double");
+    if (signals.blendshapes) {
+      const base = (ptr + 24) >> 2;
+      const count = Math.min(FACE_BLENDSHAPE_COUNT, signals.blendshapes.length);
+      for (let at = 0; at < count; at += 1) this.mod.HEAPF32[base + at] = signals.blendshapes[at]!;
+    }
+    this.mod.ccall("goss_session_tick_lens", "number", ["number", "number", "number"], [this.handle, dtUs, ptr]);
   }
 
   setVideoFlip(enabled: boolean): void {
@@ -525,37 +614,42 @@ export class Session {
     this.framePixelsCapacity = byteLength;
   }
 
-  submitFrameRgbaCopy(rgba: Uint8ClampedArray, width: number, height: number, mirror: boolean): void {
+  /// rotationDegrees omitted means the setVideoFlip state decides (a
+  /// flipped source is a 180-degree turn); timestampUs omitted means
+  /// now.
+  submitFrameRgbaCopy(rgba: Uint8ClampedArray | Uint8Array, stride: number, width: number, height: number, pixelFormat: PixelFormat = PixelFormat.Rgba8, rotationDegrees?: number, mirrored = false, timestampUs?: number): void {
     this.frameWidth = width;
     this.frameHeight = height;
-    const byteLength = width * height * 4;
+    const byteLength = stride * height;
     this.ensureFramePixels(byteLength);
-    this.mod.HEAPU8.set(rgba, this.framePixelsPtr);
+    this.mod.HEAPU8.set(rgba.subarray(0, byteLength), this.framePixelsPtr);
 
-    const rotationQuarters = this.videoFlipped ? 2 : 0;
-    const flags = (mirror ? FRAME_FLAG_MIRROR : 0) | (rotationQuarters << FRAME_ROTATION_SHIFT);
+    const rotationQuarters = ((rotationDegrees ?? (this.videoFlipped ? 180 : 0)) / 90) & 3;
+    const flags = (mirrored ? FRAME_FLAG_MIRROR : 0) | (rotationQuarters << FRAME_ROTATION_SHIFT);
     this.mod.setValue(this.frameDescPtr, width, "i32");
     this.mod.setValue(this.frameDescPtr + 4, height, "i32");
-    this.mod.setValue(this.frameDescPtr + 8, PIXEL_FORMAT_RGBA8, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, pixelFormat, "i32");
     this.mod.setValue(this.frameDescPtr + 12, 0, "i32");
     this.mod.setValue(this.frameDescPtr + 16, 0, "i32");
     this.mod.setValue(this.frameDescPtr + 20, flags, "i32");
-    const timestampUs = Math.round(performance.now() * 1000);
-    this.mod.setValue(this.frameDescPtr + 24, timestampUs >>> 0, "i32");
-    this.mod.setValue(this.frameDescPtr + 28, Math.floor(timestampUs / 4294967296), "i32");
+    const stampUs = timestampUs ?? Math.round(performance.now() * 1000);
+    this.mod.setValue(this.frameDescPtr + 24, stampUs >>> 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, Math.floor(stampUs / 4294967296), "i32");
 
     this.mod.ccall(
       "goss_session_submit_frame_rgba_copy",
       "number",
       ["number", "number", "number", "number"],
-      [this.handle, this.frameDescPtr, this.framePixelsPtr, width * 4],
+      [this.handle, this.frameDescPtr, this.framePixelsPtr, stride],
     );
   }
 
-  /// thermal is always nominal: no browser API surfaces device thermal
-  /// state the way Kotlin/Swift's own OS-level thermal signal does.
-  reportFrame(frameTimeUs: number): void {
-    this.mod.ccall("goss_session_report_frame", "number", ["number", "number", "number"], [this.handle, frameTimeUs, 0]);
+  /// Reports one finished frame: measured whole-pipeline time plus
+  /// thermal pressure (nominal by default - no browser API surfaces
+  /// device thermal state). Returns the degradation level in effect
+  /// for the next frame.
+  reportFrame(frameTimeUs: number, thermal: Thermal = Thermal.Nominal): DegradeLevel {
+    return this.mod.ccall("goss_session_report_frame", "number", ["number", "number", "number"], [this.handle, frameTimeUs, thermal]);
   }
 
   degradeLevel(): DegradeLevel {
@@ -597,13 +691,14 @@ export class PreviewSession {
 
   static async create(canvas: HTMLCanvasElement, wasmJsUrl: string | URL, events: SessionEvents = {}): Promise<PreviewSession> {
     const gosslens = await Gosslens.load(canvas, wasmJsUrl);
-    const engine = await Engine.create(gosslens, canvas);
-    const session = Session.create(engine, gosslens);
+    const engine = Engine.create(gosslens);
+    await engine.initRenderer(canvas);
+    const session = Session.create(engine);
     return new PreviewSession(gosslens, engine, session, events);
   }
 
-  get abiVersion(): number {
-    return this.gosslens.abiVersion;
+  abiVersion(): number {
+    return this.gosslens.abiVersion();
   }
 
   private setState(state: CaptureState): void {
@@ -643,8 +738,8 @@ export class PreviewSession {
     this.session.deactivateLens();
   }
 
-  tickLens(dtUs: number): void {
-    this.session.tickLens(dtUs);
+  tickLens(dtUs: number, signals: LensSignals = {}): void {
+    this.session.tickLens(dtUs, signals);
   }
 
   setVideoFlip(enabled: boolean): void {
@@ -680,7 +775,7 @@ export class PreviewSession {
     // setLandmarksFromStill tracks this same unmirrored image - mirroring
     // only the background here would leave the tracked landmarks
     // pointing at the wrong side of the now-mirrored face.
-    this.session.submitFrameRgbaCopy(image.data, image.width, image.height, false);
+    this.session.submitFrameRgbaCopy(image.data, image.width * 4, image.width, image.height);
   }
 
   async start(): Promise<void> {
@@ -736,7 +831,7 @@ export class PreviewSession {
       // for display, so the engine keeps working in the camera's real,
       // unmirrored coordinate space (matching tracking, which analyzes
       // this same unmirrored buffer).
-      this.session.submitFrameRgbaCopy(pixels.data, width, height, false);
+      this.session.submitFrameRgbaCopy(pixels.data, width * 4, width, height);
     }
 
     const status = this.engine.renderFrame(this.session);

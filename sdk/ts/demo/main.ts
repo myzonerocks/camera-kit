@@ -13,6 +13,7 @@ interface TrackingReply {
   presence: number;
   landmarkCount: number;
   landmarks: Float32Array;
+  blendshapes: Float32Array;
 }
 
 /// The tracking worker hosts the wasm module; frames go over as
@@ -88,6 +89,7 @@ async function startTracking(preview: PreviewSession): Promise<void> {
   const scratch = document.createElement("canvas");
   const ctx = scratch.getContext("2d", { willReadFrequently: true })!;
   let trackingAnnounced = false;
+  let lastReply: TrackingReply | null = null;
 
   // One analysis frame in flight at a time, always the newest; the live
   // loop samples the camera element at analysis size.
@@ -115,6 +117,7 @@ async function startTracking(preview: PreviewSession): Promise<void> {
       // landmarks setLandmarksFromStill just set explicitly for the
       // frozen frame. Stale results while paused are simply dropped.
       if (video.paused) return;
+      lastReply = reply;
       drawOverlay(reply, analysisWidth, analysisHeight);
       preview.setFaceLandmarks(
         reply.presence >= 0.5 && reply.landmarkCount > 0 ? reply.landmarks : null,
@@ -128,6 +131,23 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     });
   };
   requestAnimationFrame(feed);
+
+  // Ticks the active lens at display refresh rate with the newest
+  // tracking result's signals, the same rhythm the iOS demo drives -
+  // paused (a frozen still-photo test) means the prover owns ticking.
+  let lastLensTick = performance.now();
+  const lensTick = () => {
+    requestAnimationFrame(lensTick);
+    const now = performance.now();
+    const dtUs = Math.max(0, Math.round((now - lastLensTick) * 1000));
+    lastLensTick = now;
+    if (preview.video.paused) return;
+    preview.tickLens(dtUs, {
+      hasFace: (lastReply?.presence ?? 0) >= 0.5 && (lastReply?.landmarkCount ?? 0) > 0,
+      blendshapes: lastReply?.blendshapes,
+    });
+  };
+  requestAnimationFrame(lensTick);
 
   // The still-image path the prover drives: one fetched image through the
   // same worker, resolved with the parsed result.
@@ -216,14 +236,14 @@ async function run(): Promise<void> {
   // camera does this consistently, so "never asked" should mean
   // "already correct," not "upside down until you notice and fix it."
   const flipCameraCheckbox = document.getElementById("flip-camera") as HTMLInputElement | null;
-  const flipRaw = localStorage.getItem("ckweb-flip-camera");
+  const flipRaw = localStorage.getItem("gossweb-flip-camera");
   const flipStored = flipRaw === null ? true : flipRaw === "1";
   if (flipCameraCheckbox) {
     flipCameraCheckbox.checked = flipStored;
     preview.setVideoFlip(flipStored);
     flipCameraCheckbox.addEventListener("change", () => {
       preview.setVideoFlip(flipCameraCheckbox.checked);
-      localStorage.setItem("ckweb-flip-camera", flipCameraCheckbox.checked ? "1" : "0");
+      localStorage.setItem("gossweb-flip-camera", flipCameraCheckbox.checked ? "1" : "0");
     });
   }
   startTracking(preview).catch((err) => {

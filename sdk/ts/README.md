@@ -26,10 +26,11 @@ point at - not bundled, since WebGPU and WebGL2 are separate artifacts
 import { Gosslens, Engine, Session, PreviewSession } from "@gosslens/core";
 
 const gosslens = await Gosslens.load(canvas, wasmJsUrl);
-const engine = await Engine.create(gosslens, canvas);
-const session = Session.create(engine, gosslens);
+const engine = Engine.create(gosslens);
+await engine.initRenderer(canvas);
+const session = Session.create(engine);
 
-session.submitFrameRgbaCopy(rgba, width, height, mirror);
+session.submitFrameRgbaCopy(rgba, width * 4, width, height);
 engine.renderFrame(session);
 
 session.setWhiten(0.6);

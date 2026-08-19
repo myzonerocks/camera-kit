@@ -167,9 +167,9 @@ file must move together.
 |---|---|---|
 | `goss_session_enable_face_tracking` | `enableFaceTracking(taskBundle, threads)` | native tracking path |
 | `goss_session_disable_face_tracking` | `disableFaceTracking()` | native tracking path |
-| `goss_session_track_frame` | `trackFrame(y, yStride, uv, uvStride, width, height, timestampUs)` | native tracking path |
+| `goss_session_track_frame` | `trackFrame(y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs)` | native tracking path |
 | `goss_session_face_result` | `faceResult(result)` | native tracking path |
-| `goss_session_set_face_landmarks` | `setFaceLandmarks(points)` | Web analysis-producer path |
+| `goss_session_set_face_landmarks` | `setFaceLandmarks(points)`; web adds `sourceWidth, sourceHeight` since its analysis resolution is decoupled from the rendered frame's | Web analysis-producer path |
 
 ### Segmentation
 
@@ -208,6 +208,28 @@ complete parameter list.**
 | `goss_session_activate_lens_from_directory` | `activateLensFromDirectory(bundlePath)` | native SDKs |
 | `goss_session_deactivate_lens` | `deactivateLens()` | all SDKs |
 | `goss_session_tick_lens` | `tickLens(dtUs, signals)` | all SDKs |
+
+## Web tracking module
+
+The web SDK's face tracking runs in a separate wasm module
+(`gosslens_tracking.wasm`, built by `zig build tracking-wasm`), not through
+the frozen C ABI - wasm has no threads here, so the main engine module
+can't host the tracking worker the native targets run in-process. Its
+exports are their own small contract, wrapped only by the web SDK's
+`FaceTracker`:
+
+| Export | Contract |
+|---|---|
+| `goss_tracking_alloc(size)` / `goss_tracking_free(ptr, size)` | module-heap staging for the buffers below |
+| `goss_tracking_result_size()` | byte size of the result struct, `goss_face_result`'s frozen layout |
+| `goss_tracking_create(taskPtr, taskLen)` | instance from task-bundle bytes; zero on rejection |
+| `goss_tracking_destroy(instance)` | releases the instance |
+| `goss_tracking_process(instance, rgba, width, height, timestampUs)` | synchronous inference over one RGBA frame; nonzero refuses the frame |
+| `goss_tracking_result(instance, out)` | copies the newest published result; nonzero until one exists |
+
+These names stay `goss_tracking_*`, never gain platform variants, and a
+change here is an ABI change with the same review bar as
+`include/gosslens.h`.
 
 ## Media additions
 
