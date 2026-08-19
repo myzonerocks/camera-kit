@@ -33,6 +33,7 @@ dependencies {
 val syncFaceModel = tasks.register<Copy>("syncFaceModel") {
     from(rootProject.projectDir.resolve("../../.models/face_landmarker.task"))
     from(rootProject.projectDir.resolve("../../.models/gesture_recognizer.task"))
+    from(rootProject.projectDir.resolve("../../.models/pose_landmarker_full.task"))
     into(layout.projectDirectory.dir("src/main/assets"))
 }
 tasks.named("preBuild") { dependsOn(syncFaceModel) }

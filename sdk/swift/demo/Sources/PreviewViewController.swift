@@ -20,6 +20,9 @@ final class PreviewViewController: UIViewController {
     private let handLayer = CAShapeLayer()
     private let trackedFace = FaceResult()
     private let trackedHands = HandResult()
+    private let trackedPose = PoseResult()
+    private let poseLayer = CAShapeLayer()
+    private var lastPoseSerial: UInt64 = 0
     private var lastFaceSerial: UInt64 = 0
     private var lastHandSerial: UInt64 = 0
 
@@ -86,6 +89,10 @@ final class PreviewViewController: UIViewController {
         handLayer.fillColor = UIColor.white.withAlphaComponent(0.8).cgColor
         handLayer.strokeColor = nil
         view.layer.addSublayer(handLayer)
+
+        poseLayer.fillColor = UIColor.white.withAlphaComponent(0.6).cgColor
+        poseLayer.strokeColor = nil
+        view.layer.addSublayer(poseLayer)
 
         setupBeautyControls()
     }
@@ -201,6 +208,7 @@ final class PreviewViewController: UIViewController {
         session.reportFrame(frameTimeUs: frameTimeUs, thermal: ProcessInfo.processInfo.thermalState.gossThermal)
         drawFaceOverlay()
         drawHandOverlay()
+        drawPoseOverlay()
         tickLens(dtUs: frameTimeUs)
         guard (try? engine.renderFrame(session: session)) != nil else { return }
         renderedFrames += 1
@@ -280,6 +288,37 @@ final class PreviewViewController: UIViewController {
             }
         }
         handLayer.path = path
+    }
+
+    /// The same sensor-to-screen mapping as the other overlays; only
+    /// confidently visible joints draw.
+    private func drawPoseOverlay() {
+        guard let session, (try? session.poseResult(trackedPose)) != nil else { return }
+        guard trackedPose.frameSerial != lastPoseSerial else { return }
+        lastPoseSerial = trackedPose.frameSerial
+        guard trackedPose.landmarkCount > 0, trackedPose.presence >= 0.5 else {
+            poseLayer.path = nil
+            return
+        }
+
+        let path = CGMutablePath()
+        let bounds = view.bounds
+        let sensorWidth = CGFloat(max(camera.frameWidth, 1))
+        let sensorHeight = CGFloat(max(camera.frameHeight, 1))
+        let scaleX = bounds.width / sensorHeight
+        let scaleY = bounds.height / sensorWidth
+        for point in 0 ..< trackedPose.landmarkCount {
+            guard trackedPose.visibilities[point] >= 0.5 else { continue }
+            let x = CGFloat(trackedPose.landmarks[point * 3])
+            let y = CGFloat(trackedPose.landmarks[point * 3 + 1])
+            var viewX = (sensorHeight - y) * scaleX
+            if camera.mirrored {
+                viewX = bounds.width - viewX
+            }
+            let viewY = x * scaleY
+            path.addEllipse(in: CGRect(x: viewX - 3, y: viewY - 3, width: 6, height: 6))
+        }
+        poseLayer.path = path
     }
 
     /// Rides the same result drawFaceOverlay just refreshed - ticking
