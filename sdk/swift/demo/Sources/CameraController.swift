@@ -35,7 +35,8 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private(set) var submittedFrames = 0
     private(set) var frameWidth = 0
     private(set) var frameHeight = 0
-    private var mirrored = false
+    private(set) var position: AVCaptureDevice.Position = .back
+    private(set) var mirrored = false
     private var rotationQuarterTurns: UInt32 = 0
     var onStateChange: ((State) -> Void)?
 
@@ -66,7 +67,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
 
-    func start(session: Session?, position: AVCaptureDevice.Position = .back) {
+    func start(session: Session?, position: AVCaptureDevice.Position = .front) {
         self.session = session
         enableEngineFeaturesWhenActive()
 
@@ -91,6 +92,32 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     func stop() {
         captureSession.stopRunning()
         transition(to: .idle)
+    }
+
+    // Swaps the input device in place rather than tearing the session
+    // down - output, connection, and the beauty/tracking session stay
+    // untouched. mirrored and rotationQuarterTurns both flip with it,
+    // matching configureAndRun's own per-position values.
+    func switchCamera() {
+        let newPosition: AVCaptureDevice.Position = position == .back ? .front : .back
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: newPosition) else { return }
+
+        outputQueue.async { [weak self] in
+            guard let self, let input = try? AVCaptureDeviceInput(device: device) else { return }
+            self.captureSession.beginConfiguration()
+            for existingInput in self.captureSession.inputs {
+                self.captureSession.removeInput(existingInput)
+            }
+            guard self.captureSession.canAddInput(input) else {
+                self.captureSession.commitConfiguration()
+                return
+            }
+            self.captureSession.addInput(input)
+            self.captureSession.commitConfiguration()
+            self.position = newPosition
+            self.mirrored = newPosition == .front
+            self.rotationQuarterTurns = newPosition == .front ? 1 : 3
+        }
     }
 
     private func enableFaceTracking() {
@@ -172,6 +199,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             return
         }
         captureSession.addInput(input)
+        self.position = position
         mirrored = position == .front
 
         let output = AVCaptureVideoDataOutput()
@@ -198,10 +226,11 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         NotificationCenter.default.addObserver(self, selector: #selector(interruptionEnded), name: AVCaptureSession.interruptionEndedNotification, object: captureSession)
         NotificationCenter.default.addObserver(self, selector: #selector(runtimeError), name: AVCaptureSession.runtimeErrorNotification, object: captureSession)
 
-        // rotationZ's positive angle is counter-clockwise, so the rear
-        // sensor's clockwise 90-degree correction is 3 quarter-turns,
-        // not 1 - 1 lands 180 degrees off, both upside down and mirrored.
-        rotationQuarterTurns = 3
+        // rotationZ's positive angle is counter-clockwise: the rear
+        // sensor's clockwise correction is 3 quarter-turns, the front
+        // one mounted 180 degrees opposite on the same PCB needs the
+        // complementary 1 - real device testing caught 3 landing upside down.
+        rotationQuarterTurns = position == .front ? 1 : 3
 
         outputQueue.async {
             self.captureSession.startRunning()

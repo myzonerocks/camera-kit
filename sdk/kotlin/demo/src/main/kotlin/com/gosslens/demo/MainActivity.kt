@@ -358,7 +358,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                             val submitted = session.submitFrameCopy(
                                 ySubmit, yStride, uvSubmit, uvStride,
                                 width, height,
-                                rotationDegrees, mirrored = false,
+                                rotationDegrees, mirrored = true,
                                 timestampUs,
                             )
                             if (submitted) {
@@ -376,7 +376,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                 }
             }
             provider.unbindAll()
-            provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
+            provider.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, analysis)
         }, ContextCompat.getMainExecutor(this))
     }
 }

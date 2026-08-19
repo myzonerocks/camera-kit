@@ -14,6 +14,7 @@ final class PreviewViewController: UIViewController {
     private let log = Logger(subsystem: "com.gosslens.demo", category: "preview")
     private let camera = CameraController()
     private let statusLabel = UILabel()
+    private let switchCameraButton = UIButton(type: .system)
     private let beautyStack = UIStackView()
     private let faceLayer = CAShapeLayer()
     private var lastFaceResult: FaceResult?
@@ -27,7 +28,6 @@ final class PreviewViewController: UIViewController {
     private var fpsWindowStart = CFAbsoluteTimeGetCurrent()
     private var fpsWindowFrames = 0
     private var lastFrameStart = CFAbsoluteTimeGetCurrent()
-    private var proofLogged = false
 
     override func loadView() {
         view = MetalView()
@@ -64,6 +64,18 @@ final class PreviewViewController: UIViewController {
             self?.statusLabel.text = "capture \(state.rawValue)"
         }
 
+        switchCameraButton.setImage(UIImage(systemName: "arrow.triangle.2.circlepath.camera"), for: .normal)
+        switchCameraButton.tintColor = .white
+        switchCameraButton.addTarget(self, action: #selector(switchCameraTapped), for: .touchUpInside)
+        switchCameraButton.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(switchCameraButton)
+        NSLayoutConstraint.activate([
+            switchCameraButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            switchCameraButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            switchCameraButton.widthAnchor.constraint(equalToConstant: 44),
+            switchCameraButton.heightAnchor.constraint(equalToConstant: 44),
+        ])
+
         faceLayer.fillColor = UIColor.white.cgColor
         faceLayer.strokeColor = nil
         view.layer.addSublayer(faceLayer)
@@ -77,12 +89,12 @@ final class PreviewViewController: UIViewController {
     // Metal) - no CPU round trip through beautifyFrame involved.
     private func setupBeautyControls() {
         beautyStack.axis = .vertical
-        beautyStack.spacing = 4
+        beautyStack.spacing = 8
         beautyStack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(beautyStack)
         NSLayoutConstraint.activate([
             beautyStack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            beautyStack.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            beautyStack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
             beautyStack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
         ])
         for (index, name) in ["smooth", "whiten", "thin face", "big eye", "lipstick", "blush"].enumerated() {
@@ -96,6 +108,9 @@ final class PreviewViewController: UIViewController {
             slider.minimumValue = 0
             slider.maximumValue = 1
             slider.tag = index
+            slider.minimumTrackTintColor = .white
+            slider.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.3)
+            slider.thumbTintColor = .white
             slider.addTarget(self, action: #selector(beautySliderChanged(_:)), for: .valueChanged)
 
             let row = UIStackView(arrangedSubviews: [label, slider])
@@ -107,6 +122,10 @@ final class PreviewViewController: UIViewController {
 
     @objc private func beautySliderChanged(_ slider: UISlider) {
         try? session?.setBeauty(effect: Int32(slider.tag), amount: slider.value)
+    }
+
+    @objc private func switchCameraTapped() {
+        camera.switchCamera()
     }
 
     private var conformanceStarted = false
@@ -182,12 +201,8 @@ final class PreviewViewController: UIViewController {
         let now = CFAbsoluteTimeGetCurrent()
         if now - fpsWindowStart >= 2.0 {
             let fps = Double(fpsWindowFrames) / (now - fpsWindowStart)
-            log.info("GOSSDEMO fps \(String(format: "%.1f", fps)) rendered \(self.renderedFrames) submitted \(self.camera.submittedFrames) state \(self.camera.state.rawValue)")
+            log.info("fps \(String(format: "%.1f", fps)) rendered \(self.renderedFrames) submitted \(self.camera.submittedFrames) state \(self.camera.state.rawValue)")
             statusLabel.text = String(format: "capture %@  %.1f fps", camera.state.rawValue, fps)
-            if !proofLogged, camera.submittedFrames > 60, fps > 20 {
-                proofLogged = true
-                log.info("GOSSDEMO preview active: \(self.camera.submittedFrames) camera frames rendered at \(String(format: "%.1f", fps)) fps")
-            }
             fpsWindowStart = now
             fpsWindowFrames = 0
         }
@@ -214,8 +229,13 @@ final class PreviewViewController: UIViewController {
         for index in 0 ..< result.landmarks.count / 3 {
             let x = CGFloat(result.landmarks[index * 3])
             let y = CGFloat(result.landmarks[index * 3 + 1])
-            // Quarter turn: sensor x runs down the portrait screen.
-            let viewX = (sensorHeight - y) * scaleX
+            // Quarter turn: sensor x runs down the portrait screen. The
+            // front camera's preview is mirrored for a selfie view, so
+            // the overlay's horizontal axis mirrors along with it.
+            var viewX = (sensorHeight - y) * scaleX
+            if camera.mirrored {
+                viewX = bounds.width - viewX
+            }
             let viewY = x * scaleY
             path.addEllipse(in: CGRect(x: viewX - 1.5, y: viewY - 1.5, width: 3, height: 3))
         }
