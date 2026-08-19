@@ -1,4 +1,4 @@
-abi 0.9
+abi 0.10
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -39,6 +39,14 @@ type hand.Result size=560 align=8
   field hand_count offset=16 size=4
   field reserved offset=20 size=4
   field hands offset=24 size=536
+type pose.Result size=688 align=8
+  field frame_serial offset=0 size=8
+  field timestamp_us offset=8 size=8
+  field presence offset=16 size=4
+  field landmark_count_out offset=20 size=4
+  field landmarks offset=24 size=396
+  field visibilities offset=420 size=132
+  field presences offset=552 size=132
 type abi.LensSignals size=232 align=8
   field has_face offset=0 size=1
   field hands_present offset=1 size=1
@@ -70,6 +78,9 @@ fn void goss_session_disable_face_tracking(goss_session *session)
 fn goss_status goss_session_enable_hand_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)
 fn void goss_session_disable_hand_tracking(goss_session *session)
 fn goss_status goss_session_hand_result(goss_session *session, goss_hand_result *out_result)
+fn goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)
+fn void goss_session_disable_pose_tracking(goss_session *session)
+fn goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result)
 fn goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)
 fn void goss_session_disable_segmentation(goss_session *session)
 fn goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)

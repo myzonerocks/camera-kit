@@ -141,6 +141,21 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         } catch (e: java.io.IOException) {
             Log.i(tag, "hand tracking bundle not present")
         }
+        try {
+            assets.open("pose_landmarker_full.task").use { stream ->
+                val bytes = stream.readBytes()
+                val bundle = ByteBuffer.allocateDirect(bytes.size)
+                bundle.put(bytes)
+                bundle.flip()
+                if (createdSession.enablePoseTracking(bundle, 0)) {
+                    Log.i(tag, "pose tracking up")
+                } else {
+                    Log.i(tag, "pose tracking unavailable in this build")
+                }
+            }
+        } catch (e: java.io.IOException) {
+            Log.i(tag, "pose tracking bundle not present")
+        }
         extractBeautyResources()?.let { resourceRoot ->
             if (createdSession.enableBeauty(resourceRoot)) {
                 Log.i(tag, "beauty up")

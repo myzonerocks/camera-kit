@@ -58,6 +58,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             engineFeaturesEnabled = true
             enableFaceTracking()
             enableHandTracking()
+            enablePoseTracking()
             enableBeauty()
             activateLens()
             return
@@ -74,6 +75,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             self.engineFeaturesEnabled = true
             self.enableFaceTracking()
             self.enableHandTracking()
+            self.enablePoseTracking()
             self.enableBeauty()
             self.activateLens()
         }
@@ -166,6 +168,22 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             log.info("hand tracking enabled")
         } catch {
             log.info("hand tracking enable failed: \(String(describing: error))")
+        }
+    }
+
+    private func enablePoseTracking() {
+        guard let session,
+              let url = Bundle.main.url(forResource: "pose_landmarker_full", withExtension: "task"),
+              let bundleData = try? Data(contentsOf: url)
+        else {
+            log.info("pose tracking bundle not present")
+            return
+        }
+        do {
+            try session.enablePoseTracking(taskBundle: bundleData, threads: 0)
+            log.info("pose tracking enabled")
+        } catch {
+            log.info("pose tracking enable failed: \(String(describing: error))")
         }
     }
 

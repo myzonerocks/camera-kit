@@ -13,6 +13,7 @@ const detector = @import("detector");
 const sampler = @import("sampler");
 const face = @import("face");
 const hand = @import("hand");
+const pose = @import("pose");
 const tracker = @import("tracker");
 
 const abi = @import("abi");
@@ -577,6 +578,192 @@ pub fn main(init_args: std.process.Init) !u8 {
         // The corpus frame's raised right palm is the gesture oracle: the
         // classifier must call it an open palm through the whole rail.
         if (!open_palm_seen) return 1;
+    }
+
+
+    // The pose pipeline over the pinned corpus: the standing figure must
+    // detect and land 33 in-bounds landmarks with a full-height spread,
+    // hold through a tracking pass steered by the auxiliary pair, and
+    // publish through the public surface; the control frame stays empty.
+    {
+        const pose_task_bytes = try std.Io.Dir.cwd().readFileAlloc(
+            harness_io,
+            ".models/pose_landmarker_full.task",
+            gpa,
+            .limited(16 << 20),
+        );
+        defer gpa.free(pose_task_bytes);
+        const pose_task = try bundle.Bundle.open(pose_task_bytes);
+        const pose_detector_entry = try pose_task.find("pose_detector.tflite");
+        const pose_landmarks_entry = try pose_task.find("pose_landmarks_detector.tflite");
+        const pose_detector_bytes = try pose_task.payload(gpa, pose_detector_entry);
+        defer pose_detector_bytes.deinit(gpa);
+        const pose_landmark_bytes = try pose_task.payload(gpa, pose_landmarks_entry);
+        defer pose_landmark_bytes.deinit(gpa);
+
+        var pose_detector_engine = try runtime.Engine.init(pose_detector_bytes.bytes, 2);
+        defer pose_detector_engine.deinit();
+        var pose_landmarks_engine = try runtime.Engine.init(pose_landmark_bytes.bytes, 2);
+        defer pose_landmarks_engine.deinit();
+        try reportEngine("pose_detector", &pose_detector_engine);
+        try reportEngine("pose_landmarks_detector", &pose_landmarks_engine);
+
+        var pose_dims: [8]i32 = undefined;
+        const pose_box_dims = try pose_detector_engine.outputDims(0, &pose_dims);
+        if (pose_box_dims.len < 2) return error.UnexpectedModel;
+        const pose_total: usize = @intCast(pose_box_dims[1]);
+        const pose_side: u32 = blk: {
+            const tensor = runtime.c.TfLiteInterpreterGetInputTensor(pose_detector_engine.interpreter, 0) orelse
+                return error.UnexpectedModel;
+            break :blk @intCast(runtime.c.TfLiteTensorDim(tensor, 1));
+        };
+        const pose_plan = detector.planForModel(pose_side, pose_total) orelse return error.UnexpectedModel;
+        const pose_anchors = try gpa.alloc(detector.Anchor, pose_total);
+        defer gpa.free(pose_anchors);
+        detector.generateAnchors(pose_side, pose_plan, pose_anchors);
+        const pose_tensor = try gpa.alloc(f32, @as(usize, pose_side) * pose_side * 3);
+        defer gpa.free(pose_tensor);
+        const pose_landmark_side: u32 = blk: {
+            const tensor = runtime.c.TfLiteInterpreterGetInputTensor(pose_landmarks_engine.interpreter, 0) orelse
+                return error.UnexpectedModel;
+            break :blk @intCast(runtime.c.TfLiteTensorDim(tensor, 1));
+        };
+        const pose_landmark_tensor = try gpa.alloc(f32, @as(usize, pose_landmark_side) * pose_landmark_side * 3);
+        defer gpa.free(pose_landmark_tensor);
+        const pose_candidates = try gpa.alloc(detector.pose.Detection, 8);
+        defer gpa.free(pose_candidates);
+
+        for ([_]struct { path: []const u8, body: bool }{
+            .{ .path = ".models/corpus/body_standing.jpg", .body = true },
+            .{ .path = ".models/corpus/no_face_control.jpg", .body = false },
+        }) |case| {
+            const corpus = try loadCorpusFrame(gpa, case.path);
+            defer corpus.deinit();
+            const image = corpus.frame;
+            const square = sampler.frameSquare(image.width, image.height);
+
+            // Symmetric input, the pose detector's own range - not the
+            // palm detector's zero-to-one.
+            sampler.sampleRegion(image, square, .symmetric, pose_side, pose_tensor);
+            try pose_detector_engine.writeInput(0, std.mem.sliceAsBytes(pose_tensor));
+            try pose_detector_engine.invoke();
+            const bodies = detector.pose.decode(
+                try pose_detector_engine.outputFloats(0),
+                try pose_detector_engine.outputFloats(1),
+                pose_anchors,
+                @floatFromInt(pose_side),
+                0.5,
+                pose_candidates,
+            );
+            try out.print("{s}: {d}x{d}, pose detections {d}\n", .{ case.path, image.width, image.height, bodies.len });
+            try out.flush();
+            if (!case.body) {
+                if (bodies.len != 0) return 1;
+                continue;
+            }
+            if (bodies.len == 0) return 1;
+
+            const crop = pose.regionFromDetection(bodies[0], square);
+            sampler.sampleRegion(image, crop, .unit, pose_landmark_side, pose_landmark_tensor);
+            try pose_landmarks_engine.writeInput(0, std.mem.sliceAsBytes(pose_landmark_tensor));
+            try pose_landmarks_engine.invoke();
+            const raw_pose = try pose_landmarks_engine.outputFloats(0);
+            const flag_raw = (try pose_landmarks_engine.outputFloats(1))[0];
+            const body_presence = if (flag_raw < 0.0 or flag_raw > 1.0)
+                1.0 / (1.0 + @exp(-flag_raw))
+            else
+                flag_raw;
+
+            var body_landmarks: [pose.raw_landmark_count]pose.Landmark = undefined;
+            var visibilities: [pose.raw_landmark_count]f32 = undefined;
+            var point_presences: [pose.raw_landmark_count]f32 = undefined;
+            pose.decodeLandmarks(raw_pose, crop, @floatFromInt(pose_landmark_side), &body_landmarks, &visibilities, &point_presences);
+            var inside: usize = 0;
+            var min_y = body_landmarks[0].y;
+            var max_y = body_landmarks[0].y;
+            for (body_landmarks[0..pose.landmark_count]) |landmark| {
+                const slack_x = @as(f32, @floatFromInt(image.width)) * 0.1;
+                const slack_y = @as(f32, @floatFromInt(image.height)) * 0.1;
+                if (landmark.x > -slack_x and landmark.x < @as(f32, @floatFromInt(image.width)) + slack_x and
+                    landmark.y > -slack_y and landmark.y < @as(f32, @floatFromInt(image.height)) + slack_y)
+                {
+                    inside += 1;
+                }
+                min_y = @min(min_y, landmark.y);
+                max_y = @max(max_y, landmark.y);
+            }
+            const body_height = max_y - min_y;
+            try out.print(
+                "  pose presence {d:.3}, landmarks inside {d}/{d}, body height {d:.0}px\n",
+                .{ body_presence, inside, pose.landmark_count, body_height },
+            );
+            try out.flush();
+            if (body_presence < 0.5) return 1;
+            if (inside != pose.landmark_count) return 1;
+            // A standing figure must span a real fraction of the frame.
+            if (body_height < @as(f32, @floatFromInt(image.height)) * 0.3) return 1;
+
+            // Tracking pass: the next crop comes from the auxiliary
+            // alignment pair alone and must keep the lock.
+            const refined = pose.regionFromLandmarks(&body_landmarks);
+            sampler.sampleRegion(image, refined, .unit, pose_landmark_side, pose_landmark_tensor);
+            try pose_landmarks_engine.writeInput(0, std.mem.sliceAsBytes(pose_landmark_tensor));
+            try pose_landmarks_engine.invoke();
+            const tracked_raw = (try pose_landmarks_engine.outputFloats(1))[0];
+            const tracked_presence = if (tracked_raw < 0.0 or tracked_raw > 1.0)
+                1.0 / (1.0 + @exp(-tracked_raw))
+            else
+                tracked_raw;
+            try out.print("  pose tracking pass: presence {d:.3}\n", .{tracked_presence});
+            try out.flush();
+            if (tracked_presence < 0.5) return 1;
+        }
+
+        // The same frame through the public surface: enable, one
+        // track_frame, polled goss_session_pose_result.
+        const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+        defer abi.destroyEngine(engine);
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        const enable_pose = abi.goss_session_enable_pose_tracking(session, pose_task_bytes.ptr, pose_task_bytes.len, 2);
+        if (enable_pose != .ok) {
+            try out.print("abi enable pose tracking: {s}\n", .{@tagName(enable_pose)});
+            try out.flush();
+            return 1;
+        }
+        const corpus = try loadCorpusFrame(gpa, ".models/corpus/body_standing.jpg");
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = 3000,
+        };
+        if (abi.goss_session_track_frame(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, ((planes.width + 1) / 2) * 2) != .ok) return 1;
+        var pose_result: pose.Result = undefined;
+        var polls: usize = 0;
+        while (abi.goss_session_pose_result(session, &pose_result) == .again) {
+            std.Thread.yield() catch {};
+            polls += 1;
+            if (polls > 100_000_000) {
+                try out.print("abi pose result: timed out\n", .{});
+                try out.flush();
+                return 1;
+            }
+        }
+        try out.print(
+            "abi pose surface: serial {d}, presence {d:.3}, landmarks {d}, timestamp {d}\n",
+            .{ pose_result.frame_serial, pose_result.presence, pose_result.landmark_count_out, pose_result.timestamp_us },
+        );
+        try out.flush();
+        if (pose_result.presence < 0.5) return 1;
+        if (pose_result.landmark_count_out != pose.landmark_count) return 1;
+        if (pose_result.timestamp_us != 3000) return 1;
     }
 
     // The same portrait through the public surface: session, worker

@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.view.View
 import com.gosslens.FaceResult
 import com.gosslens.HandResult
+import com.gosslens.PoseResult
 import com.gosslens.Session
 
 /** Draws the latest tracking result over the preview. Landmarks arrive in
@@ -28,6 +29,9 @@ class FaceOverlayView(context: Context) : View(context) {
     /** Read by MainActivity to drive the lens's hands-present signal. */
     val handCount: Int get() = hands.handCount
 
+    private val body = PoseResult()
+    private var lastPoseSerial = 0L
+
     private var frameWidth = 0
     private var frameHeight = 0
     private var rotationDegrees = 0
@@ -40,6 +44,7 @@ class FaceOverlayView(context: Context) : View(context) {
     }
     private val points = FloatArray(com.gosslens.Gosslens.FACE_LANDMARK_COUNT * 2)
     private val handPoints = FloatArray(com.gosslens.Gosslens.HAND_MAX * com.gosslens.Gosslens.HAND_LANDMARK_COUNT * 2)
+    private val posePoints = FloatArray(com.gosslens.Gosslens.POSE_LANDMARK_COUNT * 2)
 
     fun frameGeometry(width: Int, height: Int, rotation: Int, mirror: Boolean) {
         frameWidth = width
@@ -58,6 +63,10 @@ class FaceOverlayView(context: Context) : View(context) {
         }
         if (session.handResult(hands) && hands.frameSerial != lastHandSerial) {
             lastHandSerial = hands.frameSerial
+            fresh = true
+        }
+        if (session.poseResult(body) && body.frameSerial != lastPoseSerial) {
+            lastPoseSerial = body.frameSerial
             fresh = true
         }
         if (fresh) postInvalidateOnAnimation()
@@ -105,6 +114,16 @@ class FaceOverlayView(context: Context) : View(context) {
                 }
             }
             canvas.drawPoints(handPoints, 0, write, pointPaint)
+        }
+
+        if (body.landmarkCount > 0 && body.presence >= 0.5f) {
+            var write = 0
+            for (point in 0 until body.landmarkCount) {
+                if (body.visibilities[point] < 0.5f) continue
+                mapPoint(body.landmarks[point * 3], body.landmarks[point * 3 + 1], quarterTurns, scaleX, scaleY, posePoints, write)
+                write += 2
+            }
+            canvas.drawPoints(posePoints, 0, write, pointPaint)
         }
     }
 }

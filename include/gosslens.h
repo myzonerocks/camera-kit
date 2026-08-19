@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 9u
+#define GOSS_ABI_MINOR 10u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -197,6 +197,21 @@ typedef struct goss_hand_result {
     goss_hand hands[GOSS_HAND_MAX];
 } goss_hand_result;
 
+/* One pose tracking result: a 33-point skeleton in frame pixels with z
+ * in the same scale, plus zero-to-one visibility and presence scores per
+ * point. A zero landmark_count means the frame held no body. Layout:
+ * 688 bytes including tail padding, static-asserted below. */
+#define GOSS_POSE_LANDMARK_COUNT 33u
+typedef struct goss_pose_result {
+    uint64_t frame_serial;
+    int64_t timestamp_us;
+    float presence;
+    uint32_t landmark_count;
+    float landmarks[GOSS_POSE_LANDMARK_COUNT * 3];
+    float visibilities[GOSS_POSE_LANDMARK_COUNT];
+    float presences[GOSS_POSE_LANDMARK_COUNT];
+} goss_pose_result;
+
 /* The live signals goss_session_tick_lens evaluates a lens's compiled
  * triggers against (a GLF `when` expression's signal reads). blendshapes
  * mirrors goss_face_result's own inline-array convention rather than a
@@ -311,6 +326,13 @@ void goss_session_disable_face_tracking(goss_session *session);
 goss_status goss_session_enable_hand_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads);
 void goss_session_disable_hand_tracking(goss_session *session);
 
+/* Graph thread. Stands the pose tracking worker up from a model bundle
+ * (a MediaPipe pose landmarker .task file). The bundle bytes are copied;
+ * the caller may release them on return. Builds without the inference
+ * stack report unsupported. */
+goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads);
+void goss_session_disable_pose_tracking(goss_session *session);
+
 /* Graph thread. Stands the segmentation worker up from a raw model
  * (a selfie or hair segmenter .tflite file, not bundled the way
  * face_landmarker.task is). The model bytes are copied; the caller may
@@ -333,6 +355,11 @@ goss_status goss_session_face_result(goss_session *session, goss_face_result *ou
  * memory. Reports GOSS_AGAIN until the worker has published its first
  * result. */
 goss_status goss_session_hand_result(goss_session *session, goss_hand_result *out_result);
+
+/* Graph thread. Reads the newest pose tracking result into caller
+ * memory. Reports GOSS_AGAIN until the worker has published its first
+ * result. */
+goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result);
 
 /* Effect identifiers for goss_session_set_beauty. Values clamp to zero and
  * one; zero disables the effect. */
@@ -433,6 +460,8 @@ _Static_assert(offsetof(goss_face_result, landmarks) == 24, "goss_face_result la
 _Static_assert(sizeof(goss_hand) == 268, "goss_hand layout is frozen");
 _Static_assert(sizeof(goss_hand_result) == 560, "goss_hand_result layout is frozen");
 _Static_assert(offsetof(goss_hand_result, hands) == 24, "goss_hand_result layout is frozen");
+_Static_assert(sizeof(goss_pose_result) == 688, "goss_pose_result layout is frozen");
+_Static_assert(offsetof(goss_pose_result, landmarks) == 24, "goss_pose_result layout is frozen");
 _Static_assert(sizeof(goss_renderer_desc) == (sizeof(void *) == 8 ? 16 : 12), "goss_renderer_desc layout is frozen");
 _Static_assert(sizeof(goss_frame_planes) == 32, "goss_frame_planes layout is frozen");
 _Static_assert(sizeof(goss_lens_signals) == 232, "goss_lens_signals layout is frozen");

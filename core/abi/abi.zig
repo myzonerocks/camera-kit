@@ -17,6 +17,7 @@ const tracking = @import("tracking");
 const segmentation = @import("segmentation");
 const face = @import("face");
 const hand = @import("hand");
+const pose = @import("pose");
 const beauty = @import("beauty");
 const manifest = @import("manifest");
 const trigger = @import("trigger");
@@ -55,9 +56,10 @@ const runtime = @import("runtime");
 
 pub const FaceResult = face.Result;
 pub const HandResult = hand.Result;
+pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 9;
+pub const abi_minor: u16 = 10;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -210,6 +212,7 @@ pub const Session = struct {
     capture_requested: bool = false,
     face_tracking: ?*tracking.Tracking = null,
     hand_tracking: ?*tracking.hand_worker.HandTracking = null,
+    pose_tracking: ?*tracking.pose_worker.PoseTracking = null,
     segmentation_worker: ?*segmentation.Segmentation = null,
     /// The most recent mask, uploaded as a real GPU texture the same way
     /// a lut.pass asset is - a raw byte array has no reason to cross the
@@ -966,6 +969,8 @@ pub fn destroySession(session: *Session) void {
     session.face_tracking = null;
     if (session.hand_tracking) |worker| tracking.hand_worker.destroy(worker);
     session.hand_tracking = null;
+    if (session.pose_tracking) |worker| tracking.pose_worker.destroy(worker);
+    session.pose_tracking = null;
     if (session.segmentation_worker) |worker| segmentation.destroy(worker);
     session.segmentation_worker = null;
     destroySegmentationTexture(session);
@@ -1428,6 +1433,29 @@ pub export fn goss_session_disable_hand_tracking(session: ?*Session) void {
     s.hand_tracking = null;
 }
 
+/// Stands the pose tracking worker up from a pose landmarker task
+/// bundle. The bundle bytes are copied; the caller may release them on
+/// return. Builds without the inference stack report unsupported.
+pub export fn goss_session_enable_pose_tracking(session: ?*Session, task_bytes: ?[*]const u8, task_len: usize, threads: i32) Status {
+    const s = session orelse return .invalid_argument;
+    const bytes = task_bytes orelse return .invalid_argument;
+    if (task_len == 0) return .invalid_argument;
+    if (s.pose_tracking != null) return .ok;
+    const worker_threads = if (threads <= 0) 2 else threads;
+    s.pose_tracking = tracking.pose_worker.create(s.engine.gpa, bytes[0..task_len], worker_threads) catch |err| switch (err) {
+        error.Unsupported => return .unsupported,
+        error.InvalidBundle => return .invalid_argument,
+        error.OutOfMemory => return .out_of_memory,
+    };
+    return .ok;
+}
+
+pub export fn goss_session_disable_pose_tracking(session: ?*Session) void {
+    const s = session orelse return;
+    if (s.pose_tracking) |worker| tracking.pose_worker.destroy(worker);
+    s.pose_tracking = null;
+}
+
 /// Stands the segmentation worker up from a raw model (selfie or hair
 /// segmenter, not bundled the way face_landmarker.task is). The model
 /// bytes are copied; the caller may release them on return. On platforms
@@ -1461,7 +1489,7 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     const d = desc orelse return .invalid_argument;
     const y_plane = y orelse return .invalid_argument;
     const uv_plane = uv orelse return .invalid_argument;
-    if (s.face_tracking == null and s.hand_tracking == null and s.segmentation_worker == null) return .again;
+    if (s.face_tracking == null and s.hand_tracking == null and s.pose_tracking == null and s.segmentation_worker == null) return .again;
     if (d.pixel_format != pixel_format_nv12) return .invalid_argument;
     if (d.width == 0 or d.height == 0) return .invalid_argument;
     if (y_stride < d.width or uv_stride < ((d.width + 1) / 2) * 2) return .invalid_argument;
@@ -1477,6 +1505,9 @@ pub export fn goss_session_track_frame(session: ?*Session, desc: ?*const FrameDe
     }
     if (s.hand_tracking) |worker| {
         tracking.hand_worker.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
+    }
+    if (s.pose_tracking) |worker| {
+        tracking.pose_worker.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
     }
     if (s.segmentation_worker) |worker| {
         segmentation.submitNv12(worker, d.width, d.height, d.timestamp_us, conversion, y_plane, y_stride, uv_plane, uv_stride);
@@ -1501,6 +1532,16 @@ pub export fn goss_session_hand_result(session: ?*Session, out_result: ?*hand.Re
     const out = out_result orelse return .invalid_argument;
     const worker = s.hand_tracking orelse return .again;
     if (!tracking.hand_worker.readResult(worker, out)) return .again;
+    return .ok;
+}
+
+/// Reads the newest pose tracking result into caller memory. Reports
+/// again until the worker has published its first result.
+pub export fn goss_session_pose_result(session: ?*Session, out_result: ?*pose.Result) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_result orelse return .invalid_argument;
+    const worker = s.pose_tracking orelse return .again;
+    if (!tracking.pose_worker.readResult(worker, out)) return .again;
     return .ok;
 }
 

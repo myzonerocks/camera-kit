@@ -20,7 +20,7 @@ completeness and merges as a single squash PR.
 - [x] Lens format: spec, manifest/trigger/animation runtime, graph splice/unsplice, validator, fuzzers; shader pass, LUT, blend, and glTF draw node types; four reference lenses shipped (shader-tint, beauty-baseline, background-swap, trigger-anim)
 - [x] Hands: palm detection and hand landmarks on the existing tracking rail, up to two hands with handedness and canned gestures, goss_hand_* mirroring the face surface, Swift/Kotlin wrappers and demo overlays, proven on the pinned corpus through the public surface; the hands-present signal feeds lens triggers, per-gesture trigger signals and the web tracking module still open
 - [x] Segmentation: the multiclass model on the segmentation worker with per-class masks, named mask channels for shader passes, and the hair-recolor reference lens, proven on the corpus and bit-stable in conformance; on-device visual passes still owner-gated
-- [ ] Pose: body landmark tracking, skeleton attachment points in the lens format
+- [x] Pose: the 33-point body landmark pipeline on the tracking rail with per-point visibility and presence, goss_pose_* mirroring the face surface, Swift/Kotlin wrappers and demo overlays, proven on a pinned standing-figure corpus frame through the public surface; skeleton attachment points land with the anchor-node family alongside head pose
 - [ ] Head pose: landmark-driven pose estimation, then the glTF face-anchor node and the face-mask reference lens on top of it
 - [ ] Face-mesh effects: the canonical face topology and UVs over the tracked landmarks, mesh-warp lens nodes for makeup, masks, and face paint
 - [ ] World tracking: the goss_world_source seam, ARKit/ARCore/WebXR backends, and the world-anchor reference lens

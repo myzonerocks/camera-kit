@@ -11,6 +11,7 @@ const std = @import("std");
 
 pub const keypoint_count = 6;
 pub const palm_keypoint_count = 7;
+pub const pose_keypoint_count = 4;
 
 pub const Layer = struct {
     stride: u32,
@@ -65,6 +66,15 @@ pub const palm_layers = [_]Layer{
     .{ .stride = 16, .anchors_per_cell = 2 },
     .{ .stride = 16, .anchors_per_cell = 2 },
 };
+/// The pose detector's five SSD layers: one stride-8 and one stride-16
+/// grid, then three sequential stride-32 grids, two anchors per cell.
+pub const pose_layers = [_]Layer{
+    .{ .stride = 8, .anchors_per_cell = 2 },
+    .{ .stride = 16, .anchors_per_cell = 2 },
+    .{ .stride = 32, .anchors_per_cell = 2 },
+    .{ .stride = 32, .anchors_per_cell = 2 },
+    .{ .stride = 32, .anchors_per_cell = 2 },
+};
 
 /// Picks the stride plan matching a model's own anchor count, verified
 /// against its input size. The model decides; a mismatch is a wiring
@@ -74,6 +84,7 @@ pub fn planForModel(input_size: u32, anchor_total: usize) ?[]const Layer {
         896 => &short_range_layers,
         2304 => &full_range_layers,
         2016 => &palm_layers,
+        2254 => &pose_layers,
         else => return null,
     };
     if (anchorCount(input_size, plan) != anchor_total) return null;
@@ -82,6 +93,7 @@ pub fn planForModel(input_size: u32, anchor_total: usize) ?[]const Layer {
 
 pub const face = WithKeypoints(keypoint_count);
 pub const palm = WithKeypoints(palm_keypoint_count);
+pub const pose = WithKeypoints(pose_keypoint_count);
 
 /// The decode shapes for one model family's keypoint count.
 pub fn WithKeypoints(comptime family_keypoints: u32) type {
@@ -241,12 +253,14 @@ test "anchor plans produce the model's anchor counts" {
     try t.expectEqual(@as(usize, 896), anchorCount(128, &short_range_layers));
     try t.expectEqual(@as(usize, 2304), anchorCount(192, &full_range_layers));
     try t.expectEqual(@as(usize, 2016), anchorCount(192, &palm_layers));
+    try t.expectEqual(@as(usize, 2254), anchorCount(224, &pose_layers));
 }
 
 test "plan selection follows the model's anchor total" {
     try t.expectEqual(@as(?[]const Layer, &short_range_layers), planForModel(128, 896));
     try t.expectEqual(@as(?[]const Layer, &full_range_layers), planForModel(192, 2304));
     try t.expectEqual(@as(?[]const Layer, &palm_layers), planForModel(192, 2016));
+    try t.expectEqual(@as(?[]const Layer, &pose_layers), planForModel(224, 2254));
     try t.expectEqual(@as(?[]const Layer, null), planForModel(128, 2304));
     try t.expectEqual(@as(?[]const Layer, null), planForModel(128, 1000));
 }

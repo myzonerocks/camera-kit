@@ -169,9 +169,12 @@ file must move together.
 | `goss_session_disable_face_tracking` | `disableFaceTracking()` | native tracking path |
 | `goss_session_enable_hand_tracking` | `enableHandTracking(taskBundle, threads)` | native tracking path |
 | `goss_session_disable_hand_tracking` | `disableHandTracking()` | native tracking path |
+| `goss_session_enable_pose_tracking` | `enablePoseTracking(taskBundle, threads)` | native tracking path |
+| `goss_session_disable_pose_tracking` | `disablePoseTracking()` | native tracking path |
 | `goss_session_track_frame` | `trackFrame(y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs)`; feeds every enabled tracking worker | native tracking path |
 | `goss_session_face_result` | `faceResult(result)` | native tracking path |
 | `goss_session_hand_result` | `handResult(result)` | native tracking path |
+| `goss_session_pose_result` | `poseResult(result)` | native tracking path |
 | `goss_session_set_face_landmarks` | `setFaceLandmarks(points)`; web adds `sourceWidth, sourceHeight` since its analysis resolution is decoupled from the rendered frame's | Web analysis-producer path |
 
 ### Segmentation

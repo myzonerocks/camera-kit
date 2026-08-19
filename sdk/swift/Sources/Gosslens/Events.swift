@@ -96,6 +96,46 @@ public final class HandResult {
     }
 }
 
+/// One reusable pose tracking readout: a 33-point skeleton with
+/// per-point visibility and presence scores.
+public final class PoseResult {
+    public static let landmarkCount = Int(GOSS_POSE_LANDMARK_COUNT)
+
+    public private(set) var frameSerial: UInt64 = 0
+    public private(set) var timestampUs: Int64 = 0
+    public private(set) var presence: Float = 0
+    public private(set) var landmarkCount: Int = 0
+    public private(set) var landmarks: [Float]
+    public private(set) var visibilities: [Float]
+    public private(set) var presences: [Float]
+
+    var raw = goss_pose_result()
+
+    public init() {
+        landmarks = [Float](repeating: 0, count: Self.landmarkCount * 3)
+        visibilities = [Float](repeating: 0, count: Self.landmarkCount)
+        presences = [Float](repeating: 0, count: Self.landmarkCount)
+    }
+
+    /// Lifts raw's fields into the preallocated arrays - no per-frame
+    /// allocation as long as the caller reuses one instance.
+    func parse() {
+        frameSerial = raw.frame_serial
+        timestampUs = raw.timestamp_us
+        presence = raw.presence
+        landmarkCount = Int(raw.landmark_count)
+        withUnsafeBytes(of: raw.landmarks) { source in
+            landmarks.withUnsafeMutableBytes { $0.copyMemory(from: source) }
+        }
+        withUnsafeBytes(of: raw.visibilities) { source in
+            visibilities.withUnsafeMutableBytes { $0.copyMemory(from: source) }
+        }
+        withUnsafeBytes(of: raw.presences) { source in
+            presences.withUnsafeMutableBytes { $0.copyMemory(from: source) }
+        }
+    }
+}
+
 /// Tracking/telemetry readouts, reached directly off Session rather
 /// than their own handle type.
 extension Session {
@@ -110,6 +150,13 @@ extension Session {
     /// until the hand worker has published its first result.
     public func handResult(_ result: HandResult) throws {
         try checked(goss_session_hand_result(handle, &result.raw))
+        result.parse()
+    }
+
+    /// Fills result with the newest pose tracking output. Throws .again
+    /// until the pose worker has published its first result.
+    public func poseResult(_ result: PoseResult) throws {
+        try checked(goss_session_pose_result(handle, &result.raw))
         result.parse()
     }
 
