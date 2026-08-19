@@ -43,15 +43,18 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var fpsWindowStart = 0L
     private var fpsWindowFrames = 0
     private var lastFrameNanos = 0L
-    private var proofLogged = false
     private val lensSignals = LensSignals()
 
     // Ring depth 2: the actual submit call hops to the main thread (bgfx's
     // single-threaded contract), so the analyzer can start refilling the
-    // next slot before the previous slot's hopped submit has run.
+    // next slot before the previous slot's hopped submit has run. When
+    // both slots still have submits in flight (main thread two frames
+    // behind), the analyzer drops the frame instead of overwriting a
+    // buffer a pending submit will still read.
     private val yScratchRing = arrayOfNulls<ByteBuffer>(2)
     private val uvScratchRing = arrayOfNulls<ByteBuffer>(2)
     private var scratchRingIndex = 0
+    private val pendingCopySubmits = java.util.concurrent.atomic.AtomicInteger(0)
 
     // Zero-copy is attempted until the device or stream refuses it once;
     // after that the stream stays on the declared copy path. Written from
@@ -110,16 +113,20 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val createdSession = Session.create(created)
         session = createdSession
         Log.i(tag, "renderer up ${width}x$height")
-        assets.open("face_landmarker.task").use { stream ->
-            val bytes = stream.readBytes()
-            val bundle = ByteBuffer.allocateDirect(bytes.size)
-            bundle.put(bytes)
-            bundle.flip()
-            if (createdSession.enableFaceTracking(bundle, 0)) {
-                Log.i(tag, "face tracking up")
-            } else {
-                Log.i(tag, "face tracking unavailable in this build")
+        try {
+            assets.open("face_landmarker.task").use { stream ->
+                val bytes = stream.readBytes()
+                val bundle = ByteBuffer.allocateDirect(bytes.size)
+                bundle.put(bytes)
+                bundle.flip()
+                if (createdSession.enableFaceTracking(bundle, 0)) {
+                    Log.i(tag, "face tracking up")
+                } else {
+                    Log.i(tag, "face tracking unavailable in this build")
+                }
             }
+        } catch (e: java.io.IOException) {
+            Log.i(tag, "face tracking bundle not present")
         }
         extractBeautyResources()?.let { resourceRoot ->
             if (createdSession.enableBeauty(resourceRoot)) {
@@ -224,11 +231,24 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         )
     }
 
+    // PowerManager's thermal statuses collapse onto the engine's four
+    // levels the same way the ios demo maps ProcessInfo.thermalState.
+    private fun thermalLevel(): Int {
+        if (android.os.Build.VERSION.SDK_INT < 29) return 0
+        val power = getSystemService(android.os.PowerManager::class.java) ?: return 0
+        return when (power.currentThermalStatus) {
+            android.os.PowerManager.THERMAL_STATUS_NONE -> 0
+            android.os.PowerManager.THERMAL_STATUS_LIGHT -> 1
+            android.os.PowerManager.THERMAL_STATUS_MODERATE -> 2
+            else -> 3
+        }
+    }
+
     private fun renderTick(frameTimeNanos: Long) {
         val engine = engine ?: return
         val frameTimeUs = if (lastFrameNanos == 0L) 0 else ((frameTimeNanos - lastFrameNanos) / 1000).toInt()
         lastFrameNanos = frameTimeNanos
-        session?.reportFrame(frameTimeUs, 0)
+        session?.reportFrame(frameTimeUs, thermalLevel())
         session?.let { overlay.poll(it) }
         session?.let { tickLens(it, frameTimeUs) }
         if (engine.renderFrame(session)) {
@@ -241,10 +261,6 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         if (now - fpsWindowStart >= 2000) {
             val fps = fpsWindowFrames * 1000.0 / (now - fpsWindowStart)
             Log.i(tag, "fps %.1f rendered %d camera %d".format(fps, renderedFrames, cameraFrames))
-            if (!proofLogged && cameraFrames > 30 && fps > 20) {
-                proofLogged = true
-                Log.i(tag, "GOSSDROID preview active: $cameraFrames camera frames rendered at %.1f fps".format(fps))
-            }
             fpsWindowStart = now
             fpsWindowFrames = 0
         }
@@ -295,6 +311,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                             }
                         }
                     }
+
+                    if (pendingCopySubmits.get() >= yScratchRing.size) return@use
 
                     val y = it.planes[0]
                     val u = it.planes[1]
@@ -359,6 +377,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                         val yStride = y.rowStride
                         val ySubmit = yCopy
                         val uvSubmit = uvCopy
+                        pendingCopySubmits.incrementAndGet()
                         mainExecutor.execute {
                             val submitted = session.submitFrameCopy(
                                 ySubmit, yStride, uvSubmit, uvStride,
@@ -366,6 +385,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
                                 rotationDegrees, mirrored = mirrorPreview,
                                 timestampUs,
                             )
+                            pendingCopySubmits.decrementAndGet()
                             if (submitted) {
                                 cameraFrames += 1
                                 if (cameraFrames == 1) Log.i(tag, "capture state running")
