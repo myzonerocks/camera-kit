@@ -204,9 +204,9 @@ pub const Renderer = struct {
         _ = big_eye_amount;
     }
 
-    // 111 tracked points, two floats each - face_mesh.canonical_uv.len
+    // 111 tracked points, two floats each - makeup_mesh.canonical_uv.len
     // in the real module, mirrored as a literal here rather than
-    // importing face_mesh into a stub that otherwise has zero
+    // importing makeup_mesh into a stub that otherwise has zero
     // dependencies of its own.
     pub fn submitMakeup(r: *Renderer, view_id: u16, background_texture: TextureHandle, makeup_texture: TextureHandle, uv_buffer: VertexBufferHandle, positions: *const [222]f32, intensity: f32) void {
         _ = r;

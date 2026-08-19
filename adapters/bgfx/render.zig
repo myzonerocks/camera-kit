@@ -8,7 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const math = @import("math");
 const blobs = @import("shader_blobs");
-const face_mesh = @import("face_mesh");
+const makeup_mesh = @import("makeup_mesh");
 
 pub const android_vk = if (builtin.os.tag == .linux and builtin.abi.isAndroid())
     @import("android_vk.zig")
@@ -105,13 +105,13 @@ pub const Renderer = struct {
     makeup_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
     /// The 176-triangle face-makeup mesh's fixed index buffer -
-    /// face_mesh.triangle_indices, uploaded once, never changes.
+    /// makeup_mesh.triangle_indices, uploaded once, never changes.
     makeup_index_buffer: c.bgfx_index_buffer_handle_t,
     /// The live tracked 111-point contour, stream 0 of a makeup draw -
     /// dynamic (updated every frame submitMakeup runs), unlike every
     /// other buffer here.
     makeup_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
-    /// Stream 1 of a makeup draw: face_mesh.canonical_uv scaled into
+    /// Stream 1 of a makeup draw: makeup_mesh.canonical_uv scaled into
     /// each effect's own crop of the source image - static, computed
     /// once at init, never changes per-frame the way position does.
     makeup_lipstick_uv_buffer: c.bgfx_vertex_buffer_handle_t,
@@ -262,13 +262,13 @@ pub const Renderer = struct {
         _ = c.bgfx_vertex_layout_add(&makeup_uv_layout, c.BGFX_ATTRIB_TEXCOORD1, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         c.bgfx_vertex_layout_end(&makeup_uv_layout);
 
-        const makeup_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&face_mesh.triangle_indices, @sizeOf(@TypeOf(face_mesh.triangle_indices))), 0);
-        const makeup_position_buffer = c.bgfx_create_dynamic_vertex_buffer(face_mesh.canonical_uv.len / 2, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
-        var lipstick_uv: [face_mesh.canonical_uv.len]f32 = undefined;
-        face_mesh.makeupUv(face_mesh.lipstick_bounds, &lipstick_uv);
+        const makeup_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&makeup_mesh.triangle_indices, @sizeOf(@TypeOf(makeup_mesh.triangle_indices))), 0);
+        const makeup_position_buffer = c.bgfx_create_dynamic_vertex_buffer(makeup_mesh.canonical_uv.len / 2, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        var lipstick_uv: [makeup_mesh.canonical_uv.len]f32 = undefined;
+        makeup_mesh.makeupUv(makeup_mesh.lipstick_bounds, &lipstick_uv);
         const makeup_lipstick_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&lipstick_uv, @sizeOf(@TypeOf(lipstick_uv))), &makeup_uv_layout, 0);
-        var blush_uv: [face_mesh.canonical_uv.len]f32 = undefined;
-        face_mesh.makeupUv(face_mesh.blush_bounds, &blush_uv);
+        var blush_uv: [makeup_mesh.canonical_uv.len]f32 = undefined;
+        makeup_mesh.makeupUv(makeup_mesh.blush_bounds, &blush_uv);
         const makeup_blush_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&blush_uv, @sizeOf(@TypeOf(blush_uv))), &makeup_uv_layout, 0);
 
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
@@ -848,11 +848,11 @@ pub const Renderer = struct {
     /// unchanged, its background sample point - vs_makeup.sc's own
     /// trick for reading the frame at exactly the screen position each
     /// triangle draws over).
-    pub fn submitMakeup(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, makeup_texture: c.bgfx_texture_handle_t, uv_buffer: c.bgfx_vertex_buffer_handle_t, positions: *const [face_mesh.canonical_uv.len]f32, intensity: f32) void {
+    pub fn submitMakeup(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, makeup_texture: c.bgfx_texture_handle_t, uv_buffer: c.bgfx_vertex_buffer_handle_t, positions: *const [makeup_mesh.canonical_uv.len]f32, intensity: f32) void {
         c.bgfx_update_dynamic_vertex_buffer(r.makeup_position_buffer, 0, c.bgfx_copy(positions, @sizeOf(@TypeOf(positions.*))));
-        c.bgfx_set_dynamic_vertex_buffer(0, r.makeup_position_buffer, 0, face_mesh.canonical_uv.len / 2);
-        c.bgfx_set_vertex_buffer(1, uv_buffer, 0, face_mesh.canonical_uv.len / 2);
-        c.bgfx_set_index_buffer(r.makeup_index_buffer, 0, face_mesh.triangle_indices.len);
+        c.bgfx_set_dynamic_vertex_buffer(0, r.makeup_position_buffer, 0, makeup_mesh.canonical_uv.len / 2);
+        c.bgfx_set_vertex_buffer(1, uv_buffer, 0, makeup_mesh.canonical_uv.len / 2);
+        c.bgfx_set_index_buffer(r.makeup_index_buffer, 0, makeup_mesh.triangle_indices.len);
         c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(1, r.tex_makeup, makeup_texture, std.math.maxInt(u32));
         const params = [4]f32{ intensity, 0.0, 0.0, 0.0 };
