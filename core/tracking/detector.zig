@@ -1,13 +1,16 @@
-//! Decode for single-shot face detection models. The model emits one raw
-//! box regression and one raw score per anchor; anchors are a fixed grid
+//! Decode for single-shot detection models. The model emits one raw box
+//! regression and one raw score per anchor; anchors are a fixed grid
 //! derived from the input size and the per-layer stride plan, so they are
 //! generated once and reused every frame. Overlapping candidates merge by
 //! score weight, which keeps boxes stable frame to frame where a hard
-//! suppression would flicker between near-equal candidates.
+//! suppression would flicker between near-equal candidates. The keypoint
+//! count per box is the model family's own: six for faces, seven for
+//! palms; the module-level names stay the face pipeline's shapes.
 
 const std = @import("std");
 
 pub const keypoint_count = 6;
+pub const palm_keypoint_count = 7;
 
 pub const Layer = struct {
     stride: u32,
@@ -52,6 +55,16 @@ pub fn generateAnchors(input_size: u32, layers: []const Layer, out: []Anchor) vo
 
 pub const short_range_layers = [_]Layer{ .{ .stride = 8, .anchors_per_cell = 2 }, .{ .stride = 16, .anchors_per_cell = 6 } };
 pub const full_range_layers = [_]Layer{.{ .stride = 4, .anchors_per_cell = 1 }};
+/// The palm detector's four SSD layers concatenate one stride-8 grid and
+/// three separate stride-16 grids, two fixed-size anchors per cell each -
+/// three sequential grids, not one grid with six anchors, because the
+/// model's output rows follow that layer order.
+pub const palm_layers = [_]Layer{
+    .{ .stride = 8, .anchors_per_cell = 2 },
+    .{ .stride = 16, .anchors_per_cell = 2 },
+    .{ .stride = 16, .anchors_per_cell = 2 },
+    .{ .stride = 16, .anchors_per_cell = 2 },
+};
 
 /// Picks the stride plan matching a model's own anchor count, verified
 /// against its input size. The model decides; a mismatch is a wiring
@@ -60,11 +73,19 @@ pub fn planForModel(input_size: u32, anchor_total: usize) ?[]const Layer {
     const plan: []const Layer = switch (anchor_total) {
         896 => &short_range_layers,
         2304 => &full_range_layers,
+        2016 => &palm_layers,
         else => return null,
     };
     if (anchorCount(input_size, plan) != anchor_total) return null;
     return plan;
 }
+
+pub const face = WithKeypoints(keypoint_count);
+pub const palm = WithKeypoints(palm_keypoint_count);
+
+/// The decode shapes for one model family's keypoint count.
+pub fn WithKeypoints(comptime family_keypoints: u32) type {
+    return struct {
 
 pub const Detection = struct {
     score: f32,
@@ -73,7 +94,7 @@ pub const Detection = struct {
     y: f32,
     width: f32,
     height: f32,
-    keypoints: [keypoint_count][2]f32,
+    keypoints: [family_keypoints][2]f32,
 
     fn overlap(a: *const Detection, b: *const Detection) f32 {
         const ax0 = a.x - a.width * 0.5;
@@ -92,18 +113,8 @@ pub const Detection = struct {
     }
 };
 
-fn sigmoid(raw: f32) f32 {
-    // The score threshold is applied in logit space by the caller via
-    // scoreToLogit, so this only runs for candidates that pass.
-    return 1.0 / (1.0 + @exp(-raw));
-}
-
-pub fn scoreToLogit(score: f32) f32 {
-    return @log(score / (1.0 - score));
-}
-
 /// Decodes raw model output into `out`, returning the accepted slice.
-/// `raw_boxes` holds 4 box values then 6 keypoint pairs per anchor, in
+/// `raw_boxes` holds 4 box values then the keypoint pairs per anchor, in
 /// model input pixels; `raw_scores` holds one logit per anchor. Candidates
 /// below `min_score` are dropped before any allocation-free merge work.
 pub fn decode(
@@ -114,10 +125,10 @@ pub fn decode(
     min_score: f32,
     out: []Detection,
 ) []Detection {
-    std.debug.assert(raw_boxes.len == anchors.len * (4 + keypoint_count * 2));
+    std.debug.assert(raw_boxes.len == anchors.len * (4 + family_keypoints * 2));
     std.debug.assert(raw_scores.len == anchors.len);
     const min_logit = scoreToLogit(min_score);
-    const values_per_anchor = 4 + keypoint_count * 2;
+    const values_per_anchor = 4 + family_keypoints * 2;
 
     var count: usize = 0;
     for (anchors, 0..) |anchor, at| {
@@ -136,7 +147,7 @@ pub fn decode(
             .height = raw[3] / input_size,
             .keypoints = undefined,
         };
-        for (0..keypoint_count) |keypoint| {
+        for (0..family_keypoints) |keypoint| {
             detection.keypoints[keypoint] = .{
                 anchor.x + raw[4 + keypoint * 2] / input_size,
                 anchor.y + raw[4 + keypoint * 2 + 1] / input_size,
@@ -211,18 +222,59 @@ fn mergeOverlapping(candidates: []Detection) []Detection {
     return candidates[0..kept];
 }
 
+    };
+}
+
+fn sigmoid(raw: f32) f32 {
+    // The score threshold is applied in logit space by the caller via
+    // scoreToLogit, so this only runs for candidates that pass.
+    return 1.0 / (1.0 + @exp(-raw));
+}
+
+pub fn scoreToLogit(score: f32) f32 {
+    return @log(score / (1.0 - score));
+}
+
 const t = std.testing;
 
 test "anchor plans produce the model's anchor counts" {
     try t.expectEqual(@as(usize, 896), anchorCount(128, &short_range_layers));
     try t.expectEqual(@as(usize, 2304), anchorCount(192, &full_range_layers));
+    try t.expectEqual(@as(usize, 2016), anchorCount(192, &palm_layers));
 }
 
 test "plan selection follows the model's anchor total" {
     try t.expectEqual(@as(?[]const Layer, &short_range_layers), planForModel(128, 896));
     try t.expectEqual(@as(?[]const Layer, &full_range_layers), planForModel(192, 2304));
+    try t.expectEqual(@as(?[]const Layer, &palm_layers), planForModel(192, 2016));
     try t.expectEqual(@as(?[]const Layer, null), planForModel(128, 2304));
     try t.expectEqual(@as(?[]const Layer, null), planForModel(128, 1000));
+}
+
+test "palm anchors repeat the stride-16 grid three times in sequence" {
+    var anchors: [2016]Anchor = undefined;
+    generateAnchors(192, &palm_layers, &anchors);
+    // The stride-8 grid fills the first 1152 rows; the three stride-16
+    // grids each start from the same first cell center.
+    try t.expectApproxEqAbs(@as(f32, 0.5 / 24.0), anchors[0].x, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.5 / 12.0), anchors[1152].x, 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.5 / 12.0), anchors[1152 + 288].x, 1e-6);
+    try t.expectApproxEqAbs(anchors[1152].x, anchors[1152 + 288].x, 1e-6);
+    try t.expectApproxEqAbs(anchors[1152].y, anchors[1152 + 288].y, 1e-6);
+}
+
+test "palm decode carries seven keypoints per detection" {
+    const anchors = [_]Anchor{.{ .x = 0.5, .y = 0.5 }};
+    var raw_boxes = [_]f32{0} ** 18;
+    raw_boxes[2] = 48;
+    raw_boxes[3] = 48;
+    raw_boxes[4] = 9.6; // first keypoint offset in input pixels
+    const raw_scores = [_]f32{2.0};
+    var out: [1]palm.Detection = undefined;
+    const detections = palm.decode(&raw_boxes, &raw_scores, &anchors, 192, 0.5, &out);
+    try t.expectEqual(@as(usize, 1), detections.len);
+    try t.expectEqual(@as(usize, 7), detections[0].keypoints.len);
+    try t.expectApproxEqAbs(@as(f32, 0.5 + 9.6 / 192.0), detections[0].keypoints[0][0], 1e-6);
 }
 
 test "anchors cover the unit square from the first cell center" {
@@ -243,8 +295,8 @@ test "decode drops weak anchors and merges duplicates" {
         raw_boxes[at * 16 + 3] = 32;
     }
     const raw_scores = [_]f32{ 2.0, 1.0, -9.0 };
-    var out: [3]Detection = undefined;
-    const detections = decode(&raw_boxes, &raw_scores, &anchors, 128, 0.5, &out);
+    var out: [3]face.Detection = undefined;
+    const detections = face.decode(&raw_boxes, &raw_scores, &anchors, 128, 0.5, &out);
     try t.expectEqual(@as(usize, 1), detections.len);
     try t.expect(detections[0].score > 0.8);
     // The merged center sits between the two overlapping anchors, pulled
@@ -260,7 +312,7 @@ test "distant detections survive the merge separately" {
         raw_boxes[at * 16 + 3] = 16;
     }
     const raw_scores = [_]f32{ 1.5, 1.5 };
-    var out: [2]Detection = undefined;
-    const detections = decode(&raw_boxes, &raw_scores, &anchors, 128, 0.5, &out);
+    var out: [2]face.Detection = undefined;
+    const detections = face.decode(&raw_boxes, &raw_scores, &anchors, 128, 0.5, &out);
     try t.expectEqual(@as(usize, 2), detections.len);
 }

@@ -17,6 +17,10 @@ const math = @import("math");
 
 pub const supported = true;
 
+/// The hand worker lives beside this one and shares its shape; the export
+/// layer reaches it through this module the same way it reaches faces.
+pub const hand_worker = @import("hand_tracking.zig");
+
 pub const CreateError = error{ Unsupported, InvalidBundle, OutOfMemory };
 
 const max_candidates = 16;
@@ -263,8 +267,8 @@ fn processFrame(tracking: *Tracking, frame: *const PendingFrame) void {
         tracking.detector_engine.invoke() catch return;
         const raw_boxes = tracking.detector_engine.outputFloats(0) catch return;
         const raw_scores = tracking.detector_engine.outputFloats(1) catch return;
-        var candidates: [max_candidates]detector.Detection = undefined;
-        const found = detector.decode(raw_boxes, raw_scores, tracking.anchors, @floatFromInt(tracking.detector_side), 0.5, &candidates);
+        var candidates: [max_candidates]detector.face.Detection = undefined;
+        const found = detector.face.decode(raw_boxes, raw_scores, tracking.anchors, @floatFromInt(tracking.detector_side), 0.5, &candidates);
         if (found.len == 0) {
             publishEmpty(tracking, frame.timestamp_us);
             return;

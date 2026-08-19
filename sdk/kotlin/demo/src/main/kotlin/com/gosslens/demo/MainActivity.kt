@@ -126,6 +126,21 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         } catch (e: java.io.IOException) {
             Log.i(tag, "face tracking bundle not present")
         }
+        try {
+            assets.open("gesture_recognizer.task").use { stream ->
+                val bytes = stream.readBytes()
+                val bundle = ByteBuffer.allocateDirect(bytes.size)
+                bundle.put(bytes)
+                bundle.flip()
+                if (createdSession.enableHandTracking(bundle, 0)) {
+                    Log.i(tag, "hand tracking up")
+                } else {
+                    Log.i(tag, "hand tracking unavailable in this build")
+                }
+            }
+        } catch (e: java.io.IOException) {
+            Log.i(tag, "hand tracking bundle not present")
+        }
         extractBeautyResources()?.let { resourceRoot ->
             if (createdSession.enableBeauty(resourceRoot)) {
                 Log.i(tag, "beauty up")
@@ -163,7 +178,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         val hasFace = overlay.hasFaceResult &&
             overlay.latestFaceResult.presence >= 0.5f &&
             overlay.latestFaceResult.landmarkCount > 0
-        lensSignals.set(hasFace, false, false, 0.0, 0.0, overlay.latestFaceResult.blendshapes)
+        lensSignals.set(hasFace, overlay.handCount > 0, false, 0.0, 0.0, overlay.latestFaceResult.blendshapes)
         session.tickLens(dtUs, lensSignals)
     }
 

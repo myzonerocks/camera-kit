@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 8u
+#define GOSS_ABI_MINOR 9u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -162,6 +162,41 @@ typedef struct goss_face_result {
     float blendshapes[GOSS_FACE_BLENDSHAPE_COUNT];
 } goss_face_result;
 
+/* Canned gesture classes, in the classifier's own label order. Zero is
+ * the no-gesture class, also reported when no gesture model is loaded. */
+#define GOSS_GESTURE_NONE 0u
+#define GOSS_GESTURE_CLOSED_FIST 1u
+#define GOSS_GESTURE_OPEN_PALM 2u
+#define GOSS_GESTURE_POINTING_UP 3u
+#define GOSS_GESTURE_THUMB_DOWN 4u
+#define GOSS_GESTURE_THUMB_UP 5u
+#define GOSS_GESTURE_VICTORY 6u
+#define GOSS_GESTURE_ILOVEYOU 7u
+
+/* One tracked hand. handedness is the model's score that this is a right
+ * hand; gesture is a GOSS_GESTURE_* class with its score; landmarks are
+ * x, y in frame pixels with z in the same scale, three floats per point. */
+#define GOSS_HAND_LANDMARK_COUNT 21u
+#define GOSS_HAND_MAX 2u
+typedef struct goss_hand {
+    float presence;
+    float handedness;
+    uint32_t gesture;
+    float gesture_score;
+    float landmarks[GOSS_HAND_LANDMARK_COUNT * 3];
+} goss_hand;
+
+/* One hand tracking result. A zero hand_count means the frame held no
+ * hands; hands beyond hand_count are zeroed. Layout: 560 bytes,
+ * static-asserted below. */
+typedef struct goss_hand_result {
+    uint64_t frame_serial;
+    int64_t timestamp_us;
+    uint32_t hand_count;
+    uint32_t reserved;
+    goss_hand hands[GOSS_HAND_MAX];
+} goss_hand_result;
+
 /* The live signals goss_session_tick_lens evaluates a lens's compiled
  * triggers against (a GLF `when` expression's signal reads). blendshapes
  * mirrors goss_face_result's own inline-array convention rather than a
@@ -268,6 +303,14 @@ goss_degrade_level goss_session_degrade_level(const goss_session *session);
 goss_status goss_session_enable_face_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads);
 void goss_session_disable_face_tracking(goss_session *session);
 
+/* Graph thread. Stands the hand tracking worker up from a model bundle:
+ * a hand landmarker .task, or a gesture recognizer .task whose nested
+ * gesture models additionally score each hand's canned gesture. The
+ * bundle bytes are copied; the caller may release them on return.
+ * Builds without the inference stack report unsupported. */
+goss_status goss_session_enable_hand_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads);
+void goss_session_disable_hand_tracking(goss_session *session);
+
 /* Graph thread. Stands the segmentation worker up from a raw model
  * (a selfie or hair segmenter .tflite file, not bundled the way
  * face_landmarker.task is). The model bytes are copied; the caller may
@@ -285,6 +328,11 @@ goss_status goss_session_track_frame(goss_session *session, const goss_frame_des
 /* Graph thread. Reads the newest tracking result into caller memory.
  * Reports GOSS_AGAIN until the worker has published its first result. */
 goss_status goss_session_face_result(goss_session *session, goss_face_result *out_result);
+
+/* Graph thread. Reads the newest hand tracking result into caller
+ * memory. Reports GOSS_AGAIN until the worker has published its first
+ * result. */
+goss_status goss_session_hand_result(goss_session *session, goss_hand_result *out_result);
 
 /* Effect identifiers for goss_session_set_beauty. Values clamp to zero and
  * one; zero disables the effect. */
@@ -382,6 +430,9 @@ _Static_assert(sizeof(goss_engine_config) == 8, "goss_engine_config layout is fr
 _Static_assert(sizeof(goss_session_config) == 8, "goss_session_config layout is frozen");
 _Static_assert(sizeof(goss_face_result) == 5968, "goss_face_result layout is frozen");
 _Static_assert(offsetof(goss_face_result, landmarks) == 24, "goss_face_result layout is frozen");
+_Static_assert(sizeof(goss_hand) == 268, "goss_hand layout is frozen");
+_Static_assert(sizeof(goss_hand_result) == 560, "goss_hand_result layout is frozen");
+_Static_assert(offsetof(goss_hand_result, hands) == 24, "goss_hand_result layout is frozen");
 _Static_assert(sizeof(goss_renderer_desc) == (sizeof(void *) == 8 ? 16 : 12), "goss_renderer_desc layout is frozen");
 _Static_assert(sizeof(goss_frame_planes) == 32, "goss_frame_planes layout is frozen");
 _Static_assert(sizeof(goss_lens_signals) == 232, "goss_lens_signals layout is frozen");

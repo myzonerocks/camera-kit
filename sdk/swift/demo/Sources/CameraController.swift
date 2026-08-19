@@ -57,6 +57,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         if UIApplication.shared.applicationState == .active {
             engineFeaturesEnabled = true
             enableFaceTracking()
+            enableHandTracking()
             enableBeauty()
             activateLens()
             return
@@ -72,6 +73,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             guard !self.engineFeaturesEnabled else { return }
             self.engineFeaturesEnabled = true
             self.enableFaceTracking()
+            self.enableHandTracking()
             self.enableBeauty()
             self.activateLens()
         }
@@ -148,6 +150,22 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
             log.info("face tracking enabled")
         } catch {
             log.info("face tracking enable failed: \(String(describing: error))")
+        }
+    }
+
+    private func enableHandTracking() {
+        guard let session,
+              let url = Bundle.main.url(forResource: "gesture_recognizer", withExtension: "task"),
+              let bundleData = try? Data(contentsOf: url)
+        else {
+            log.info("hand tracking bundle not present")
+            return
+        }
+        do {
+            try session.enableHandTracking(taskBundle: bundleData, threads: 0)
+            log.info("hand tracking enabled")
+        } catch {
+            log.info("hand tracking enable failed: \(String(describing: error))")
         }
     }
 

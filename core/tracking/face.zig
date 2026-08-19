@@ -44,7 +44,7 @@ pub fn blendshapeIndex(name: []const u8) ?u8 {
     return null;
 }
 
-pub const Landmark = struct { x: f32, y: f32, z: f32 };
+pub const Landmark = sampler.Landmark;
 
 /// One published tracking result, the shape that crosses the C boundary.
 /// Landmarks are x, y in frame pixels and z in the same scale; a zero
@@ -102,7 +102,7 @@ fn levelRotation(dx: f32, dy: f32) f32 {
 
 /// The aligned landmark crop for a fresh detection, in frame pixels.
 /// Detection coordinates are normalized to the detector's input square.
-pub fn regionFromDetection(detection: detector.Detection, square: sampler.Region) sampler.Region {
+pub fn regionFromDetection(detection: detector.face.Detection, square: sampler.Region) sampler.Region {
     const eye_right = mapToFrame(square, detection.keypoints[0][0], detection.keypoints[0][1]);
     const eye_left = mapToFrame(square, detection.keypoints[1][0], detection.keypoints[1][1]);
     const center = mapToFrame(square, detection.x, detection.y);
@@ -141,19 +141,7 @@ pub fn regionFromLandmarks(landmarks: *const [landmark_count]Landmark) sampler.R
 /// Maps the landmark model's raw output, in crop input pixels, back into
 /// frame pixels through the crop's rotation and scale.
 pub fn decodeLandmarks(raw: []const f32, region: sampler.Region, input_side: f32, out: *[landmark_count]Landmark) void {
-    std.debug.assert(raw.len >= landmark_count * 3);
-    const cos = @cos(region.rotation);
-    const sin = @sin(region.rotation);
-    const scale = region.side / input_side;
-    for (out, 0..) |*landmark, at| {
-        const u = raw[at * 3] / input_side - 0.5;
-        const v = raw[at * 3 + 1] / input_side - 0.5;
-        landmark.* = .{
-            .x = region.center_x + (u * cos - v * sin) * region.side,
-            .y = region.center_y + (u * sin + v * cos) * region.side,
-            .z = raw[at * 3 + 2] * scale,
-        };
-    }
+    sampler.decodeLandmarks(landmark_count, raw, region, input_side, out);
 }
 
 /// Assembles the blendshape model's input: the subset landmarks as pixel
@@ -187,7 +175,7 @@ test "the blendshape subset is strictly increasing within the mesh" {
 }
 
 test "level eyes produce an unrotated crop" {
-    var detection = std.mem.zeroes(detector.Detection);
+    var detection = std.mem.zeroes(detector.face.Detection);
     detection.x = 0.5;
     detection.y = 0.5;
     detection.width = 0.4;
@@ -203,7 +191,7 @@ test "level eyes produce an unrotated crop" {
 }
 
 test "a tilted eye line rotates the crop level" {
-    var detection = std.mem.zeroes(detector.Detection);
+    var detection = std.mem.zeroes(detector.face.Detection);
     detection.keypoints[0] = .{ 0.5, 0.5 };
     detection.keypoints[1] = .{ 0.5, 0.6 }; // left eye straight below right
     const region = regionFromDetection(detection, sampler.frameSquare(100, 100));

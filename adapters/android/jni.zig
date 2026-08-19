@@ -245,6 +245,25 @@ export fn Java_com_gosslens_Gosslens_nativeFaceResult(env: *JniEnv, cls: jobject
     return @intFromEnum(abi.goss_session_face_result(sessionFromHandle(session), result));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeEnableHandTracking(env: *JniEnv, cls: jobject, session: i64, task_buffer: jobject, task_len: i32, threads: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, task_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_enable_hand_tracking(sessionFromHandle(session), bytes, @intCast(task_len), threads));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeDisableHandTracking(env: *JniEnv, cls: jobject, session: i64) void {
+    _ = env;
+    _ = cls;
+    abi.goss_session_disable_hand_tracking(sessionFromHandle(session));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeHandResult(env: *JniEnv, cls: jobject, session: i64, result_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, result_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const result: *abi.HandResult = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_hand_result(sessionFromHandle(session), result));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
     _ = path_len;

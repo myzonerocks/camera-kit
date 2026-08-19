@@ -32,6 +32,7 @@ dependencies {
 // fetched model set so the apk always carries the pinned bytes.
 val syncFaceModel = tasks.register<Copy>("syncFaceModel") {
     from(rootProject.projectDir.resolve("../../.models/face_landmarker.task"))
+    from(rootProject.projectDir.resolve("../../.models/gesture_recognizer.task"))
     into(layout.projectDirectory.dir("src/main/assets"))
 }
 tasks.named("preBuild") { dependsOn(syncFaceModel) }

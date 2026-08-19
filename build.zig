@@ -180,6 +180,7 @@ pub fn build(b: *std.Build) void {
     const detector_module = tracking_cores.detector;
     const sampler_module = tracking_cores.sampler;
     const face_module = tracking_cores.face;
+    const hand_core_module = tracking_cores.hand;
     const tracker_module = tracking_cores.tracker;
     const face106_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/face106.zig"),
@@ -193,7 +194,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     abi_module.addImport("face", face_module);
-    abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
+    abi_module.addImport("hand", hand_core_module);
+    abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
 
@@ -539,6 +541,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "detector", .module = detector_module },
                 .{ .name = "sampler", .module = sampler_module },
                 .{ .name = "face", .module = face_module },
+                .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "tracker", .module = tracker_module },
                 .{ .name = "graph", .module = graph_module },
                 .{ .name = "math", .module = math_module },
@@ -573,6 +576,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "render", .module = render_stub_module },
                 .{ .name = "face", .module = face_module },
+                .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "tracking", .module = tracking_real_module },
                 .{ .name = "segmentation", .module = segmentation_module },
                 .{ .name = "manifest", .module = lens_manifest_module },
@@ -600,6 +604,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "detector", .module = detector_module },
                 .{ .name = "sampler", .module = sampler_module },
                 .{ .name = "face", .module = face_module },
+                .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "tracker", .module = tracker_module },
                 .{ .name = "math", .module = math_module },
                 .{ .name = "abi", .module = abi_tracking_module },
@@ -743,7 +748,8 @@ pub fn build(b: *std.Build) void {
         });
         const tracking_cores_wasm = trackingCoreModules(b, wasm_target, .ReleaseSmall, math_wasm);
         abi_wasm.addImport("face", tracking_cores_wasm.face);
-        abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, math_wasm));
+    abi_wasm.addImport("hand", tracking_cores_wasm.hand);
+        abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
         const lens_manifest_wasm = b.createModule(.{
@@ -893,6 +899,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
                 .{ .name = "render", .module = render_module },
                 .{ .name = "face", .module = face_module },
+                .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "manifest", .module = lens_manifest_module },
                 .{ .name = "trigger", .module = lens_trigger_module },
                 .{ .name = "runtime", .module = lens_runtime_module },
@@ -940,6 +947,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "detector", .module = detector_module },
                     .{ .name = "sampler", .module = sampler_module },
                     .{ .name = "face", .module = face_module },
+                    .{ .name = "hand", .module = hand_core_module },
                     .{ .name = "tracker", .module = tracker_module },
                     .{ .name = "graph", .module = graph_module },
                     .{ .name = "math", .module = math_module },
@@ -969,7 +977,7 @@ pub fn build(b: *std.Build) void {
             abi_conformance_module.addImport("segmentation", segmentation_conformance);
             abi_conformance_module.addImport("beauty", beauty_conformance);
         } else {
-            abi_conformance_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, math_module));
+            abi_conformance_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, math_module));
             abi_conformance_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
             abi_conformance_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
         }
@@ -1102,6 +1110,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
 
     const tracking_cores_android = trackingCoreModules(b, android_target, optimize, math_android);
     abi_android.addImport("face", tracking_cores_android.face);
+    abi_android.addImport("hand", tracking_cores_android.hand);
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = android_target,
@@ -1162,6 +1171,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
                 .{ .name = "detector", .module = tracking_cores_android.detector },
                 .{ .name = "sampler", .module = tracking_cores_android.sampler },
                 .{ .name = "face", .module = tracking_cores_android.face },
+                .{ .name = "hand", .module = tracking_cores_android.hand },
                 .{ .name = "tracker", .module = tracking_cores_android.tracker },
                 .{ .name = "graph", .module = graph_android },
                 .{ .name = "math", .module = math_android },
@@ -1213,7 +1223,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         });
         abi_android.addImport("beauty", beauty_android_module);
     } else {
-        abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, math_android));
+        abi_android.addImport("tracking", trackingStubModule(b, android_target, optimize, tracking_cores_android.face, tracking_cores_android.hand, math_android));
         abi_android.addImport("segmentation", segmentationStubModule(b, android_target, optimize, math_android));
         abi_android.addImport("beauty", beautyStubModule(b, android_target, optimize, tracking_cores_android.face));
     }
@@ -1281,6 +1291,7 @@ const TrackingCoreModules = struct {
     detector: *std.Build.Module,
     sampler: *std.Build.Module,
     face: *std.Build.Module,
+    hand: *std.Build.Module,
     tracker: *std.Build.Module,
 };
 
@@ -1312,6 +1323,15 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
             .{ .name = "detector", .module = detector_module },
         },
     });
+    const hand_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/hand.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "sampler", .module = sampler_module },
+            .{ .name = "detector", .module = detector_module },
+        },
+    });
     const tracker_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/tracker.zig"),
         .target = target,
@@ -1326,6 +1346,7 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .detector = detector_module,
         .sampler = sampler_module,
         .face = face_module,
+        .hand = hand_module,
         .tracker = tracker_module,
     };
 }
@@ -1423,13 +1444,14 @@ fn beautyStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     });
 }
 
-fn trackingStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, face_module: *std.Build.Module, math_module: *std.Build.Module) *std.Build.Module {
+fn trackingStubModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, face_module: *std.Build.Module, hand_module: *std.Build.Module, math_module: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{
         .root_source_file = b.path("adapters/tracking/tracking_stub.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "face", .module = face_module },
+            .{ .name = "hand", .module = hand_module },
             .{ .name = "math", .module = math_module },
         },
     });
@@ -2742,6 +2764,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     });
     const tracking_cores_ios = trackingCoreModules(b, ios_target, optimize, math_ios);
     abi_ios.addImport("face", tracking_cores_ios.face);
+    abi_ios.addImport("hand", tracking_cores_ios.hand);
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = ios_target,
@@ -2801,6 +2824,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
                 .{ .name = "detector", .module = tracking_cores_ios.detector },
                 .{ .name = "sampler", .module = tracking_cores_ios.sampler },
                 .{ .name = "face", .module = tracking_cores_ios.face },
+                .{ .name = "hand", .module = tracking_cores_ios.hand },
                 .{ .name = "tracker", .module = tracking_cores_ios.tracker },
                 .{ .name = "graph", .module = graph_ios },
                 .{ .name = "math", .module = math_ios },
@@ -2873,7 +2897,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         // Both device and simulator: the demo links -langle on either SDK.
         inference_libs.append(b.allocator, buildAngleLib(b, ios_target, optimize)) catch @panic("oom");
     } else {
-        abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
+        abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, tracking_cores_ios.hand, math_ios));
         abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
         abi_ios.addImport("beauty", beautyStubModule(b, ios_target, optimize, tracking_cores_ios.face));
     }
@@ -3259,7 +3283,8 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.link_libc = true;
     const tracking_cores_em = trackingCoreModules(b, em_target, .ReleaseSmall, math_em);
     abi_em.addImport("face", tracking_cores_em.face);
-    abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, math_em));
+    abi_em.addImport("hand", tracking_cores_em.hand);
+    abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));
     // Web's own beauty.reshape dispatch needs the 106-point
