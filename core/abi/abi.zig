@@ -246,6 +246,11 @@ pub const Session = struct {
     /// tracked but not yet applied (its four LUT textures aren't loaded
     /// on web yet).
     web_beauty_amounts: [6]f32 = @splat(0),
+    /// Native mirror of the amounts goss_session_set_beauty has written
+    /// into the gpupixel chain (same EffectSlot order) - the chain is
+    /// opaque, so this is what lets beautyActive() see a direct set
+    /// with no beauty-node lens active. Unused on web.
+    beauty_amounts: [6]f32 = @splat(0),
     /// fs_blur_pass.sc's own two-pass scratch space (H then V) ahead of
     /// submitBeautyFace, plus beauty.reshape's own output target -
     /// sized and recreated the same lazy way ensureChainTargets already
@@ -404,14 +409,18 @@ fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
 }
 
 /// Whether the live preview needs the GPU beauty compositing bridge
-/// running this frame: a session can enable beauty independently of
-/// which lens is active, but compositing every frame through gpupixel
-/// for a lens that never spliced a beauty node can never produce a
-/// visible difference, so it stays off until both hold.
+/// running this frame: an active lens with beauty nodes, or any direct
+/// nonzero setBeauty amount - the same two sources webBeautyActive
+/// already honors, so a slider works with no lens active on native too.
 fn beautyActive(s: *const Session) bool {
     if (s.beauty_chain == null) return false;
-    const lens = s.active_lens orelse return false;
-    return lens.hasBeautyNodes();
+    if (s.active_lens) |lens| {
+        if (lens.hasBeautyNodes()) return true;
+    }
+    for (s.beauty_amounts) |amount| {
+        if (amount > 0.0) return true;
+    }
+    return false;
 }
 
 /// Runs the beauty chain over the frame the PREVIOUS call wrote into the
@@ -1453,6 +1462,7 @@ pub export fn goss_session_disable_beauty(session: ?*Session) void {
     const s = session orelse return;
     if (s.beauty_chain) |chain| beauty.destroy(s.engine.gpa, chain);
     s.beauty_chain = null;
+    s.beauty_amounts = @splat(0);
     destroyBeautyCompositing(s);
     if (is_web) {
         s.web_beauty_amounts = @splat(0);
@@ -1475,6 +1485,7 @@ pub export fn goss_session_set_beauty(session: ?*Session, effect: i32, value: f3
     }
     const chain = s.beauty_chain orelse return .again;
     beauty.set(chain, @enumFromInt(effect), value);
+    s.beauty_amounts[@intCast(effect)] = std.math.clamp(value, 0.0, 1.0);
     return .ok;
 }
 
