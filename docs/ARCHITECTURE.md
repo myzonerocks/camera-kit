@@ -4,6 +4,14 @@ Gosslens is one Zig camera engine with three thin SDKs: Swift for iOS,
 Kotlin for Android, TypeScript for the web. The core owns portable engine
 behavior. Platform code owns only what the platform has to own.
 
+It is built in the open as a full camera and AR engine: camera
+manipulation, face/hand/body understanding, segmentation, world anchoring,
+physics-driven and scripted lens content, and a portable media rail, all
+behind one frozen C ABI. Capability growth reuses the rails below — the
+tracking module's model path, the lens format's nodes and triggers, the
+bgfx graph — so a new capability is a new model or node on an existing
+seam, not new machinery.
+
 The checked-out repository is the structural source of truth. New work extends
 an existing boundary where one already exists. It does not move working code
 into a cleaner-looking tree for its own sake.
@@ -94,6 +102,30 @@ through the existing `adapters/image/` boundary. Code must not grow a second
 private converter in tracking, media, capture, or an SDK.
 "Central" means one CPU conversion path. It does not mean every frame is copied
 through libyuv.
+
+## Capability rails
+
+The AR capability plan rides existing seams; each component below is
+planned, arrives pinned under `third_party/` with license metadata like
+every other dependency, and stays behind its adapter:
+
+- Hand, body-pose, and segmentation models run on the tracking module's
+  existing inference rail, the same way the face pipeline already does.
+  Creator-supplied models use that rail's model-loading contract too.
+- Face-mesh effects (makeup, masks, face paint) build on the canonical
+  face topology over landmarks the engine already tracks.
+- World tracking is platform-owned: ARKit, ARCore, and WebXR behind one
+  engine seam. Open SLAM stacks are copyleft-licensed and do not enter
+  the dependency graph.
+- Physics for lens content is a vendored permissive engine behind an
+  adapter; cloth and hair follow rigid bodies.
+- Lens scripting is a sandboxed embedded engine whose API is the lens
+  format's trigger and parameter surface, with a determinism contract
+  and no ambient I/O. Lenses remain untrusted content.
+- Audio playback and analysis feed level and beat signals into the lens
+  trigger system.
+- Particles and post effects are engine-owned bgfx passes, not a
+  dependency.
 
 Portable codec/container libraries, when required by a target, live behind
 `adapters/media/`. The intended stack includes narrowly scoped backends such as
