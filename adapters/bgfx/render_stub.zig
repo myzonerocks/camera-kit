@@ -152,11 +152,12 @@ pub const Renderer = struct {
         _ = mirror;
     }
 
-    pub fn submitShaderPass(r: *Renderer, view_id: u16, program: ProgramHandle, input_texture: TextureHandle) void {
+    pub fn submitShaderPass(r: *Renderer, view_id: u16, program: ProgramHandle, input_texture: TextureHandle, mask_texture: TextureHandle) void {
         _ = r;
         _ = view_id;
         _ = program;
         _ = input_texture;
+        _ = mask_texture;
     }
 
     pub fn submitLutPass(r: *Renderer, view_id: u16, input_texture: TextureHandle, lut_texture: TextureHandle) void {

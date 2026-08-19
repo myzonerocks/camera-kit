@@ -52,3 +52,15 @@ pub fn readMask(segmentation: *Segmentation, out: *[mask_len]f32) bool {
     _ = out;
     return false;
 }
+
+pub fn readClassMask(segmentation: *Segmentation, class_index: u32, out: *[mask_len]f32) bool {
+    _ = segmentation;
+    _ = class_index;
+    _ = out;
+    return false;
+}
+
+pub fn classCount(segmentation: *Segmentation) u32 {
+    _ = segmentation;
+    return 0;
+}

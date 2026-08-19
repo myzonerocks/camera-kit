@@ -563,9 +563,9 @@ pub const Renderer = struct {
     };
 
     /// Verifies the override actually landed, keeping pt's handle alive
-    /// across a still-pending resolve rather than a fresh one every
-    /// retry - a fresh handle can never clear bgfx's one-frame gap, so
-    /// it fails identically forever, not just the first time.
+    /// across a still-pending resolve. The just-created frame never
+    /// overrides at all: bgfx recycles handle indices, and a dying
+    /// predecessor in the backend slot reads as a landed override.
     pub fn wrapExternalRenderTarget(r: *Renderer, pt: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) ?c.bgfx_texture_handle_t {
         _ = r;
         if (pt.handle.idx == invalid_handle or pt.width != width or pt.height != height) {
@@ -574,6 +574,7 @@ pub const Renderer = struct {
             pt.handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
             pt.width = width;
             pt.height = height;
+            return null;
         }
         const resolved = c.bgfx_override_internal_texture_ptr(pt.handle, native_ptr, 0);
         if (resolved == 0) return null;
@@ -759,11 +760,13 @@ pub const Renderer = struct {
     }
 
     /// Draws one lens shader.pass node as a full-screen pass into
-    /// view_id, reading input_texture through the same s_texColor
-    /// sampler every lens fragment shader is authored against.
-    pub fn submitShaderPass(r: *Renderer, view_id: c.bgfx_view_id_t, program: c.bgfx_program_handle_t, input_texture: c.bgfx_texture_handle_t) void {
+    /// view_id: input_texture through the s_texColor sampler every lens
+    /// fragment shader is authored against, and the node's named mask
+    /// channel (or the all-foreground default) through s_texMask.
+    pub fn submitShaderPass(r: *Renderer, view_id: c.bgfx_view_id_t, program: c.bgfx_program_handle_t, input_texture: c.bgfx_texture_handle_t, mask_texture: c.bgfx_texture_handle_t) void {
         if (!r.setupFullScreenQuad(view_id, 0, false)) return;
         c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, program, 0, c.BGFX_DISCARD_ALL);
     }
@@ -915,7 +918,7 @@ pub const Renderer = struct {
     /// nodes would need the offscreen target to grow a depth
     /// attachment, real future work this lens does not need.
     pub fn submitModel(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, model_matrix: math.Mat4, base_color: [4]f32, aspect_ratio: f32) void {
-        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture);
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
         const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });

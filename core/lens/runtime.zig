@@ -92,6 +92,9 @@ const LensNode = struct {
     /// for model.gltf) - a slice into the Lens's own retained manifest
     /// arena, not separately owned.
     asset_stem: ?[]const u8 = null,
+    /// .shader_pass only: the named mask channel's index into
+    /// manifest.mask_channels, when the manifest names one.
+    mask_channel: ?u8 = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -106,6 +109,8 @@ const LensNode = struct {
 pub const ShaderPassNode = struct {
     graph_index: graph.NodeIndex,
     shader_stem: []const u8,
+    /// Index into manifest.mask_channels when the node names one.
+    mask_channel: ?u8 = null,
 };
 
 /// One lut.pass node ready for the caller to load and draw - which
@@ -215,7 +220,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .shader_pass) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.asset_stem.? });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .shader_stem = node.asset_stem.?, .mask_channel = node.mask_channel });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -398,6 +403,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
                 .shader_pass, .lut_pass, .blend_pass, .model_gltf => node.id,
                 else => null,
             },
+            .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
         };
 
         for (node.inputs) |input| {

@@ -303,6 +303,12 @@ pub const Session = struct {
     /// from_directory only - the bytes-based activate has no bundle path
     /// to read compiled shaders from), destroyed on deactivation.
     shader_programs: std.AutoHashMapUnmanaged(graph.NodeIndex, u16) = .empty,
+    /// shader.pass nodes that named a mask channel, by graph index -
+    /// filled at directory activation alongside the programs.
+    shader_masks: std.AutoHashMapUnmanaged(graph.NodeIndex, u8) = .empty,
+    /// One uploaded texture per named mask channel in use; index 0
+    /// (person) aliases segmentation_texture and stays null here.
+    segmentation_class_textures: [manifest.mask_channels.len]?render.TextureHandle = @splat(null),
     /// Every shader.pass and lut.pass node the active lens spliced, in
     /// one real draw-order sequence (runtime.Lens.compositePassNodes) -
     /// built once at directory-based activation regardless of whether
@@ -537,7 +543,7 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
     const view_id = next_view_id.*;
     next_view_id.* += 1;
     render.Renderer.setViewTarget(view_id, s.beauty_input_target.?, width, height);
-    r.submitShaderPass(view_id, r.passthroughProgram(), input_texture);
+    r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
     return beautified;
 }
@@ -806,7 +812,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
-                r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture);
+                const shader_mask = blk: {
+                    const channel = s.shader_masks.get(entry.graph_index) orelse break :blk r.default_mask_texture;
+                    if (channel == 0) break :blk s.segmentation_texture orelse r.default_mask_texture;
+                    break :blk s.segmentation_class_textures[channel] orelse r.default_mask_texture;
+                };
+                r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture, shader_mask);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -886,7 +897,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // target, so with no lens stage to hand it off to, it still
         // needs one real draw to actually reach the swap chain.
         render.Renderer.setViewTarget(next_view_id, finalTarget(e, s), output_width, output_height);
-        r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture);
+        r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
         if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 1);
     }
 }
@@ -907,7 +918,7 @@ fn finalTarget(e: *Engine, s: *Session) ?render.Renderer.OffscreenTarget {
 fn blitCaptureToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
     const target = e.capture_target orelse return;
     render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
-    r.submitShaderPass(view_id, r.passthroughProgram(), target.texture);
+    r.submitShaderPass(view_id, r.passthroughProgram(), target.texture, r.default_mask_texture);
 }
 
 pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!*Session {
@@ -933,6 +944,7 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
 pub fn destroySession(session: *Session) void {
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
+    session.shader_masks.deinit(session.engine.gpa);
     destroyLutState(session);
     session.lut_loaders.deinit(session.engine.gpa);
     session.lut_textures.deinit(session.engine.gpa);
@@ -1660,6 +1672,7 @@ fn destroyShaderPrograms(session: *Session) void {
     var it = session.shader_programs.valueIterator();
     while (it.next()) |handle| render.Renderer.destroyProgram(.{ .idx = handle.* });
     session.shader_programs.clearRetainingCapacity();
+    session.shader_masks.clearRetainingCapacity();
 }
 
 fn destroyChainOrder(session: *Session) void {
@@ -1672,8 +1685,13 @@ fn destroyChainOrder(session: *Session) void {
 /// its lens deactivates is not a leak, just a loader whose result
 /// nobody will ever collect.
 fn destroySegmentationTexture(session: *Session) void {
-    const texture = session.segmentation_texture orelse return;
-    if (session.engine.renderer) |*r| r.destroyTexture(texture);
+    if (session.engine.renderer) |*r| {
+        if (session.segmentation_texture) |texture| r.destroyTexture(texture);
+        for (&session.segmentation_class_textures) |*maybe_texture| {
+            if (maybe_texture.*) |texture| r.destroyTexture(texture);
+            maybe_texture.* = null;
+        }
+    }
     session.segmentation_texture = null;
 }
 
@@ -1683,18 +1701,32 @@ fn destroySegmentationTexture(session: *Session) void {
 /// texture outright since bgfx's static textures are immutable; nothing
 /// consumes segmentation_texture yet (background-swap compositing is
 /// future work), so this only ever does the upload.
+fn maskToTexture(mask: *const [segmentation.mask_len]f32) ?render.TextureHandle {
+    var bytes: [segmentation.mask_len]u8 = undefined;
+    for (mask, 0..) |value, i| {
+        bytes[i] = @intFromFloat(std.math.clamp(value, 0.0, 1.0) * 255.0);
+    }
+    return render.Renderer.createMaskTexture(segmentation.mask_side, segmentation.mask_side, &bytes);
+}
+
 fn pollSegmentationMask(session: *Session) void {
     const worker = session.segmentation_worker orelse return;
     var mask: [segmentation.mask_len]f32 = undefined;
     if (!segmentation.readMask(worker, &mask)) return;
 
-    var bytes: [segmentation.mask_len]u8 = undefined;
-    for (mask, 0..) |value, i| {
-        bytes[i] = @intFromFloat(std.math.clamp(value, 0.0, 1.0) * 255.0);
-    }
-    const texture = render.Renderer.createMaskTexture(segmentation.mask_side, segmentation.mask_side, &bytes);
     destroySegmentationTexture(session);
-    session.segmentation_texture = texture;
+    session.segmentation_texture = maskToTexture(&mask);
+
+    // Class channels upload only when the active lens names them; the
+    // person channel (index zero) rides the subject texture above.
+    var it = session.shader_masks.valueIterator();
+    var needed: [manifest.mask_channels.len]bool = @splat(false);
+    while (it.next()) |channel| needed[channel.*] = true;
+    for (needed[1..], 1..) |need, channel| {
+        if (!need) continue;
+        if (!segmentation.readClassMask(worker, @intCast(channel - 1), &mask)) continue;
+        session.segmentation_class_textures[channel] = maskToTexture(&mask);
+    }
 }
 
 fn destroyLutState(session: *Session) void {
@@ -1798,7 +1830,11 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         const program = render.Renderer.loadLensProgram(bytes) catch continue;
         session.shader_programs.put(gpa, pass.graph_index, program.idx) catch {
             render.Renderer.destroyProgram(program);
+            continue;
         };
+        if (pass.mask_channel) |channel| {
+            session.shader_masks.put(gpa, pass.graph_index, channel) catch {};
+        }
     }
 }
 

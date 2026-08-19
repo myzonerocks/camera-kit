@@ -49,11 +49,28 @@ pub const ParamBinding = union(enum) {
 pub const NodeInput = struct { name: []const u8, source: []const u8 };
 pub const NodeParam = struct { name: []const u8, binding: ParamBinding };
 
+/// The mask channels a shader.pass node may name: the subject-compat
+/// person mask, then the multiclass model's own label order. Frozen
+/// lens-format vocabulary; a running session without the class simply
+/// serves the default all-foreground mask.
+pub const mask_channels = [_][]const u8{
+    "person", "background", "hair", "body_skin", "face_skin", "clothes", "others",
+};
+
+pub fn maskChannelIndex(name: []const u8) ?u8 {
+    for (mask_channels, 0..) |candidate, i| {
+        if (std.mem.eql(u8, candidate, name)) return @intCast(i);
+    }
+    return null;
+}
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
     inputs: []const NodeInput,
     params: []const NodeParam,
+    /// Index into mask_channels, set only when the manifest names one.
+    mask_channel: ?u8 = null,
 };
 
 pub const ActionKind = enum {
@@ -579,11 +596,27 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             path.pop(params_mark);
         }
 
+        var mask_channel: ?u8 = null;
+        if (getField(object, "mask")) |mask_value| {
+            const mask_mark = path.push("mask");
+            if (try expectString(diags, path, mask_value)) |mask_name| {
+                if (!std.mem.eql(u8, node_type, "shader.pass")) {
+                    try diags.add(path.slice(), "mask is a shader.pass field, found it on '{s}'", .{node_type});
+                } else if (maskChannelIndex(mask_name)) |channel| {
+                    mask_channel = channel;
+                } else {
+                    try diags.add(path.slice(), "unknown mask channel '{s}'", .{mask_name});
+                }
+            }
+            path.pop(mask_mark);
+        }
+
         try out.append(arena, .{
             .id = try arena.dupe(u8, id),
             .type = try arena.dupe(u8, node_type),
             .inputs = try inputs.toOwnedSlice(arena),
             .params = try params.toOwnedSlice(arena),
+            .mask_channel = mask_channel,
         });
     }
     return try out.toOwnedSlice(arena);
