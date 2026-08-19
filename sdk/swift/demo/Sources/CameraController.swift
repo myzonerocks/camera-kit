@@ -44,13 +44,10 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private var activeObserver: NSObjectProtocol?
     private var engineFeaturesEnabled = false
 
-    // gpupixel's context creation silently no-ops with no retry while
-    // the app isn't foreground-active (GPXObjcHelper's s_isAppActive) -
-    // viewDidLayoutSubviews routinely calls this before that's true,
-    // losing the one shot for good. Wait for real activation first.
-    // Runs the enables exactly once: every foreground re-entry calls
-    // start() again, and re-running them would reset the active lens
-    // and pile up one leaked observer per cycle.
+    // gpupixel's context creation silently no-ops while the app isn't
+    // foreground-active, so this waits for real activation - and runs
+    // the enables exactly once: every foreground re-entry calls start()
+    // again, which would reset the lens and stack leaked observers.
     private func enableEngineFeaturesWhenActive() {
         if let observer = activeObserver {
             NotificationCenter.default.removeObserver(observer)

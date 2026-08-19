@@ -45,12 +45,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var lastFrameNanos = 0L
     private val lensSignals = LensSignals()
 
-    // Ring depth 2: the actual submit call hops to the main thread (bgfx's
-    // single-threaded contract), so the analyzer can start refilling the
-    // next slot before the previous slot's hopped submit has run. When
-    // both slots still have submits in flight (main thread two frames
-    // behind), the analyzer drops the frame instead of overwriting a
-    // buffer a pending submit will still read.
+    // Ring depth 2: submits hop to the main thread (bgfx's contract), so
+    // the analyzer refills the next slot while the prior one is in
+    // flight. With both slots pending it drops the frame rather than
+    // overwrite a buffer a pending submit will still read.
     private val yScratchRing = arrayOfNulls<ByteBuffer>(2)
     private val uvScratchRing = arrayOfNulls<ByteBuffer>(2)
     private var scratchRingIndex = 0
