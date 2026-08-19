@@ -34,6 +34,25 @@ Third-party source currently present under `third_party/` includes:
 - TensorFlow
 - XNNPACK
 
+Some vendored trees bundle their own third-party components, and Gosslens
+builds several of those into its artifacts. They are third-party software
+in the same sense as the list above:
+
+- Inside bgfx (shader toolchain, built as a host tool): fcpp (BSD-style),
+  glsl-optimizer (MIT), glslang (BSD-3/MIT/Apache-2.0), Khronos headers,
+  SPIRV-Cross (Apache-2.0), SPIRV-Headers (MIT/Khronos),
+  SPIRV-Tools (Apache-2.0)
+- Inside bimg (built into the renderer's image path): astc-encoder
+  (Apache-2.0), iqa (BSD), lodepng (Zlib), tinyexr (BSD-3)
+- Inside GPUPixel (built into the effects library): ghc filesystem (MIT),
+  libyuv (BSD-3), stb (public domain / MIT)
+- Inside TensorFlow (built into the inference runtime): XLA (Apache-2.0)
+
+Model and test assets fetched by `zig build fetch-models` are third-party
+material as well, recorded with their licenses in `third_party/models.lock`:
+MediaPipe task models (Apache-2.0) and public-domain NASA portrait
+photographs used as the conformance corpus.
+
 The Zig compiler is also part of the Gosslens development toolchain and is
 provided under its own license.
 
