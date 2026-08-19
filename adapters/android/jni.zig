@@ -32,11 +32,19 @@ export fn Java_com_gosslens_Gosslens_nativeAbiVersion(env: *JniEnv, cls: jobject
     return @bitCast(abi.goss_abi_version());
 }
 
-export fn Java_com_gosslens_Gosslens_nativeEngineCreate(env: *JniEnv, cls: jobject) i64 {
+export fn Java_com_gosslens_Gosslens_nativeEngineCreate(env: *JniEnv, cls: jobject, texture_pool_capacity: i32, staging_pool_capacity: i32) i64 {
     _ = env;
     _ = cls;
+    // Negative capacities mean no config was given; the core's own
+    // defaults apply, the same as passing null from C.
+    var config: abi.EngineConfig = undefined;
+    var config_ptr: ?*const abi.EngineConfig = null;
+    if (texture_pool_capacity >= 0 and staging_pool_capacity >= 0) {
+        config = .{ .texture_pool_capacity = @intCast(texture_pool_capacity), .staging_pool_capacity = @intCast(staging_pool_capacity) };
+        config_ptr = &config;
+    }
     var engine: ?*abi.Engine = null;
-    if (abi.goss_engine_create(null, @ptrCast(&engine)) != .ok) return 0;
+    if (abi.goss_engine_create(config_ptr, @ptrCast(&engine)) != .ok) return 0;
     return @bitCast(@as(u64, @intFromPtr(engine.?)));
 }
 
@@ -90,12 +98,39 @@ export fn Java_com_gosslens_Gosslens_nativeRenderFrame(env: *JniEnv, cls: jobjec
     return @intFromEnum(abi.goss_engine_render_frame(engineFromHandle(engine), sessionFromHandle(session)));
 }
 
-export fn Java_com_gosslens_Gosslens_nativeSessionCreate(env: *JniEnv, cls: jobject, engine: i64) i64 {
+export fn Java_com_gosslens_Gosslens_nativeSessionCreate(env: *JniEnv, cls: jobject, engine: i64, frame_budget_us: i32) i64 {
     _ = env;
     _ = cls;
+    // Negative means no config was given; the core's default budget
+    // applies, the same as passing null from C.
+    var config: abi.SessionConfig = undefined;
+    var config_ptr: ?*const abi.SessionConfig = null;
+    if (frame_budget_us >= 0) {
+        config = .{ .frame_budget_us = @intCast(frame_budget_us), .reserved = 0 };
+        config_ptr = &config;
+    }
     var session: ?*abi.Session = null;
-    if (abi.goss_session_create(engineFromHandle(engine), null, @ptrCast(&session)) != .ok) return 0;
+    if (abi.goss_session_create(engineFromHandle(engine), config_ptr, @ptrCast(&session)) != .ok) return 0;
     return @bitCast(@as(u64, @intFromPtr(session.?)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeDegradeLevel(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return abi.goss_session_degrade_level(sessionFromHandle(session));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeYuvToRgb(env: *JniEnv, cls: jobject, standard: i32, range: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const matrix: *[16]f32 = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_color_yuv_to_rgb(@intCast(standard), @intCast(range), matrix));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeActivateLensFromDirectory(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_activate_lens_from_directory(sessionFromHandle(session), bytes, @intCast(path_len)));
 }
 
 export fn Java_com_gosslens_Gosslens_nativeSessionDestroy(env: *JniEnv, cls: jobject, session: i64) void {

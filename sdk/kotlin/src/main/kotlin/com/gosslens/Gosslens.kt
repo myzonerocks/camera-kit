@@ -11,16 +11,16 @@ object Gosslens {
         System.loadLibrary("gosslens")
     }
 
-    external fun nativeAbiVersion(): Int
-    external fun nativeEngineCreate(): Long
-    external fun nativeEngineDestroy(engine: Long)
-    external fun nativeInitRenderer(engine: Long, surface: Surface, width: Int, height: Int): Int
-    external fun nativeResize(engine: Long, width: Int, height: Int)
-    external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
-    external fun nativeRenderFrame(engine: Long, session: Long): Int
-    external fun nativeSessionCreate(engine: Long): Long
-    external fun nativeSessionDestroy(session: Long)
-    external fun nativeSubmitFrameCopy(
+    internal external fun nativeAbiVersion(): Int
+    internal external fun nativeEngineCreate(texturePoolCapacity: Int, stagingPoolCapacity: Int): Long
+    internal external fun nativeEngineDestroy(engine: Long)
+    internal external fun nativeInitRenderer(engine: Long, surface: Surface, width: Int, height: Int): Int
+    internal external fun nativeResize(engine: Long, width: Int, height: Int)
+    internal external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
+    internal external fun nativeRenderFrame(engine: Long, session: Long): Int
+    internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
+    internal external fun nativeSessionDestroy(session: Long)
+    internal external fun nativeSubmitFrameCopy(
         session: Long,
         yBuffer: ByteBuffer,
         yStride: Int,
@@ -33,10 +33,10 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
-    external fun nativeReportFrame(session: Long, frameTimeUs: Int, thermal: Int): Int
-    external fun nativeEnableFaceTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
-    external fun nativeDisableFaceTracking(session: Long)
-    external fun nativeTrackFrame(
+    internal external fun nativeReportFrame(session: Long, frameTimeUs: Int, thermal: Int): Int
+    internal external fun nativeEnableFaceTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
+    internal external fun nativeDisableFaceTracking(session: Long)
+    internal external fun nativeTrackFrame(
         session: Long,
         yBuffer: ByteBuffer,
         yStride: Int,
@@ -48,15 +48,15 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
-    external fun nativeFaceResult(session: Long, resultBuffer: ByteBuffer): Int
-    external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
-    external fun nativeDisableBeauty(session: Long)
-    external fun nativeSetBeauty(session: Long, effect: Int, value: Float): Int
-    external fun nativeBeautifyFrame(session: Long, rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Int
-    external fun nativeActivateLens(session: Long, manifestBuffer: ByteBuffer, manifestLen: Int): Int
-    external fun nativeDeactivateLens(session: Long)
-    external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
-    external fun nativeSubmitHardwareBuffer(
+    internal external fun nativeFaceResult(session: Long, resultBuffer: ByteBuffer): Int
+    internal external fun nativeEnableBeauty(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
+    internal external fun nativeDisableBeauty(session: Long)
+    internal external fun nativeSetBeauty(session: Long, effect: Int, value: Float): Int
+    internal external fun nativeBeautifyFrame(session: Long, rgbaIn: ByteBuffer, rgbaOut: ByteBuffer, width: Int, height: Int): Int
+    internal external fun nativeActivateLens(session: Long, manifestBuffer: ByteBuffer, manifestLen: Int): Int
+    internal external fun nativeDeactivateLens(session: Long)
+    internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
+    internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
         width: Int,
@@ -66,7 +66,15 @@ object Gosslens {
         colorRange: Int,
         timestampUs: Long,
     ): Int
+    internal external fun nativeDegradeLevel(session: Long): Int
+    internal external fun nativeYuvToRgb(standard: Int, range: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativeActivateLensFromDirectory(session: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
 
+    const val COLOR_BT601 = 0
+    const val COLOR_BT709 = 1
+    const val COLOR_BT2020 = 2
+    const val RANGE_VIDEO = 0
+    const val RANGE_FULL = 1
     const val FLAG_MIRROR = 1
     const val ROTATION_SHIFT = 8
     const val FACE_LANDMARK_COUNT = 478
@@ -74,6 +82,18 @@ object Gosslens {
     const val FACE_RESULT_BYTES = 5968
     const val LENS_SIGNALS_BYTES = 232
     const val STATUS_AGAIN = 7
+
+    fun abiVersion(): Int = nativeAbiVersion()
+
+    /** The 4x4 YUV-to-RGB conversion matrix for a color standard and
+     * range, column-major, sixteen floats. */
+    fun yuvToRgb(colorStandard: Int, colorRange: Int): FloatArray {
+        val buffer = ByteBuffer.allocateDirect(16 * 4).order(java.nio.ByteOrder.nativeOrder())
+        check(nativeYuvToRgb(colorStandard, colorRange, buffer) == 0) { "unknown color standard or range" }
+        val matrix = FloatArray(16)
+        buffer.asFloatBuffer().get(matrix)
+        return matrix
+    }
 
     fun flagsFor(rotationDegrees: Int, mirrored: Boolean): Int {
         val quarterTurns = ((rotationDegrees % 360) / 90) and 0x3
@@ -83,12 +103,24 @@ object Gosslens {
     }
 }
 
+/** Pool capacities for the engine's texture and staging pools; the
+ * core clamps and defaults exactly as the C config does. */
+data class EngineConfig(val texturePoolCapacity: Int, val stagingPoolCapacity: Int)
+
+/** frameBudgetUs is the whole-pipeline frame time the degradation
+ * policy holds the session to; zero means the built-in 30 fps budget. */
+data class SessionConfig(val frameBudgetUs: Int)
+
 class Engine private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
 
     companion object {
-        fun create(): Engine {
-            val handle = Gosslens.nativeEngineCreate()
+        /** Null config means the core's own defaults, same as C's null. */
+        fun create(config: EngineConfig? = null): Engine {
+            val handle = Gosslens.nativeEngineCreate(
+                config?.texturePoolCapacity ?: -1,
+                config?.stagingPoolCapacity ?: -1,
+            )
             check(handle != 0L) { "engine create failed" }
             return Engine(handle)
         }
@@ -184,8 +216,9 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
 
     companion object {
-        fun create(engine: Engine): Session {
-            val handle = Gosslens.nativeSessionCreate(engine.handle)
+        /** Null config means the core's own defaults, same as C's null. */
+        fun create(engine: Engine, config: SessionConfig? = null): Session {
+            val handle = Gosslens.nativeSessionCreate(engine.handle, config?.frameBudgetUs ?: -1)
             check(handle != 0L) { "session create failed" }
             return Session(handle)
         }
@@ -200,15 +233,19 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         height: Int,
         rotationDegrees: Int,
         mirrored: Boolean,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
     ): Boolean = Gosslens.nativeSubmitFrameCopy(
         handle, y, yStride, uv, uvStride, width, height,
         Gosslens.flagsFor(rotationDegrees, mirrored),
-        1, 0, timestampUs,
+        colorStandard, colorRange, timestampUs,
     ) == 0
 
     fun reportFrame(frameTimeUs: Int, thermal: Int): Int =
         Gosslens.nativeReportFrame(handle, frameTimeUs, thermal)
+
+    fun degradeLevel(): Int = Gosslens.nativeDegradeLevel(handle)
 
     fun enableFaceTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
         Gosslens.nativeEnableFaceTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
@@ -222,9 +259,11 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         uvStride: Int,
         width: Int,
         height: Int,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
     ): Boolean = Gosslens.nativeTrackFrame(
-        handle, y, yStride, uv, uvStride, width, height, 1, 0, timestampUs,
+        handle, y, yStride, uv, uvStride, width, height, colorStandard, colorRange, timestampUs,
     ) == 0
 
     /** Stands the beauty chain up; [resourceDir] holds the effect engine's
@@ -273,6 +312,15 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         return Gosslens.nativeActivateLens(handle, buffer, manifestJson.size) == 0
     }
 
+    /** Activates a lens from an on-disk .glens bundle directory. */
+    fun activateLensFromDirectory(bundlePath: String): Boolean {
+        val bytes = bundlePath.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocateDirect(bytes.size)
+        buffer.put(bytes)
+        buffer.rewind()
+        return Gosslens.nativeActivateLensFromDirectory(handle, buffer, bytes.size) == 0
+    }
+
     fun deactivateLens() = Gosslens.nativeDeactivateLens(handle)
 
     /** Advances the active lens by [dtUs] of real time and applies
@@ -287,11 +335,13 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         height: Int,
         rotationDegrees: Int,
         mirrored: Boolean,
+        colorStandard: Int = Gosslens.COLOR_BT709,
+        colorRange: Int = Gosslens.RANGE_VIDEO,
         timestampUs: Long,
     ): Boolean = Gosslens.nativeSubmitHardwareBuffer(
         handle, buffer, width, height,
         Gosslens.flagsFor(rotationDegrees, mirrored),
-        1, 0, timestampUs,
+        colorStandard, colorRange, timestampUs,
     ) == 0
 
     override fun close() {
