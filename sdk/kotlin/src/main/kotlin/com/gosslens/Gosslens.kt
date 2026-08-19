@@ -39,6 +39,9 @@ object Gosslens {
     internal external fun nativeEnableHandTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
     internal external fun nativeDisableHandTracking(session: Long)
     internal external fun nativeHandResult(session: Long, resultBuffer: ByteBuffer): Int
+    internal external fun nativeEnablePoseTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
+    internal external fun nativeDisablePoseTracking(session: Long)
+    internal external fun nativePoseResult(session: Long, resultBuffer: ByteBuffer): Int
     internal external fun nativeTrackFrame(
         session: Long,
         yBuffer: ByteBuffer,
@@ -86,6 +89,8 @@ object Gosslens {
     const val HAND_LANDMARK_COUNT = 21
     const val HAND_MAX = 2
     const val HAND_RESULT_BYTES = 560
+    const val POSE_LANDMARK_COUNT = 33
+    const val POSE_RESULT_BYTES = 688
     const val GESTURE_NONE = 0
     const val GESTURE_CLOSED_FIST = 1
     const val GESTURE_OPEN_PALM = 2
@@ -265,6 +270,37 @@ class HandResult {
     }
 }
 
+/** One reusable pose tracking readout. The buffer mirrors the frozen C
+ * layout; parse() lifts the fields into flat arrays without allocating
+ * per frame. */
+class PoseResult {
+    internal val buffer: ByteBuffer =
+        ByteBuffer.allocateDirect(Gosslens.POSE_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
+
+    var frameSerial: Long = 0; private set
+    var timestampUs: Long = 0; private set
+    var presence: Float = 0f; private set
+    var landmarkCount: Int = 0; private set
+
+    /** x, y frame pixels and z, three floats per landmark. */
+    val landmarks = FloatArray(Gosslens.POSE_LANDMARK_COUNT * 3)
+    val visibilities = FloatArray(Gosslens.POSE_LANDMARK_COUNT)
+    val presences = FloatArray(Gosslens.POSE_LANDMARK_COUNT)
+
+    internal fun parse() {
+        buffer.rewind()
+        frameSerial = buffer.long
+        timestampUs = buffer.long
+        presence = buffer.float
+        landmarkCount = buffer.int
+        buffer.asFloatBuffer().let { floats ->
+            floats.get(landmarks)
+            floats.get(visibilities)
+            floats.get(presences)
+        }
+    }
+}
+
 class Session private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
 
@@ -312,6 +348,22 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         Gosslens.nativeEnableHandTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
 
     fun disableHandTracking() = Gosslens.nativeDisableHandTracking(handle)
+
+    /** Stands the pose tracking worker up from a pose landmarker task
+     * bundle; one 33-point body publishes per frame. */
+    fun enablePoseTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
+        Gosslens.nativeEnablePoseTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
+
+    fun disablePoseTracking() = Gosslens.nativeDisablePoseTracking(handle)
+
+    /** Fills [result] with the newest pose tracking output; false until
+     * the worker publishes its first result. */
+    fun poseResult(result: PoseResult): Boolean {
+        val status = Gosslens.nativePoseResult(handle, result.buffer)
+        if (status != 0) return false
+        result.parse()
+        return true
+    }
 
     /** Fills [result] with the newest hand tracking output; false until
      * the worker publishes its first result. */
