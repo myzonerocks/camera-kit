@@ -36,13 +36,11 @@ try engine.initRenderer(surface: metalLayer, width: width, height: height)
 let session = try Session.create(engine: engine)
 try session.enableBeauty(resourceDir: Bundle.main.bundlePath)
 
-try session.submitFrame(
-    planes: [yPlaneHandle, uvPlaneHandle],
-    width: width, height: height,
-    pixelFormat: GOSS_PIXEL_NV12.rawValue,
-    rotationDegrees: 90, mirrored: false,
-    timestampUs: timestampUs
+let desc = FrameDesc(
+    width: width, height: height, pixelFormat: .nv12,
+    rotationDegrees: 90, timestampUs: timestampUs
 )
+try session.submitFrame(desc: desc, planes: [yPlaneHandle, uvPlaneHandle])
 try engine.renderFrame(session: session)
 
 try session.setWhiten(0.6)

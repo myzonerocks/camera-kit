@@ -17,7 +17,7 @@ final class PreviewViewController: UIViewController {
     private let switchCameraButton = UIButton(type: .system)
     private let beautyStack = UIStackView()
     private let faceLayer = CAShapeLayer()
-    private var lastFaceResult: FaceResult?
+    private let trackedFace = FaceResult()
     private var lastFaceSerial: UInt64 = 0
 
     private var engine: Engine?
@@ -191,7 +191,7 @@ final class PreviewViewController: UIViewController {
         let frameTimeUs = UInt32(max(0, (start - lastFrameStart) * 1_000_000))
         lastFrameStart = start
 
-        session.reportFrame(frameTimeUs: frameTimeUs, thermal: goss_thermal(rawValue: UInt32(ProcessInfo.processInfo.thermalState.ckThermal)))
+        session.reportFrame(frameTimeUs: frameTimeUs, thermal: ProcessInfo.processInfo.thermalState.gossThermal)
         drawFaceOverlay()
         tickLens(dtUs: frameTimeUs)
         guard (try? engine.renderFrame(session: session)) != nil else { return }
@@ -211,11 +211,10 @@ final class PreviewViewController: UIViewController {
     /// Landmarks arrive in sensor pixels; the sensor sits one quarter turn
     /// from portrait, the same turn the preview applies.
     private func drawFaceOverlay() {
-        guard let session, let result = try? session.faceResult() else { return }
-        guard result.frameSerial != lastFaceSerial else { return }
-        lastFaceSerial = result.frameSerial
-        lastFaceResult = result
-        guard !result.landmarks.isEmpty, result.presence >= 0.5 else {
+        guard let session, (try? session.faceResult(trackedFace)) != nil else { return }
+        guard trackedFace.frameSerial != lastFaceSerial else { return }
+        lastFaceSerial = trackedFace.frameSerial
+        guard trackedFace.landmarkCount > 0, trackedFace.presence >= 0.5 else {
             faceLayer.path = nil
             return
         }
@@ -226,9 +225,9 @@ final class PreviewViewController: UIViewController {
         let sensorHeight = CGFloat(max(camera.frameHeight, 1))
         let scaleX = bounds.width / sensorHeight
         let scaleY = bounds.height / sensorWidth
-        for index in 0 ..< result.landmarks.count / 3 {
-            let x = CGFloat(result.landmarks[index * 3])
-            let y = CGFloat(result.landmarks[index * 3 + 1])
+        for index in 0 ..< trackedFace.landmarkCount {
+            let x = CGFloat(trackedFace.landmarks[index * 3])
+            let y = CGFloat(trackedFace.landmarks[index * 3 + 1])
             // Quarter turn: sensor x runs down the portrait screen. The
             // front camera's preview is mirrored for a selfie view, so
             // the overlay's horizontal axis mirrors along with it.
@@ -248,10 +247,9 @@ final class PreviewViewController: UIViewController {
     /// at display refresh rate rather than at tracking cadence.
     private func tickLens(dtUs: UInt32) {
         guard let session else { return }
-        let result = lastFaceResult
         let signals = LensSignals(
-            hasFace: (result?.presence ?? 0) >= 0.5 && !(result?.landmarks.isEmpty ?? true),
-            blendshapes: result?.blendshapes ?? []
+            hasFace: trackedFace.presence >= 0.5 && trackedFace.landmarkCount > 0,
+            blendshapes: trackedFace.blendshapes
         )
         try? session.tickLens(dtUs: dtUs, signals: signals)
     }
@@ -268,13 +266,13 @@ final class PreviewViewController: UIViewController {
 }
 
 private extension ProcessInfo.ThermalState {
-    var ckThermal: Int32 {
+    var gossThermal: Thermal {
         switch self {
-        case .nominal: return 0
-        case .fair: return 1
-        case .serious: return 2
-        case .critical: return 3
-        @unknown default: return 3
+        case .nominal: return .nominal
+        case .fair: return .fair
+        case .serious: return .serious
+        case .critical: return .critical
+        @unknown default: return .critical
         }
     }
 }
