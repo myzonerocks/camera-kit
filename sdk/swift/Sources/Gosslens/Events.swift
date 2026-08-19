@@ -34,6 +34,19 @@ public final class FaceResult {
     }
 }
 
+/// A canned gesture class, in the classifier's own label order. none is
+/// also what a bundle without gesture models reports.
+public enum Gesture: UInt32 {
+    case none = 0
+    case closedFist = 1
+    case openPalm = 2
+    case pointingUp = 3
+    case thumbDown = 4
+    case thumbUp = 5
+    case victory = 6
+    case iLoveYou = 7
+}
+
 /// One reusable hand tracking readout, up to two hands per frame.
 /// handedness is the model's score that the hand is a right hand; hand
 /// h's point p sits at (h * landmarkCount + p) * 3 in landmarks.
@@ -46,6 +59,8 @@ public final class HandResult {
     public private(set) var handCount: Int = 0
     public private(set) var presences: [Float]
     public private(set) var handednesses: [Float]
+    public private(set) var gestures: [Gesture]
+    public private(set) var gestureScores: [Float]
     public private(set) var landmarks: [Float]
 
     var raw = goss_hand_result()
@@ -53,6 +68,8 @@ public final class HandResult {
     public init() {
         presences = [Float](repeating: 0, count: Self.maxHands)
         handednesses = [Float](repeating: 0, count: Self.maxHands)
+        gestures = [Gesture](repeating: .none, count: Self.maxHands)
+        gestureScores = [Float](repeating: 0, count: Self.maxHands)
         landmarks = [Float](repeating: 0, count: Self.maxHands * Self.landmarkCount * 3)
     }
 
@@ -68,9 +85,11 @@ public final class HandResult {
                 let base = at * MemoryLayout<goss_hand>.stride
                 presences[at] = source.loadUnaligned(fromByteOffset: base, as: Float.self)
                 handednesses[at] = source.loadUnaligned(fromByteOffset: base + 4, as: Float.self)
+                gestures[at] = Gesture(rawValue: source.loadUnaligned(fromByteOffset: base + 8, as: UInt32.self)) ?? .none
+                gestureScores[at] = source.loadUnaligned(fromByteOffset: base + 12, as: Float.self)
                 landmarks.withUnsafeMutableBytes { dest in
                     dest.baseAddress!.advanced(by: at * landmark_floats * 4)
-                        .copyMemory(from: source.baseAddress!.advanced(by: base + 8), byteCount: landmark_floats * 4)
+                        .copyMemory(from: source.baseAddress!.advanced(by: base + 16), byteCount: landmark_floats * 4)
                 }
             }
         }

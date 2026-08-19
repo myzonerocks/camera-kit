@@ -127,7 +127,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             Log.i(tag, "face tracking bundle not present")
         }
         try {
-            assets.open("hand_landmarker.task").use { stream ->
+            assets.open("gesture_recognizer.task").use { stream ->
                 val bytes = stream.readBytes()
                 val bundle = ByteBuffer.allocateDirect(bytes.size)
                 bundle.put(bytes)

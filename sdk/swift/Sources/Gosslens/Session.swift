@@ -93,8 +93,9 @@ public final class Session: @unchecked Sendable {
         goss_session_disable_face_tracking(handle)
     }
 
-    /// Stands the hand tracking worker up from a hand landmarker task
-    /// bundle; up to two hands publish per frame.
+    /// Stands the hand tracking worker up from a hand landmarker or
+    /// gesture recognizer task bundle; up to two hands publish per
+    /// frame, with canned gestures scored when the bundle carries them.
     public func enableHandTracking(taskBundle: Data, threads: Int32) throws {
         try taskBundle.withUnsafeBytes { buffer in
             try checked(goss_session_enable_hand_tracking(handle, buffer.bindMemory(to: UInt8.self).baseAddress, buffer.count, threads))

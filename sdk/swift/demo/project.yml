@@ -17,7 +17,7 @@ targets:
       - path: ../../../.models/face_landmarker.task
         buildPhase: resources
         optional: true
-      - path: ../../../.models/hand_landmarker.task
+      - path: ../../../.models/gesture_recognizer.task
         buildPhase: resources
         optional: true
       - path: ../../../.models/corpus/face_frontal_b.jpg

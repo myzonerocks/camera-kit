@@ -35,10 +35,18 @@ const PendingFrame = struct {
 pub const HandTracking = struct {
     gpa: std.mem.Allocator,
     task_bytes: []u8,
+    /// Set when the caller handed over a gesture recognizer bundle, whose
+    /// landmarker and gesture models nest inside their own containers.
+    landmarker_container: ?bundle.Payload,
+    gesture_container: ?bundle.Payload,
     detector_payload: bundle.Payload,
     landmarks_payload: bundle.Payload,
+    embedder_payload: ?bundle.Payload,
+    classifier_payload: ?bundle.Payload,
     detector_engine: runtime.Engine,
     landmarks_engine: runtime.Engine,
+    embedder_engine: ?runtime.Engine,
+    classifier_engine: ?runtime.Engine,
 
     detector_side: u32,
     landmark_side: u32,
@@ -77,8 +85,15 @@ fn outputFloatCount(engine: *const runtime.Engine, index: i32) usize {
     return runtime.c.TfLiteTensorByteSize(tensor) / @sizeOf(f32);
 }
 
-/// Copies the bundle, stands both engines up, verifies the landmark
-/// model's output contract, and starts the worker.
+fn inputFloatCount(engine: *const runtime.Engine, index: i32) usize {
+    const tensor = runtime.c.TfLiteInterpreterGetInputTensor(engine.interpreter, index) orelse return 0;
+    return runtime.c.TfLiteTensorByteSize(tensor) / @sizeOf(f32);
+}
+
+/// Copies the bundle, stands the engines up, verifies each model's
+/// output contract, and starts the worker. Accepts either a plain hand
+/// landmarker bundle or a gesture recognizer bundle, which nests the
+/// landmarker plus the embedder/classifier pair inside containers.
 pub fn create(gpa: std.mem.Allocator, task_bytes: []const u8, threads: i32) CreateError!*HandTracking {
     const tracking = gpa.create(HandTracking) catch return error.OutOfMemory;
     errdefer gpa.destroy(tracking);
@@ -87,12 +102,25 @@ pub fn create(gpa: std.mem.Allocator, task_bytes: []const u8, threads: i32) Crea
     errdefer gpa.free(owned_bytes);
 
     const task = bundle.Bundle.open(owned_bytes) catch return error.InvalidBundle;
-    const detector_entry = task.find("hand_detector.tflite") catch return error.InvalidBundle;
-    const landmarks_entry = task.find("hand_landmarks_detector.tflite") catch return error.InvalidBundle;
 
-    const detector_payload = task.payload(gpa, detector_entry) catch return error.InvalidBundle;
+    var landmarker_container: ?bundle.Payload = null;
+    errdefer if (landmarker_container) |payload| payload.deinit(gpa);
+    var gesture_container: ?bundle.Payload = null;
+    errdefer if (gesture_container) |payload| payload.deinit(gpa);
+
+    const landmarker = blk: {
+        if (task.find("hand_detector.tflite")) |_| break :blk task else |_| {}
+        const nested_entry = task.find("hand_landmarker.task") catch return error.InvalidBundle;
+        landmarker_container = task.payload(gpa, nested_entry) catch return error.InvalidBundle;
+        break :blk bundle.Bundle.open(landmarker_container.?.bytes) catch return error.InvalidBundle;
+    };
+
+    const detector_entry = landmarker.find("hand_detector.tflite") catch return error.InvalidBundle;
+    const landmarks_entry = landmarker.find("hand_landmarks_detector.tflite") catch return error.InvalidBundle;
+
+    const detector_payload = landmarker.payload(gpa, detector_entry) catch return error.InvalidBundle;
     errdefer detector_payload.deinit(gpa);
-    const landmarks_payload = task.payload(gpa, landmarks_entry) catch return error.InvalidBundle;
+    const landmarks_payload = landmarker.payload(gpa, landmarks_entry) catch return error.InvalidBundle;
     errdefer landmarks_payload.deinit(gpa);
 
     var detector_engine = runtime.Engine.init(detector_payload.bytes, threads) catch return error.InvalidBundle;
@@ -112,6 +140,36 @@ pub fn create(gpa: std.mem.Allocator, task_bytes: []const u8, threads: i32) Crea
     if (outputFloatCount(&landmarks_engine, 1) != 1) return error.InvalidBundle;
     if (outputFloatCount(&landmarks_engine, 2) != 1) return error.InvalidBundle;
 
+    var embedder_payload: ?bundle.Payload = null;
+    errdefer if (embedder_payload) |payload| payload.deinit(gpa);
+    var classifier_payload: ?bundle.Payload = null;
+    errdefer if (classifier_payload) |payload| payload.deinit(gpa);
+    var embedder_engine: ?runtime.Engine = null;
+    errdefer if (embedder_engine) |*engine| engine.deinit();
+    var classifier_engine: ?runtime.Engine = null;
+    errdefer if (classifier_engine) |*engine| engine.deinit();
+
+    if (task.find("hand_gesture_recognizer.task")) |gesture_entry| {
+        gesture_container = task.payload(gpa, gesture_entry) catch return error.InvalidBundle;
+        const gesture = bundle.Bundle.open(gesture_container.?.bytes) catch return error.InvalidBundle;
+        const embedder_entry = gesture.find("gesture_embedder.tflite") catch return error.InvalidBundle;
+        const classifier_entry = gesture.find("canned_gesture_classifier.tflite") catch return error.InvalidBundle;
+        embedder_payload = gesture.payload(gpa, embedder_entry) catch return error.InvalidBundle;
+        classifier_payload = gesture.payload(gpa, classifier_entry) catch return error.InvalidBundle;
+        embedder_engine = runtime.Engine.init(embedder_payload.?.bytes, threads) catch return error.InvalidBundle;
+        classifier_engine = runtime.Engine.init(classifier_payload.?.bytes, threads) catch return error.InvalidBundle;
+
+        // The embedder eats the two canonicalized landmark matrices with
+        // handedness between them; the classifier eats the embedding and
+        // scores every canned gesture. Sizes disagreeing is refusal.
+        if (inputFloatCount(&embedder_engine.?, 0) != hand.landmark_count * 3) return error.InvalidBundle;
+        if (inputFloatCount(&embedder_engine.?, 1) != 1) return error.InvalidBundle;
+        if (inputFloatCount(&embedder_engine.?, 2) != hand.landmark_count * 3) return error.InvalidBundle;
+        if (outputFloatCount(&classifier_engine.?, 0) != hand.gesture_count) return error.InvalidBundle;
+        if (inputFloatCount(&classifier_engine.?, 0) != outputFloatCount(&embedder_engine.?, 0)) return error.InvalidBundle;
+        if (outputFloatCount(&landmarks_engine, 3) != hand.landmark_count * 3) return error.InvalidBundle;
+    } else |_| {}
+
     const anchors = gpa.alloc(detector.Anchor, total) catch return error.OutOfMemory;
     errdefer gpa.free(anchors);
     detector.generateAnchors(detector_side, plan, anchors);
@@ -125,10 +183,16 @@ pub fn create(gpa: std.mem.Allocator, task_bytes: []const u8, threads: i32) Crea
         .gpa = gpa,
         .io_state = std.Io.Threaded.init(gpa, .{}),
         .task_bytes = owned_bytes,
+        .landmarker_container = landmarker_container,
+        .gesture_container = gesture_container,
         .detector_payload = detector_payload,
         .landmarks_payload = landmarks_payload,
+        .embedder_payload = embedder_payload,
+        .classifier_payload = classifier_payload,
         .detector_engine = detector_engine,
         .landmarks_engine = landmarks_engine,
+        .embedder_engine = embedder_engine,
+        .classifier_engine = classifier_engine,
         .detector_side = detector_side,
         .landmark_side = landmark_side,
         .anchors = anchors,
@@ -153,13 +217,19 @@ pub fn destroy(tracking: *HandTracking) void {
     const gpa = tracking.gpa;
     tracking.pending.y.deinit(gpa);
     tracking.pending.uv.deinit(gpa);
+    if (tracking.classifier_engine) |*engine| engine.deinit();
+    if (tracking.embedder_engine) |*engine| engine.deinit();
     tracking.detector_engine.deinit();
     tracking.landmarks_engine.deinit();
     gpa.free(tracking.landmark_tensor);
     gpa.free(tracking.detector_tensor);
     gpa.free(tracking.anchors);
+    if (tracking.classifier_payload) |payload| payload.deinit(gpa);
+    if (tracking.embedder_payload) |payload| payload.deinit(gpa);
     tracking.landmarks_payload.deinit(gpa);
     tracking.detector_payload.deinit(gpa);
+    if (tracking.gesture_container) |payload| payload.deinit(gpa);
+    if (tracking.landmarker_container) |payload| payload.deinit(gpa);
     gpa.free(tracking.task_bytes);
     tracking.io_state.deinit();
     gpa.destroy(tracking);
@@ -261,6 +331,46 @@ fn regionOverlap(a: sampler.Region, b: sampler.Region) f32 {
     return shared / total;
 }
 
+/// Runs the embedder/classifier pair over one tracked hand when the
+/// bundle carried them; without them the slot keeps the no-gesture
+/// default. A refused inference leaves the default too - one bad frame
+/// must not drop the hand.
+fn classifyGesture(
+    tracking: *HandTracking,
+    landmarks: *const [hand.landmark_count]hand.Landmark,
+    handedness: f32,
+    rotation: f32,
+    frame: *const PendingFrame,
+    slot: anytype,
+) void {
+    if (tracking.embedder_engine == null or tracking.classifier_engine == null) return;
+    const embedder = &tracking.embedder_engine.?;
+    const classifier = &tracking.classifier_engine.?;
+    const raw_world = tracking.landmarks_engine.outputFloats(3) catch return;
+
+    var screen_input: [hand.landmark_count * 3]f32 = undefined;
+    hand.gestureLandmarkInput(landmarks, @floatFromInt(frame.width), @floatFromInt(frame.height), rotation, &screen_input);
+    var world_input: [hand.landmark_count * 3]f32 = undefined;
+    hand.gestureWorldInput(raw_world, rotation, &world_input);
+    var handedness_input = [1]f32{handedness};
+
+    embedder.writeInput(0, std.mem.sliceAsBytes(&screen_input)) catch return;
+    embedder.writeInput(1, std.mem.sliceAsBytes(&handedness_input)) catch return;
+    embedder.writeInput(2, std.mem.sliceAsBytes(&world_input)) catch return;
+    embedder.invoke() catch return;
+    const embedding = embedder.outputFloats(0) catch return;
+    classifier.writeInput(0, std.mem.sliceAsBytes(embedding)) catch return;
+    classifier.invoke() catch return;
+    const scores = classifier.outputFloats(0) catch return;
+
+    var best: usize = 0;
+    for (scores, 0..) |score, at| {
+        if (score > scores[best]) best = at;
+    }
+    slot.gesture = @intCast(best);
+    slot.gesture_score = score01(scores[best]);
+}
+
 fn detectHands(tracking: *HandTracking, image: sampler.Frame) void {
     const square = sampler.frameSquare(image.width, image.height);
     // The palm detector reads zero-to-one input, unlike the face
@@ -336,6 +446,9 @@ fn processFrame(tracking: *HandTracking, frame: *const PendingFrame) void {
         const slot = &result.hands[result.hand_count];
         slot.presence = presence;
         slot.handedness = handedness;
+        slot.gesture = 0;
+        slot.gesture_score = 0;
+        classifyGesture(tracking, &landmarks, handedness, crop.rotation, frame, slot);
         for (landmarks, 0..) |landmark, at| {
             slot.landmarks[at * 3] = landmark.x;
             slot.landmarks[at * 3 + 1] = landmark.y;

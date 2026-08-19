@@ -155,7 +155,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     private func enableHandTracking() {
         guard let session,
-              let url = Bundle.main.url(forResource: "hand_landmarker", withExtension: "task"),
+              let url = Bundle.main.url(forResource: "gesture_recognizer", withExtension: "task"),
               let bundleData = try? Data(contentsOf: url)
         else {
             log.info("hand tracking bundle not present")

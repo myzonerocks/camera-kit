@@ -85,7 +85,15 @@ object Gosslens {
     const val FACE_RESULT_BYTES = 5968
     const val HAND_LANDMARK_COUNT = 21
     const val HAND_MAX = 2
-    const val HAND_RESULT_BYTES = 544
+    const val HAND_RESULT_BYTES = 560
+    const val GESTURE_NONE = 0
+    const val GESTURE_CLOSED_FIST = 1
+    const val GESTURE_OPEN_PALM = 2
+    const val GESTURE_POINTING_UP = 3
+    const val GESTURE_THUMB_DOWN = 4
+    const val GESTURE_THUMB_UP = 5
+    const val GESTURE_VICTORY = 6
+    const val GESTURE_ILOVEYOU = 7
     const val LENS_SIGNALS_BYTES = 232
     const val STATUS_AGAIN = 7
 
@@ -221,7 +229,8 @@ class LensSignals {
 /** One reusable hand tracking readout. The buffer mirrors the frozen C
  * layout; parse() lifts the fields into flat per-hand arrays without
  * allocating per frame. handedness is the model's score that the hand
- * is a right hand. */
+ * is a right hand; gestures hold GESTURE_* classes, NONE when the
+ * enabled bundle carries no gesture models. */
 class HandResult {
     internal val buffer: ByteBuffer =
         ByteBuffer.allocateDirect(Gosslens.HAND_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
@@ -232,6 +241,8 @@ class HandResult {
 
     val presences = FloatArray(Gosslens.HAND_MAX)
     val handednesses = FloatArray(Gosslens.HAND_MAX)
+    val gestures = IntArray(Gosslens.HAND_MAX)
+    val gestureScores = FloatArray(Gosslens.HAND_MAX)
 
     /** Hand h's point p sits at (h * HAND_LANDMARK_COUNT + p) * 3. */
     val landmarks = FloatArray(Gosslens.HAND_MAX * Gosslens.HAND_LANDMARK_COUNT * 3)
@@ -242,11 +253,14 @@ class HandResult {
         timestampUs = buffer.long
         handCount = buffer.int
         buffer.int
-        val floats = buffer.asFloatBuffer()
         for (handAt in 0 until Gosslens.HAND_MAX) {
-            presences[handAt] = floats.get()
-            handednesses[handAt] = floats.get()
+            presences[handAt] = buffer.float
+            handednesses[handAt] = buffer.float
+            gestures[handAt] = buffer.int
+            gestureScores[handAt] = buffer.float
+            val floats = buffer.asFloatBuffer()
             floats.get(landmarks, handAt * Gosslens.HAND_LANDMARK_COUNT * 3, Gosslens.HAND_LANDMARK_COUNT * 3)
+            buffer.position(buffer.position() + Gosslens.HAND_LANDMARK_COUNT * 3 * 4)
         }
     }
 }
@@ -291,8 +305,9 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
 
     fun disableFaceTracking() = Gosslens.nativeDisableFaceTracking(handle)
 
-    /** Stands the hand tracking worker up from a hand landmarker task
-     * bundle; up to two hands publish per frame. */
+    /** Stands the hand tracking worker up from a hand landmarker or
+     * gesture recognizer task bundle; up to two hands publish per frame,
+     * with canned gestures scored when the bundle carries the models. */
     fun enableHandTracking(taskBundle: ByteBuffer, threads: Int): Boolean =
         Gosslens.nativeEnableHandTracking(handle, taskBundle, taskBundle.remaining(), threads) == 0
 

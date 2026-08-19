@@ -12,6 +12,23 @@ pub const max_hands = 2;
 
 pub const Landmark = sampler.Landmark;
 
+/// The canned gesture classifier's own label order, read from the label
+/// file the model embeds. Index zero is the no-gesture class.
+pub const gesture_count = 8;
+pub const gesture_names = [gesture_count][]const u8{
+    "None",      "Closed_Fist", "Open_Palm", "Pointing_Up",
+    "Thumb_Down", "Thumb_Up",   "Victory",   "ILoveYou",
+};
+
+/// The gesture's index in gesture_names, or null for an unknown name.
+/// Called at lens load time, never per frame.
+pub fn gestureIndex(name: []const u8) ?u8 {
+    for (gesture_names, 0..) |candidate, i| {
+        if (std.mem.eql(u8, candidate, name)) return @intCast(i);
+    }
+    return null;
+}
+
 /// The crop points the hand up: the steering segment's target angle is a
 /// quarter turn, where the face pipeline levels its segment to zero.
 const target_angle = std.math.pi * 0.5;
@@ -30,11 +47,14 @@ const landmarks_shift_y = -0.1;
 const landmarks_scale = 2.0;
 
 /// One tracked hand as published. handedness is the model's score that
-/// this is a right hand; landmarks are x, y in frame pixels and z in the
-/// same scale. The layout is frozen.
+/// this is a right hand; gesture indexes gesture_names, zero when no
+/// gesture model is loaded or nothing is recognized; landmarks are x, y
+/// in frame pixels and z in the same scale. The layout is frozen.
 pub const Hand = extern struct {
     presence: f32,
     handedness: f32,
+    gesture: u32,
+    gesture_score: f32,
     landmarks: [landmark_count * 3]f32,
 };
 
@@ -50,7 +70,7 @@ pub const Result = extern struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(Hand) == 8 + landmark_count * 3 * 4);
+    std.debug.assert(@sizeOf(Hand) == 16 + landmark_count * 3 * 4);
     std.debug.assert(@offsetOf(Result, "hand_count") == 16);
     std.debug.assert(@offsetOf(Result, "hands") == 24);
     std.debug.assert(@sizeOf(Result) == 24 + max_hands * @sizeOf(Hand));
@@ -151,6 +171,71 @@ pub fn decodeLandmarks(raw: []const f32, region: sampler.Region, input_side: f32
     sampler.decodeLandmarks(landmark_count, raw, region, input_side, out);
 }
 
+fn rotateAboutCenter(x: f32, y: f32, cos: f32, sin: f32) [2]f32 {
+    const cx = x - 0.5;
+    const cy = y - 0.5;
+    return .{ cx * cos - cy * sin + 0.5, cy * cos + cx * sin + 0.5 };
+}
+
+/// Subtracts the wrist and scales by the larger planar span - the
+/// canonical object frame both gesture embedder inputs end in.
+fn canonicalize(points: *[landmark_count * 3]f32) void {
+    const origin_x = points[0];
+    const origin_y = points[1];
+    const origin_z = points[2];
+    var min_x = std.math.floatMax(f32);
+    var max_x = -std.math.floatMax(f32);
+    var min_y = std.math.floatMax(f32);
+    var max_y = -std.math.floatMax(f32);
+    for (0..landmark_count) |at| {
+        points[at * 3] -= origin_x;
+        points[at * 3 + 1] -= origin_y;
+        points[at * 3 + 2] -= origin_z;
+        min_x = @min(min_x, points[at * 3]);
+        max_x = @max(max_x, points[at * 3]);
+        min_y = @min(min_y, points[at * 3 + 1]);
+        max_y = @max(max_y, points[at * 3 + 1]);
+    }
+    const scale = @max(max_x - min_x, max_y - min_y) + 1e-5;
+    for (points) |*value| value.* /= scale;
+}
+
+/// The gesture embedder's screen-landmark input: frame pixels normalized
+/// to the image, aspect-leveled around the center, rotated level by the
+/// hand crop's rotation, then canonicalized - xyz per point, 63 floats.
+pub fn gestureLandmarkInput(landmarks: *const [landmark_count]Landmark, width: f32, height: f32, rotation: f32, out: *[landmark_count * 3]f32) void {
+    const max_dim = @max(width, height);
+    const width_scale = width / max_dim;
+    const height_scale = height / max_dim;
+    const cos = @cos(rotation);
+    const sin = @sin(-rotation);
+    for (landmarks, 0..) |landmark, at| {
+        const ax = (landmark.x / width - 0.5) * width_scale + 0.5;
+        const ay = (landmark.y / height - 0.5) * height_scale + 0.5;
+        const rotated = rotateAboutCenter(ax, ay, cos, sin);
+        out[at * 3] = rotated[0];
+        out[at * 3 + 1] = rotated[1];
+        out[at * 3 + 2] = landmark.z / width;
+    }
+    canonicalize(out);
+}
+
+/// The gesture embedder's world-landmark input: the model's raw metric
+/// output rotated by the same crop rotation (no aspect step - world
+/// coordinates carry no image aspect), then canonicalized.
+pub fn gestureWorldInput(raw_world: []const f32, rotation: f32, out: *[landmark_count * 3]f32) void {
+    std.debug.assert(raw_world.len >= landmark_count * 3);
+    const cos = @cos(rotation);
+    const sin = @sin(-rotation);
+    for (0..landmark_count) |at| {
+        const rotated = rotateAboutCenter(raw_world[at * 3], raw_world[at * 3 + 1], cos, sin);
+        out[at * 3] = rotated[0];
+        out[at * 3 + 1] = rotated[1];
+        out[at * 3 + 2] = raw_world[at * 3 + 2];
+    }
+    canonicalize(out);
+}
+
 const t = std.testing;
 
 fn upwardHandLandmarks() [landmark_count]Landmark {
@@ -237,6 +322,57 @@ test "the frozen result layout holds" {
     var result = std.mem.zeroes(Result);
     result.hand_count = 1;
     result.hands[0].presence = 0.9;
-    try t.expectEqual(@as(usize, 24 + 2 * (8 + 21 * 3 * 4)), @sizeOf(Result));
+    result.hands[0].gesture = 2;
+    try t.expectEqual(@as(usize, 24 + 2 * (16 + 21 * 3 * 4)), @sizeOf(Result));
     try t.expectApproxEqAbs(@as(f32, 0.9), result.hands[0].presence, 1e-6);
+    try t.expectEqualStrings("Open_Palm", gesture_names[result.hands[0].gesture]);
+}
+
+test "gesture names resolve to their own index" {
+    for (gesture_names, 0..) |name, i| {
+        try t.expectEqual(@as(?u8, @intCast(i)), gestureIndex(name));
+    }
+    try t.expectEqual(@as(?u8, null), gestureIndex("not_a_gesture"));
+}
+
+test "gesture inputs are wrist-origined and span-scaled" {
+    const landmarks = upwardHandLandmarks();
+    var out: [landmark_count * 3]f32 = undefined;
+    gestureLandmarkInput(&landmarks, 640, 480, 0, &out);
+    try t.expectApproxEqAbs(@as(f32, 0.0), out[0], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.0), out[1], 1e-6);
+    try t.expectApproxEqAbs(@as(f32, 0.0), out[2], 1e-6);
+    var min_x = out[0];
+    var max_x = out[0];
+    var min_y = out[1];
+    var max_y = out[1];
+    for (0..landmark_count) |at| {
+        min_x = @min(min_x, out[at * 3]);
+        max_x = @max(max_x, out[at * 3]);
+        min_y = @min(min_y, out[at * 3 + 1]);
+        max_y = @max(max_y, out[at * 3 + 1]);
+    }
+    const span = @max(max_x - min_x, max_y - min_y);
+    try t.expect(span > 0.98 and span <= 1.0);
+}
+
+test "a quarter-turn rotation levels the world input" {
+    // Points along +x rotated by a quarter turn end along the y axis.
+    var raw: [landmark_count * 3]f32 = undefined;
+    for (0..landmark_count) |at| {
+        raw[at * 3] = @as(f32, @floatFromInt(at)) * 0.01;
+        raw[at * 3 + 1] = 0;
+        raw[at * 3 + 2] = 0;
+    }
+    var out: [landmark_count * 3]f32 = undefined;
+    gestureWorldInput(&raw, std.math.pi / 2.0, &out);
+    // The x spread collapses; the y axis carries the hand.
+    var max_abs_x: f32 = 0;
+    var max_abs_y: f32 = 0;
+    for (0..landmark_count) |at| {
+        max_abs_x = @max(max_abs_x, @abs(out[at * 3]));
+        max_abs_y = @max(max_abs_y, @abs(out[at * 3 + 1]));
+    }
+    try t.expect(max_abs_x < 1e-4);
+    try t.expect(max_abs_y > 0.9);
 }
