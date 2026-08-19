@@ -5,7 +5,7 @@ $output v_backgroundUv, v_makeupUv
 
 // beauty.lipstick/beauty.blusher's own mesh vertex stage: a_position is
 // the live tracked landmark in 0-1 UV space, doubling as both the
-// clip-space position (after the same manual NDC remap shells/ts's own
+// clip-space position (after the same manual NDC remap sdk/ts's own
 // proven WebGL2 version uses, not bgfx's usual MVP uniform - there is
 // no model to transform, only a flat mesh already in UV space) and the
 // background sample point, so the mesh reads the frame at exactly the

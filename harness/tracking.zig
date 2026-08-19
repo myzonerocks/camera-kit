@@ -1,7 +1,7 @@
 //! Tracking harness: opens the pinned face model bundle, stands up the
 //! inference engines, and runs the face pipeline over synthetic frames.
 //! This is where the pipeline's plumbing proves itself on a host before
-//! any shell touches it: tensor shapes are interrogated from the models
+//! any SDK touches it: tensor shapes are interrogated from the models
 //! rather than assumed, and a synthetic face-less frame must produce no
 //! detections while the smoke render of a high-contrast blob exercises
 //! every pre and post processing stage without crashing or leaking.
@@ -383,7 +383,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     }
 
     // The same portrait through the public surface: session, worker
-    // thread, NV12 planes, polled result. This is the path a shell runs.
+    // thread, NV12 planes, polled result. This is the path an SDK runs.
     {
         const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
         defer abi.destroyEngine(engine);
@@ -485,7 +485,7 @@ pub fn main(init_args: std.process.Init) !u8 {
 
         // Segmentation, through the real worker adapter rather than a
         // bare engine call: the same latest-wins NV12 mailbox and worker
-        // thread a shell would drive, proving the mutex-guarded mask
+        // thread an SDK would drive, proving the mutex-guarded mask
         // buffer end to end (not graph.ResultSlot's seqlock - that copies
         // its payload one atomic word at a time, fine for face.Result's
         // few kilobytes but tens of thousands of individual atomic ops
@@ -585,7 +585,7 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (abi_mean <= 0.5) return 1;
 
         // The real beauty-baseline reference lens (lenses/reference/),
-        // read from disk exactly as a shell would ship it - not a
+        // read from disk exactly as an SDK would ship it - not a
         // hand-rolled copy that could drift from what the validator
         // actually checked. Its trigger is keyed to face.present,
         // sourced from this same session's real tracked result, and

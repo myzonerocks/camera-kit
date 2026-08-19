@@ -1,7 +1,7 @@
 /*
  * Gosslens C ABI.
  *
- * This header is the one boundary between the core and every shell. It is
+ * This header is the one boundary between the core and every SDK. It is
  * hand-written, versioned, and frozen per minor release: within a major
  * version symbols and struct layouts are only ever appended, never changed
  * or reordered. The abi gate diffs this surface on every change.
@@ -17,8 +17,8 @@
  * Threading:
  *   - An engine and its sessions are confined to the thread that created
  *     them, called the graph thread, unless a function is marked any-thread.
- *   - goss_abi_version is any-thread and must be the first call a shell makes;
- *     a major mismatch means the shell must refuse to run.
+ *   - goss_abi_version is any-thread and must be the first call an SDK makes;
+ *     a major mismatch means the SDK must refuse to run.
  */
 
 #ifndef GOSSLENS_H
@@ -69,7 +69,7 @@ typedef enum goss_degrade_level {
     GOSS_DEGRADE_PASSTHROUGH = 4,
 } goss_degrade_level;
 
-/* Platform thermal pressure, fed by the shell from the OS thermal API. */
+/* Platform thermal pressure, fed by the SDK from the OS thermal API. */
 typedef enum goss_thermal {
     GOSS_THERMAL_NOMINAL = 0,
     GOSS_THERMAL_FAIR = 1,
@@ -104,7 +104,7 @@ typedef enum goss_color_range {
 #define GOSS_FRAME_ROTATION_MASK 0x300u
 
 /* Describes one camera frame. The pixel data itself stays in the platform
- * buffer the shell hands over; the core never copies it on the frame path.
+ * buffer the SDK hands over; the core never copies it on the frame path.
  * Layout: 32 bytes, static-asserted below. */
 typedef struct goss_frame_desc {
     uint32_t width;
@@ -116,7 +116,7 @@ typedef struct goss_frame_desc {
     int64_t timestamp_us;    /* capture time, monotonic microseconds */
 } goss_frame_desc;
 
-/* The render surface a shell hands the engine: an NSWindow, CAMetalLayer,
+/* The render surface an SDK hands the engine: an NSWindow, CAMetalLayer,
  * ANativeWindow, or canvas handle per platform. Layout: 16 bytes on 64-bit
  * targets, 12 on wasm32. */
 typedef struct goss_renderer_desc {
@@ -128,7 +128,7 @@ typedef struct goss_renderer_desc {
 /* Zero-copy plane handles for one frame: platform texture objects
  * (MTLTexture, AHardwareBuffer-backed images, WebGL textures) as opaque
  * pointer-sized values. The platform object must stay valid until the next
- * submitted frame has rendered; the shell guarantees that by holding the
+ * submitted frame has rendered; the SDK guarantees that by holding the
  * buffer. Layout: 32 bytes. */
 typedef struct goss_frame_planes {
     uint32_t plane_count;
@@ -244,7 +244,7 @@ goss_status goss_session_submit_frame(goss_session *session, const goss_frame_de
 goss_status goss_color_yuv_to_rgb(uint32_t color_standard, uint32_t color_range, float *out_matrix);
 
 /* Graph thread. The stated CPU path: copies NV12 planes into pooled
- * textures for shells whose zero-copy import is not wired yet. The copy is
+ * textures for SDKs whose zero-copy import is not wired yet. The copy is
  * counted; prefer goss_session_submit_frame. */
 goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride);
 

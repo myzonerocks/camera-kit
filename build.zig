@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     const run_gate = b.addRunArtifact(gate_exe);
     run_gate.setCwd(b.path("."));
     if (b.args) |args| run_gate.addArgs(args);
-    const gate_step = b.step("gate", "Run the source-tracked gate (-- --staged | --tree | --commit-msg <file> | --log <range>)");
+    const gate_step = b.step("gate", "Run the source-tracked gate (-- --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-body <file>)");
     gate_step.dependOn(&run_gate.step);
 
     // The authoritative gate suite runs locally: hosted runners are not
@@ -528,7 +528,7 @@ pub fn build(b: *std.Build) void {
         // too, wired in below as tracking_module's "transpose_conv_bias"
         // import.
         // The export layer instance under real tracking: the harness drives
-        // the same goss_ surface a shell uses, worker thread and all.
+        // the same goss_ surface an SDK uses, worker thread and all.
         const tracking_real_module = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/tracking.zig"),
             .target = target,
@@ -641,7 +641,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // The web tracking module: the same pipeline compiled to a wasi module
-    // the ts shell runs inside a worker, synchronous per frame.
+    // the TS SDK runs inside a worker, synchronous per frame.
     const tracking_wasm_step = b.step("tracking-wasm", "Build the web tracking module (wasm32-wasi)");
     if (have_inference_stack and flatc_exe != null) {
         // The pinned build enables both simd sets globally for wasm, and the
@@ -795,7 +795,7 @@ pub fn build(b: *std.Build) void {
 
     // The render-capable half of the web core, real bgfx underneath
     // instead of render_stub.zig - separate from wasm_step above (which
-    // stays as-is until the TS shell actually points at this one)
+    // stays as-is until the TS SDK actually points at this one)
     // rather than replacing it outright. tracking/segmentation/beauty/
     // image/asset stay the same stubs wasm_step already uses - gpupixel
     // still isn't ported to web, and the effects this step renders
@@ -806,7 +806,7 @@ pub fn build(b: *std.Build) void {
     // instruments the whole per-frame render/submit path, not just
     // init, so a WebGL2-only user shouldn't pay for it. wasm-emscripten
     // below is unchanged; wasm-emscripten-webgpu is the new artifact
-    // the TS shell fetches only after confirming a
+    // the TS SDK fetches only after confirming a
     // real WebGPU adapter.
     const wasm_emscripten_step = b.step("wasm-emscripten", "Build the gosslens core for the web with a real bgfx renderer (needs emscripten vendors synced)");
     addWasmEmscriptenStep(b, wasm_emscripten_step, shaderc_exe, false);
@@ -1632,6 +1632,118 @@ fn buildRuyLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 // The flatbuffers runtime pieces the schema code links against; the
 // headers carry almost everything, this archive holds the rest.
 
+// ANGLE's own EGL/GLES2-over-Metal backend, the fix for real iOS
+// hardware where native EAGLContext creation fails outright. Scoped the
+// way Tint was: libANGLE core, only the Metal renderer backend, the
+// translator, libGLESv2, libEGL - compiled directly, no GN/Ninja.
+fn buildAngleLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const angle_dir = ".vendor/angle";
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.link_libcpp = true;
+    addAppleSdkPaths(b, module);
+
+    for ([_][]const u8{
+        angle_dir ++ "/include",
+        angle_dir ++ "/src",
+        angle_dir ++ "/src/common/base",
+        angle_dir ++ "/src/common/third_party/xxhash",
+        "adapters/angle",
+    }) |dir| {
+        module.addIncludePath(b.path(dir));
+    }
+
+    module.addCMacro("ANGLE_ENABLE_METAL", "1");
+    module.addCMacro("ANGLE_ENABLE_ESSL", "1");
+    module.addCMacro("ANGLE_ENABLE_GLSL", "1");
+    module.addCMacro("GL_GLES_PROTOTYPES", "0");
+    module.addCMacro("EGL_EGL_PROTOTYPES", "0");
+    module.addCMacro("LIBANGLE_IMPLEMENTATION", "1");
+    module.addCMacro("LIBGLESV2_IMPLEMENTATION", "1");
+    module.addCMacro("LIBEGL_IMPLEMENTATION", "1");
+    module.addCMacro("ANGLE_UTIL_EXPORT", "");
+    module.addCMacro("ANGLE_CAPTURE_ENABLED", "0");
+
+    const flags = [_][]const u8{ "-std=c++20", "-fno-sanitize=undefined", "-w", "-fno-objc-arc" };
+
+    // Backends and features this scope has no use for: other GPU APIs
+    // (D3D/Vulkan/WGPU/desktop-GL/null, plus the DXGI/SPIR-V/Vulkan
+    // common code they alone pull in), OpenCL, the experimental Rust
+    // translator, frame capture, and code for platforms that aren't us.
+    const angle_excludes = [_][]const u8{
+        "_unittest.cpp", "_test.cpp",    "_fuzzer.cpp",   "_unittest.mm", "_test.mm",
+        "/fuzz/",        "/tests/",
+        "/renderer/d3d/", "/renderer/vulkan/", "/renderer/wgpu/",
+        "/renderer/null/", "/renderer/gl/",    "/renderer/cl/",
+        "/dxgi_support_table", "/dxgi_format_map_autogen",
+        "/CL",           "/cl_",         "_cl_",         "validationCL", "PackedCLEnums",
+        "system_utils_linux", "system_utils_win",
+        "/common/gl/",   "/common/serializer/", "/common/vulkan/", "/common/spirv/",
+        "/compiler/translator/ir/", "/compiler/translator/hlsl/",
+        "/compiler/translator/spirv/", "/compiler/translator/wgsl/",
+        "/libANGLE/capture/",
+        // The real ASTC decoder needs an external codec this project
+        // doesn't vendor; AstcDecompressorNoOp.cpp is ANGLE's own
+        // fallback for exactly that, same as angle_has_astc_encoder=false.
+        "/image_util/AstcDecompressor.cpp",
+        // gpu_info_util's real per-platform source list (src/libGLESv2.gni)
+        // for iOS is exactly SystemInfo.cpp + SystemInfo_apple.mm +
+        // SystemInfo_ios.cpp - every other SystemInfo_*.{cpp,mm} here is
+        // a different platform's file.
+        "SystemInfo_android", "SystemInfo_fuchsia", "SystemInfo_libpci",
+        "SystemInfo_linux",   "SystemInfo_macos",   "SystemInfo_vulkan",
+        "SystemInfo_win",     "SystemInfo_x11",
+    };
+
+    var sources: std.ArrayList([]const u8) = .empty;
+    for ([_][]const u8{
+        angle_dir ++ "/src/common",
+        angle_dir ++ "/src/libANGLE",
+        angle_dir ++ "/src/libGLESv2",
+        angle_dir ++ "/src/libEGL",
+        angle_dir ++ "/src/compiler",
+        angle_dir ++ "/src/image_util",
+        angle_dir ++ "/src/gpu_info_util",
+    }) |dir| {
+        listFilesRecursive(b, dir, ".cpp", &angle_excludes, &sources);
+        listFilesRecursive(b, dir, ".mm", &angle_excludes, &sources);
+    }
+    std.mem.sort([]const u8, sources.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b_: []const u8) bool {
+            return std.mem.lessThan(u8, a, b_);
+        }
+    }.lessThan);
+
+    for (sources.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
+    module.addCSourceFile(.{ .file = b.path("adapters/angle/compression_utils_portable.cc"), .flags = &flags });
+    // xxhash.h alone only declares the API; this is its implementation.
+    // A plain C file, so it gets its own flags rather than -std=c++20.
+    const xxhash_flags = [_][]const u8{ "-fno-sanitize=undefined", "-w" };
+    module.addCSourceFile(.{
+        .file = b.path(angle_dir ++ "/src/common/third_party/xxhash/xxhash.c"),
+        .flags = &xxhash_flags,
+    });
+    // Core code calls into FrameCaptureShared unconditionally even with
+    // capture disabled - ANGLE's own GN build hits the same real gap
+    // and papers over it with exactly these two stub sources.
+    for ([_][]const u8{
+        angle_dir ++ "/src/libANGLE/capture/FrameCapture_mock.cpp",
+        angle_dir ++ "/src/libANGLE/capture/serialize_mock.cpp",
+    }) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
+
+    module.linkSystemLibrary("z", .{});
+    module.linkFramework("Metal", .{});
+    module.linkFramework("QuartzCore", .{});
+    module.linkFramework("Foundation", .{});
+    module.linkFramework("IOSurface", .{});
+
+    return b.addLibrary(.{ .name = "angle", .linkage = .static, .root_module = module });
+}
+
 // The beauty effects engine from its pinned tree: the core graph, the
 // filter set, raw data source and sinks, compiled per platform against the
 // system gl it targets. The bundled face detector never builds; landmarks
@@ -1651,6 +1763,9 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         ".vendor/gpupixel/third_party/stb/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
+    }
+    if (target.result.os.tag == .ios) {
+        module.addIncludePath(b.path(".vendor/angle/include"));
     }
     const os = target.result.os.tag;
     const platform_define: []const u8 = switch (os) {
@@ -1741,9 +1856,15 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     for (sources) |file| {
         if (apple) {
             const name = std.mem.trimEnd(u8, file[std.mem.lastIndexOfScalar(u8, file, '/').? + 1 ..], ".c");
+            const real_path = b.fmt(".vendor/gpupixel/src/{s}", .{file});
+            // The wrapper's own text never changes between builds, so a
+            // vendor patch editing real_path's content alone leaves
+            // zig's cache none the wiser. Forces the wrapper to change.
+            const real_content = b.build_root.handle.readFileAlloc(b.graph.io, real_path, b.allocator, .limited(1 << 20)) catch @panic("gpupixel source unreadable");
+            const fingerprint = std.hash.Wyhash.hash(0, real_content);
             const wrapper = wrappers.add(
                 b.fmt("{s}.mm", .{name}),
-                b.fmt("#include \"{s}\"\n", .{b.pathFromRoot(b.fmt(".vendor/gpupixel/src/{s}", .{file}))}),
+                b.fmt("// fingerprint: {x}\n#include \"{s}\"\n", .{ fingerprint, b.pathFromRoot(real_path) }),
             );
             module.addCSourceFile(.{ .file = wrapper, .flags = flags.items });
         } else {
@@ -1762,7 +1883,9 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         module.addCSourceFile(.{ .file = b.path("adapters/beauty/interop_apple.mm"), .flags = flags.items });
         module.linkFramework("CoreVideo", .{});
         if (os == .macos) module.linkFramework("OpenGL", .{});
-        if (os == .ios) module.linkFramework("OpenGLES", .{});
+        // Real OpenGL ES is gone on current iOS hardware; ANGLE's
+        // EGL/GLES-over-Metal backend stands in (see buildAngleLib).
+        if (os == .ios) module.linkLibrary(buildAngleLib(b, target, optimize));
     } else {
         module.addCSourceFile(.{ .file = b.path("adapters/beauty/beauty_shim.cc"), .flags = flags.items });
         if (target.result.abi.isAndroid()) {
@@ -2396,6 +2519,7 @@ var apple_sdk: ?[]const u8 = null;
 fn addAppleSdkPaths(b: *std.Build, module: *std.Build.Module) void {
     const sdk = apple_sdk orelse b.sysroot orelse return;
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "include" }) });
+    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "usr", "lib" }) });
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "Frameworks" }) });
     // Newer sdks split pieces of the ui frameworks into sub frameworks.
     module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk, "System", "Library", "SubFrameworks" }) });
@@ -2522,7 +2646,7 @@ fn addIosStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*
 /// The simulator variant of addIosStep, for exactly the same libraries
 /// built against Zig's aarch64-ios-simulator target instead of device -
 /// what a conformance run needs, since it proves determinism through a
-/// real Swift shell on a real (if not physical) window without the
+/// real Swift SDK on a real (if not physical) window without the
 /// Apple-ID/device-install gate a device run needs. Kept as one shared
 /// implementation rather than a duplicate function: every module/vendor
 /// build call below would otherwise drift in lockstep by hand, the same
@@ -2743,6 +2867,13 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             inference_libs.append(b.allocator, lib) catch @panic("oom");
         }
         inference_libs.appendSlice(b.allocator, family_libs.items) catch @panic("oom");
+        if (config.abi == .none) {
+            // Device only for now - simulator needs its own proof later.
+            // gpupixel links this lib internally already; installing it
+            // separately is what makes zig-out/ios/libangle.a exist for
+            // Xcode's own -langle (zig's cache dedupes the real compile).
+            inference_libs.append(b.allocator, buildAngleLib(b, ios_target, optimize)) catch @panic("oom");
+        }
     } else {
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
         abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
@@ -3183,7 +3314,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // emdawnwebgpu is this pinned Emscripten's WebGPU port
         // (-sUSE_WEBGPU=1 is gone); ASYNCIFY lets bgfx_init block on
         // Dawn's async adapter/device request. No WebGL2 flags - this
-        // artifact only ships after the TS shell confirms an adapter.
+        // artifact only ships after the TS SDK confirms an adapter.
         link.addArgs(&.{ "--use-port=emdawnwebgpu", "-sASYNCIFY=1" });
     } else {
         link.addArgs(&.{ "-sUSE_WEBGL2=1", "-sMIN_WEBGL_VERSION=2", "-sMAX_WEBGL_VERSION=2", "-sFULL_ES3=1" });
@@ -3192,7 +3323,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         "-sALLOW_MEMORY_GROWTH=1",
         // 256MB up front. 64MB (comfortably past what session/
         // engine creation and a frame or two of textures need)
-        // was enough until the ts shell started submitting real
+        // was enough until the TS SDK started submitting real
         // RGBA frames through goss_session_submit_frame_rgba_copy
         // - a single still test photo at 2400x3000 is 28.8MB by
         // itself, on top of live 1280x720 camera frames, LUT/
@@ -3204,8 +3335,8 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // is close enough to the old budget to be worth the
         // headroom.
         "-sINITIAL_MEMORY=268435456",
-        // Every goss_* entry point is a real call site the TS
-        // shell reaches dynamically, so EXPORT_ALL keeps them all
+        // Every goss_* entry point is a real call site the TS SDK
+        // reaches dynamically, so EXPORT_ALL keeps them all
         // reachable rather than hand-listing EXPORTED_FUNCTIONS.
         // LINKABLE is also required, or every goss_* export comes
         // back undefined - deprecated upstream but still needed as
@@ -3218,7 +3349,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
         // A real ES module (import GosslensWebModule from
         // "./gosslens_web.js") rather than a plain-global
         // factory function a <script> tag would have to expose -
-        // the ts shell's whole build (bun, ESM throughout)
+        // the TS SDK's whole build (bun, ESM throughout)
         // already assumes every dependency is import-able.
         "-sEXPORT_ES6=1",
         "-sUSE_ES6_IMPORT_META=1",
@@ -3233,13 +3364,13 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     });
     step.dependOn(&install.step);
 
-    // shells/ts/demo/ is a real source-tree directory, not under
+    // sdk/ts/demo/ is a real source-tree directory, not under
     // zig-out - addInstallDirectory can't reach it (InstallDir is
     // always rooted at the install prefix), so this step's own build
     // output is the demo's actual input, keeping it from silently
     // testing a stale binary a manual `cp` forgot to re-run.
     const wasm_out = js_out.dirname().path(b, "gosslens_web.wasm");
-    const demo_subdir = if (webgpu) "shells/ts/demo/webgpu/" else "shells/ts/demo/";
+    const demo_subdir = if (webgpu) "sdk/ts/demo/webgpu/" else "sdk/ts/demo/";
     const demo_copy = b.addUpdateSourceFiles();
     demo_copy.addCopyFileToSource(js_out, b.fmt("{s}gosslens_web.js", .{demo_subdir}));
     demo_copy.addCopyFileToSource(wasm_out, b.fmt("{s}gosslens_web.wasm", .{demo_subdir}));
@@ -3302,7 +3433,7 @@ fn addWasmWebgpuSmokeStep(b: *std.Build, step: *std.Build.Step) void {
     step.dependOn(&install.step);
 }
 
-// The real render.zig - the one binding over bgfx every native shell
+// The real render.zig - the one binding over bgfx every native SDK
 // already runs, not a rewrite - compiled as a wasm32-emscripten object
 // and linked against the same real bgfx/bx/bimg/astc-encoder objects
 // wasm-bgfx-smoke proves, plus a small Zig driver exporting one probe

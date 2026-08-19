@@ -113,7 +113,7 @@ const header_text = build_options.gosslens_header;
 // The manifest above is hand-maintained next to the frozen header on
 // purpose (a symbol only in one of the two is a build break, not a silent
 // drift); this test is the enforcement so an export never goes undeclared
-// in the header a shell actually compiles against.
+// in the header an SDK actually compiles against.
 fn functionName(signature: []const u8) []const u8 {
     const paren = std.mem.indexOfScalar(u8, signature, '(') orelse unreachable;
     var start = paren;

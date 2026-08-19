@@ -1,7 +1,7 @@
 //! Render backend stub for targets without a compiled render stack, such as
 //! the CI host running unit tests. Mirrors the real module's surface;
 //! every entry point reports the renderer as unavailable. The engine treats
-//! that as a configuration the shell must handle, never a crash.
+//! that as a configuration the SDK must handle, never a crash.
 
 const std = @import("std");
 const math = @import("math");
@@ -69,22 +69,44 @@ pub const Renderer = struct {
         _ = height;
     }
 
-    pub fn wrapExternalTexture(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize, render_target: bool) TextureHandle {
+    pub fn wrapExternalRenderTarget(r: *Renderer, pt: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) ?TextureHandle {
         _ = r;
+        _ = pt;
         _ = width;
         _ = height;
         _ = format;
         _ = native_ptr;
-        _ = render_target;
-        return .{};
+        return null;
     }
 
-    pub fn wrapExternalRenderTarget(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize) ?TextureHandle {
+    pub const PersistentTexture = struct {
+        pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) TextureHandle {
+            _ = self;
+            _ = width;
+            _ = height;
+            _ = format;
+            _ = native_ptr;
+            return .{};
+        }
+
+        pub fn deinit(self: *PersistentTexture) void {
+            _ = self;
+        }
+    };
+
+    pub fn createAndroidBeautyRenderTarget(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?TextureHandle {
         _ = r;
         _ = width;
         _ = height;
-        _ = format;
-        _ = native_ptr;
+        _ = hardware_buffer;
+        return null;
+    }
+
+    pub fn wrapAndroidBeautyOutput(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?TextureHandle {
+        _ = r;
+        _ = width;
+        _ = height;
+        _ = hardware_buffer;
         return null;
     }
 
@@ -96,6 +118,11 @@ pub const Renderer = struct {
     pub fn nativeDevice(r: *Renderer) ?*anyopaque {
         _ = r;
         return null;
+    }
+
+    pub fn isAndroidVulkan(r: *const Renderer) bool {
+        _ = r;
+        return false;
     }
 
     pub fn createStaticTexture(width: u16, height: u16, rgba: []const u8) TextureHandle {

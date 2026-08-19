@@ -1,6 +1,6 @@
 //! Segmentation on platforms without the compiled inference stack: every
 //! entry refuses. The export layer reports the refusal as its own status
-//! so a shell can tell "not built here" from "no result yet".
+//! so an SDK can tell "not built here" from "no result yet".
 
 const std = @import("std");
 const math = @import("math");

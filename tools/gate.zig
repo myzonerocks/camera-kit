@@ -5,6 +5,8 @@
 //!   --tree              CI/local: all tracked files through every check
 //!   --commit-msg <file> commit-msg hook: scan the message being written
 //!   --log <range>       CI: scan commit messages in a rev range
+//!   --diff <range>      CI: scan added lines in a rev range for comment hygiene
+//!   --pr-body <file>    CI: scan a PR body for provenance and shape
 //!
 //! Direction one, outbound: no layer of ignore (repo, .git/info/exclude, or a
 //! contributor's global file) may hide source this repository owns. Every
@@ -91,7 +93,25 @@ const verbose_comment_markers = [_][]const u8{
     "real question",  "real, proven",    "real and proven",
     "owner-directed", "owner-ordered",   "DECISIONS.md",
     "SPEC.md",        "ENGINEERING.md",  "COMPLETION-BAR.md",
-    "No-Gated-On-You", "DEFERRAL-LOOPHOLES",
+    "No-Gated-On-You", "DEFERRAL-LOOPHOLES", "API-CONFORMANCE.md",
+};
+
+// A comment explains the one thing a reader can't already see; it is
+// not an essay. A run of consecutive added comment lines past this is
+// the project's own recurring mistake (a narrated investigation where
+// a sentence would do), not a hypothetical.
+const max_comment_block_lines: usize = 4;
+
+// A PR body is a short paragraph, not a report: what changed and why,
+// nothing about how the change was proven out. Modeled on how ghostty's
+// own PRs read - three sentences, no headers, no checklist.
+const max_pr_body_lines: usize = 12;
+const max_pr_body_bytes: usize = 900;
+
+const banned_pr_body_headers = [_][]const u8{
+    "summary",     "test plan",  "testing",   "changes",
+    "overview",    "background", "motivation", "what changed",
+    "how tested",  "verification",
 };
 
 const Gate = struct {
@@ -231,19 +251,71 @@ const Gate = struct {
         const out = try g.git(argv.items, &.{0});
 
         var current_path: []const u8 = "";
+        var run_len: usize = 0;
+        var run_first: []const u8 = "";
+
         var lines = std.mem.splitScalar(u8, out, '\n');
         while (lines.next()) |line| {
             if (std.mem.startsWith(u8, line, "+++ ")) {
+                try g.flagOverlongCommentBlock(current_path, run_len, run_first);
+                run_len = 0;
                 const rest = line["+++ ".len..];
                 current_path = if (std.mem.startsWith(u8, rest, "b/")) rest["b/".len..] else rest;
                 continue;
             }
-            if (!std.mem.startsWith(u8, line, "+") or std.mem.startsWith(u8, line, "+++")) continue;
-            const content = line[1..];
-            if (!isCommentLine(content)) continue;
+            const is_added = std.mem.startsWith(u8, line, "+") and !std.mem.startsWith(u8, line, "+++") and !isGeneratedWrapperScript(current_path) and !isProseFile(current_path);
+            const content = if (is_added) line[1..] else "";
+            const is_added_comment = is_added and isCommentLine(content);
+
+            if (is_added_comment) {
+                if (run_len == 0) run_first = std.mem.trim(u8, content, " \t");
+                run_len += 1;
+            } else {
+                try g.flagOverlongCommentBlock(current_path, run_len, run_first);
+                run_len = 0;
+            }
+
+            if (!is_added_comment) continue;
             if (findVerboseMarker(content)) |marker| {
                 try g.flag("comment-hygiene: '{s}' has a verbose comment (matched '{s}'): {s}", .{ current_path, marker, std.mem.trim(u8, content, " \t") });
             }
+        }
+        try g.flagOverlongCommentBlock(current_path, run_len, run_first);
+    }
+
+    fn flagOverlongCommentBlock(g: *Gate, path: []const u8, run_len: usize, first_line: []const u8) !void {
+        if (run_len <= max_comment_block_lines) return;
+        try g.flag("comment-hygiene: '{s}' adds a {d}-line comment block starting '{s}'; say it in {d} lines or fewer", .{ path, run_len, first_line, max_comment_block_lines });
+    }
+
+    // A short paragraph: what changed and why, nothing about how it was
+    // tested. No markdown headers, no checklist syntax, no banned
+    // section words as a leading line - those are the report-shaped
+    // tells this scanner exists to catch, not a style nitpick.
+    fn checkProseShape(g: *Gate, text: []const u8, context: []const u8) !void {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
+        if (trimmed.len > max_pr_body_bytes) {
+            try g.flag("body-shape: {s} is {d} bytes; keep it to a short paragraph, under {d}", .{ context, trimmed.len, max_pr_body_bytes });
+        }
+
+        var line_count: usize = 0;
+        var lines = std.mem.splitScalar(u8, trimmed, '\n');
+        while (lines.next()) |line| {
+            line_count += 1;
+            const stripped = std.mem.trim(u8, line, " \t\r");
+            if (std.mem.startsWith(u8, stripped, "#")) {
+                try g.flag("body-shape: {s} uses a markdown header ('{s}'); write prose, not a report", .{ context, stripped });
+            }
+            if (isChecklistLine(stripped)) {
+                try g.flag("body-shape: {s} has a checklist line ('{s}'); a test plan belongs in the PR run, not the body", .{ context, stripped });
+            }
+            const header_word = headerLikeLine(stripped);
+            if (header_word) |w| {
+                try g.flag("body-shape: {s} opens a section with '{s}'; write one paragraph instead", .{ context, w });
+            }
+        }
+        if (line_count > max_pr_body_lines) {
+            try g.flag("body-shape: {s} is {d} lines; keep it to {d} or fewer, like a short paragraph", .{ context, line_count, max_pr_body_lines });
         }
     }
 
@@ -277,7 +349,7 @@ pub fn main(init: std.process.Init) !u8 {
     var args = std.process.Args.Iterator.init(init.minimal.args);
     _ = args.next(); // program path
     const mode = args.next() orelse {
-        std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range> | --diff <range>\n", .{});
+        std.debug.print("gate: usage: gate --staged | --tree | --commit-msg <file> | --log <range> | --diff <range> | --pr-body <file>\n", .{});
         return 2;
     };
 
@@ -311,6 +383,14 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         };
         try g.checkCommentHygiene(&.{range});
+    } else if (std.mem.eql(u8, mode, "--pr-body")) {
+        const file = args.next() orelse {
+            std.debug.print("gate: --pr-body needs a file argument\n", .{});
+            return 2;
+        };
+        const body = try Io.Dir.cwd().readFileAlloc(g.io, file, arena, .limited(max_file_scan_bytes));
+        try g.checkMessage(body, "PR body");
+        try g.checkProseShape(body, "PR body");
     } else {
         std.debug.print("gate: unknown mode '{s}'\n", .{mode});
         return 2;
@@ -367,7 +447,13 @@ fn forbiddenExtension(path: []const u8) ?[]const u8 {
     }
     // The web demo's own beauty LUT textures - same reasoning, real
     // bundle content copied in once rather than fetched or built.
-    if (std.mem.startsWith(u8, path, "shells/ts/demo/res/") and std.mem.endsWith(u8, path, ".png")) {
+    if (std.mem.startsWith(u8, path, "sdk/ts/demo/res/") and std.mem.endsWith(u8, path, ".png")) {
+        return null;
+    }
+    // Gradle's own bootstrap stub, not a build output - JitPack (and
+    // anyone else) clones this repo and runs ./gradlew directly, which
+    // does not exist without the jar next to it.
+    if (std.mem.eql(u8, path, "sdk/kotlin/gradle/wrapper/gradle-wrapper.jar")) {
         return null;
     }
     for (forbidden_extensions) |ext| {
@@ -388,12 +474,40 @@ fn findBannedToken(text: []const u8) ?[]const u8 {
     return null;
 }
 
+// Gradle's own wrapper script - `gradle wrapper` generates it verbatim
+// and it is never hand-edited, the same reasoning a vendored tree gets.
+fn isGeneratedWrapperScript(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, "/gradlew") or std.mem.eql(u8, path, "gradlew");
+}
+
+// Markdown is prose, not source - its `#` headings and `*` bullets look
+// like comment syntax to this scanner but are the document itself.
+fn isProseFile(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".md");
+}
+
+// A `#`-led line that is real C/ObjC code (#define, #include, #if...),
+// not a shell/Python/YAML comment - the two share a leading marker.
+fn isPreprocessorDirective(trimmed: []const u8) bool {
+    const rest = std.mem.trimStart(u8, trimmed[1..], " \t");
+    // Deliberately excludes if/ifdef/ifndef/else/elif/endif - real
+    // directives, but also how plenty of plain-English comments open.
+    const directives = [_][]const u8{ "define", "include", "pragma", "import" };
+    for (directives) |word| {
+        if (std.mem.startsWith(u8, rest, word)) {
+            const after = rest[word.len..];
+            if (after.len == 0 or !std.ascii.isAlphanumeric(after[0])) return true;
+        }
+    }
+    return false;
+}
+
 fn isCommentLine(line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t");
     return std.mem.startsWith(u8, trimmed, "//") or
         std.mem.startsWith(u8, trimmed, "///") or
         std.mem.startsWith(u8, trimmed, "*") or
-        std.mem.startsWith(u8, trimmed, "#");
+        (std.mem.startsWith(u8, trimmed, "#") and !isPreprocessorDirective(trimmed));
 }
 
 fn hasIsoDate(line: []const u8) bool {
@@ -410,6 +524,23 @@ fn hasIsoDate(line: []const u8) bool {
         }
     }
     return false;
+}
+
+// A line that is just a banned word, optionally with a trailing colon
+// or markdown bold - "Summary", "**Test plan**", "Testing:" - read as a
+// report's section header, not a sentence that happens to contain the
+// word.
+fn headerLikeLine(line: []const u8) ?[]const u8 {
+    var body = std.mem.trim(u8, line, "*# \t");
+    if (std.mem.endsWith(u8, body, ":")) body = body[0 .. body.len - 1];
+    for (banned_pr_body_headers) |word| {
+        if (std.ascii.eqlIgnoreCase(body, word)) return word;
+    }
+    return null;
+}
+
+fn isChecklistLine(line: []const u8) bool {
+    return std.mem.startsWith(u8, line, "- [ ]") or std.mem.startsWith(u8, line, "- [x]");
 }
 
 fn findVerboseMarker(line: []const u8) ?[]const u8 {
@@ -436,24 +567,28 @@ test "forbidden prefixes catch force-added trees" {
 }
 
 test "forbidden segments catch build detritus anywhere in the path" {
-    try std.testing.expectEqualStrings("node_modules", forbiddenSegment("shells/ts/node_modules/x/y.js").?);
-    try std.testing.expectEqualStrings(".build", forbiddenSegment("shells/swift/.build/debug/a").?);
-    try std.testing.expectEqualStrings(".xcframework", forbiddenSegment("shells/swift/Gosslens.xcframework/Info.plist").?);
+    try std.testing.expectEqualStrings("node_modules", forbiddenSegment("sdk/ts/node_modules/x/y.js").?);
+    try std.testing.expectEqualStrings(".build", forbiddenSegment("sdk/swift/.build/debug/a").?);
+    try std.testing.expectEqualStrings(".xcframework", forbiddenSegment("sdk/swift/Gosslens.xcframework/Info.plist").?);
     try std.testing.expect(forbiddenSegment("core/graph/scheduler.zig") == null);
 }
 
 test "forbidden extensions catch artifact classes" {
     try std.testing.expectEqualStrings(".task", forbiddenExtension("face_landmarker.task").?);
-    try std.testing.expectEqualStrings(".wasm", forbiddenExtension("shells/ts/core.wasm").?);
+    try std.testing.expectEqualStrings(".wasm", forbiddenExtension("sdk/ts/core.wasm").?);
     try std.testing.expectEqualStrings(".a", forbiddenExtension("libfoo.a").?);
     try std.testing.expectEqualStrings(".out", forbiddenExtension("a.out").?);
     try std.testing.expect(forbiddenExtension("core/math/mat4.zig") == null);
     try std.testing.expect(forbiddenExtension("include/gosslens.h") == null);
     // A png anywhere else is still a fetched/scratch artifact - only a
     // reference lens's own assets/ directory is real bundle content.
-    try std.testing.expectEqualStrings(".png", forbiddenExtension("shells/kotlin/demo/src/main/assets/res/mouth.png").?);
+    try std.testing.expectEqualStrings(".png", forbiddenExtension("sdk/kotlin/demo/src/main/assets/res/mouth.png").?);
     try std.testing.expect(forbiddenExtension("lenses/reference/background-swap/assets/beach.png") == null);
-    try std.testing.expect(forbiddenExtension("shells/ts/demo/res/lookup_gray.png") == null);
+    try std.testing.expect(forbiddenExtension("sdk/ts/demo/res/lookup_gray.png") == null);
+    // A jar anywhere else is still a build output - only the Gradle
+    // wrapper's own bootstrap stub is real, necessary bundle content.
+    try std.testing.expectEqualStrings(".jar", forbiddenExtension("some/other/lib.jar").?);
+    try std.testing.expect(forbiddenExtension("sdk/kotlin/gradle/wrapper/gradle-wrapper.jar") == null);
 }
 
 test "banned tokens match case-insensitively and only when present" {
@@ -480,9 +615,47 @@ test "comment lines are recognized across languages" {
     try std.testing.expect(!isCommentLine("    const x = 1;"));
 }
 
+test "preprocessor directives are not comments, even though they share a shell comment's # marker" {
+    try std.testing.expect(!isCommentLine("#define ANGLE_COMMIT_DATE \"2026-08-18\""));
+    try std.testing.expect(!isCommentLine("#include <zlib.h>"));
+    try std.testing.expect(!isCommentLine("#import <UIKit/UIKit.h>"));
+    try std.testing.expect(!isCommentLine("#pragma once"));
+    // if/ifdef/endif stay comment-classified on purpose - too many real
+    // English comments open the same way ("# if this ever fires...").
+    try std.testing.expect(isCommentLine("#if this ever fires, retry"));
+    try std.testing.expect(isCommentLine("  # a shell comment"));
+}
+
+test "generated wrapper scripts are recognized, hand-written scripts are not" {
+    try std.testing.expect(isGeneratedWrapperScript("sdk/kotlin/gradlew"));
+    try std.testing.expect(isGeneratedWrapperScript("gradlew"));
+    try std.testing.expect(!isGeneratedWrapperScript("sdk/kotlin/demo/prove-emulator.sh"));
+}
+
+test "markdown is prose, source is not" {
+    try std.testing.expect(isProseFile("NOTICE.md"));
+    try std.testing.expect(isProseFile("docs/API.md"));
+    try std.testing.expect(!isProseFile("core/abi/abi.zig"));
+    try std.testing.expect(!isProseFile("adapters/beauty/beauty_shim.cc"));
+}
+
 test "verbose comment markers are caught, plain ones are not" {
     try std.testing.expect(findVerboseMarker("// verified this is correct") != null);
     try std.testing.expect(findVerboseMarker("// see DECISIONS.md for context") != null);
     try std.testing.expect(findVerboseMarker("// found 2026-08-17 that this works") != null);
     try std.testing.expect(findVerboseMarker("// converts YUV to RGB via a fixed matrix") == null);
+}
+
+test "header-like lines catch report section markers, not prose that mentions them" {
+    try std.testing.expectEqualStrings("summary", headerLikeLine("Summary").?);
+    try std.testing.expectEqualStrings("test plan", headerLikeLine("## Test plan").?);
+    try std.testing.expectEqualStrings("testing", headerLikeLine("**Testing:**").?);
+    try std.testing.expect(headerLikeLine("this change needed real testing before landing") == null);
+    try std.testing.expect(headerLikeLine("adds a snapshot decoder option") == null);
+}
+
+test "checklist lines are recognized" {
+    try std.testing.expect(isChecklistLine("- [ ] zig build ci green"));
+    try std.testing.expect(isChecklistLine("- [x] real device run"));
+    try std.testing.expect(!isChecklistLine("- a plain bullet"));
 }

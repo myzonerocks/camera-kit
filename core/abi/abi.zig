@@ -32,10 +32,11 @@ const face106 = @import("face106");
 /// own dispatch here in place of applyBeautyCompositing's gpupixel
 /// calls - guarded on this rather than reachable from every target.
 const is_web = builtin.os.tag == .emscripten;
+const is_android = builtin.os.tag == .linux and builtin.abi.isAndroid();
 
 // A directory-based lens activation needs to read files (manifest.json,
 // compiled shader bytecode) from within an exported goss_ function, which
-// no shell hands an Io instance into - this library owns one blocking
+// no SDK hands an Io instance into - this library owns one blocking
 // implementation for that, single-threaded since it's only ever
 // occasional small reads at lens activation, never the frame path.
 // std.Io.Threaded assumes a POSIX-like host and cannot even be typed
@@ -192,6 +193,12 @@ pub const Session = struct {
     engine: *Engine,
     controller: graph.DegradeController,
     current: ?CurrentFrame = null,
+    /// Zero-copy camera ingress rebinds these every submit rather than
+    /// creating a fresh bgfx handle per frame - see
+    /// render.Renderer.PersistentTexture.rebind for why.
+    preview_bgra: render.Renderer.PersistentTexture = .{},
+    preview_y: render.Renderer.PersistentTexture = .{},
+    preview_uv: render.Renderer.PersistentTexture = .{},
     copied_frames: u64 = 0,
     /// Set for exactly one renderCompositeChain call by
     /// goss_engine_capture_frame, then cleared - redirects the chain's
@@ -226,6 +233,10 @@ pub const Session = struct {
     /// alone.
     beauty_input_target: ?render.Renderer.OffscreenTarget = null,
     beauty_input_native: ?*anyopaque = null,
+    beauty_input_persistent: render.Renderer.PersistentTexture = .{},
+    /// Apple's beauty output handle - rebind every frame like camera
+    /// ingress does, not cached-and-overridden-once like Android's below.
+    beauty_output_persistent: render.Renderer.PersistentTexture = .{},
     beauty_output_texture: ?render.TextureHandle = null,
     beauty_output_native: ?*anyopaque = null,
     /// beauty.face/beauty.reshape/beauty.lipstick/beauty.blusher's own
@@ -236,6 +247,11 @@ pub const Session = struct {
     /// tracked but not yet applied (its four LUT textures aren't loaded
     /// on web yet).
     web_beauty_amounts: [6]f32 = @splat(0),
+    /// Native mirror of the amounts goss_session_set_beauty has written
+    /// into the gpupixel chain (same EffectSlot order) - the chain is
+    /// opaque, so this is what lets beautyActive() see a direct set
+    /// with no beauty-node lens active. Unused on web.
+    beauty_amounts: [6]f32 = @splat(0),
     /// fs_blur_pass.sc's own two-pass scratch space (H then V) ahead of
     /// submitBeautyFace, plus beauty.reshape's own output target -
     /// sized and recreated the same lazy way ensureChainTargets already
@@ -394,14 +410,18 @@ fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
 }
 
 /// Whether the live preview needs the GPU beauty compositing bridge
-/// running this frame: a session can enable beauty independently of
-/// which lens is active, but compositing every frame through gpupixel
-/// for a lens that never spliced a beauty node can never produce a
-/// visible difference, so it stays off until both hold.
+/// running this frame: an active lens with beauty nodes, or any direct
+/// nonzero setBeauty amount - the same two sources webBeautyActive
+/// already honors, so a slider works with no lens active on native too.
 fn beautyActive(s: *const Session) bool {
     if (s.beauty_chain == null) return false;
-    const lens = s.active_lens orelse return false;
-    return lens.hasBeautyNodes();
+    if (s.active_lens) |lens| {
+        if (lens.hasBeautyNodes()) return true;
+    }
+    for (s.beauty_amounts) |amount| {
+        if (amount > 0.0) return true;
+    }
+    return false;
 }
 
 /// Runs the beauty chain over the frame the PREVIOUS call wrote into the
@@ -429,8 +449,14 @@ fn beautyActive(s: *const Session) bool {
 /// returning input_texture unchanged if any step fails - the SPEC's
 /// rule for a node whose capability is unavailable holding its default
 /// state, same as blend.pass's mask.
-fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, width: u16, height: u16, input_texture: render.TextureHandle) render.TextureHandle {
+fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, width: u16, height: u16, rotation: u32, mirror: bool, input_texture: render.TextureHandle) render.TextureHandle {
     const chain = s.beauty_chain.?;
+
+    // Android's GLES fallback has no route from the composited buffer
+    // back into bgfx (the Metal-view bridge is apple-only, the
+    // AHardwareBuffer import needs Vulkan) - running the chain there
+    // burns a full gpupixel pass per frame nothing can ever display.
+    if (is_android and !r.isAndroidVulkan()) return input_texture;
 
     const input_surface = s.beauty_input orelse blk: {
         const created = beauty.inputSurfaceCreate(s.engine.gpa) catch return input_texture;
@@ -443,14 +469,15 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
         break :blk created;
     };
 
-    // null on backends with no separate device handle to pass (GLES: a
-    // context is implicit and thread-bound, nothing to hand across this
-    // boundary) - inputSurfaceNativeTexture's own platform
-    // implementation decides whether it actually needs one non-null
-    // (Metal does; GLES ignores the argument entirely), so a null
-    // device here is not itself a reason to give up.
+    // null device on GLES: a context is implicit and thread-bound,
+    // nothing to hand across this boundary - Metal needs one, GLES
+    // ignores it.
+    const android_vulkan = r.isAndroidVulkan();
     const device = r.nativeDevice();
-    const native_texture = beauty.inputSurfaceNativeTexture(input_surface, device, width, height) orelse return input_texture;
+    const native_texture = if (android_vulkan)
+        beauty.inputSurfaceHardwareBuffer(input_surface, width, height) orelse return input_texture
+    else
+        beauty.inputSurfaceNativeTexture(input_surface, device, width, height) orelse return input_texture;
 
     const target_has_a_prior_write = s.beauty_input_target != null and s.beauty_input_native == native_texture;
     if (!target_has_a_prior_write) {
@@ -462,9 +489,15 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
         // to actually process yet this frame. Leaving beauty_input_
         // native unset here means the next call retries the whole wrap
         // rather than caching a handle that never resolved.
-        const wrapped = r.wrapExternalRenderTarget(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(native_texture)) orelse return input_texture;
+        const wrapped = if (android_vulkan)
+            r.createAndroidBeautyRenderTarget(width, height, native_texture) orelse return input_texture
+        else
+            r.wrapExternalRenderTarget(&s.beauty_input_persistent, width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(native_texture)) orelse return input_texture;
         s.beauty_input_target = render.Renderer.createExternalTarget(wrapped) catch {
-            r.destroyTexture(wrapped);
+            // android's handle is this call's own to destroy; the
+            // persistent one beauty_input_persistent owns survives to
+            // retry next frame instead of dangling under it.
+            if (android_vulkan) r.destroyTexture(wrapped);
             return input_texture;
         };
         s.beauty_input_native = native_texture;
@@ -477,14 +510,23 @@ fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, w
         if (s.face_tracking) |worker| {
             if (tracking.readResult(worker, &result)) tracked = &result;
         }
-        if (beauty.processTexture(input_surface, chain, width, height, tracked)) {
-            if (beauty.composite(interop, chain, width, height)) |composited| {
-                if (s.beauty_output_texture == null or s.beauty_output_native != composited) {
-                    if (s.beauty_output_texture) |old| r.destroyTexture(old);
-                    s.beauty_output_texture = r.wrapExternalTexture(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(composited), false);
-                    s.beauty_output_native = composited;
+        const processed = beauty.processTexture(input_surface, chain, width, height, rotation, mirror, tracked);
+        if (processed) {
+            const composited = beauty.composite(interop, chain, width, height);
+            if (composited) |c| {
+                if (android_vulkan) {
+                    if (s.beauty_output_texture == null or s.beauty_output_native != c) {
+                        if (s.beauty_output_texture) |old| r.destroyTexture(old);
+                        s.beauty_output_texture = r.wrapAndroidBeautyOutput(width, height, c);
+                        s.beauty_output_native = c;
+                    }
+                    if (s.beauty_output_texture) |output| beautified = output;
+                } else if (beauty.interopNativeTexture(interop, device)) |metal_texture| {
+                    // metal_texture's override needs a frame gap to land,
+                    // same as camera ingress - rebind every frame rather
+                    // than caching a still-pending one.
+                    beautified = s.beauty_output_persistent.rebind(width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, @intFromPtr(metal_texture));
                 }
-                beautified = s.beauty_output_texture.?;
             }
         }
     }
@@ -746,7 +788,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         input_texture = if (is_web)
             try applyWebBeautyChain(r, s, &next_view_id, width, height, input_texture)
         else
-            applyBeautyCompositing(r, s, &next_view_id, width, height, input_texture);
+            applyBeautyCompositing(r, s, &next_view_id, width, height, rotation, mirror, input_texture);
     }
 
     var drawn: usize = 0;
@@ -911,6 +953,11 @@ pub fn destroySession(session: *Session) void {
     session.segmentation_worker = null;
     destroySegmentationTexture(session);
     releaseCurrentFrame(session);
+    if (session.engine.renderer != null) {
+        session.preview_bgra.deinit();
+        session.preview_y.deinit();
+        session.preview_uv.deinit();
+    }
     session.engine.gpa.destroy(session);
 }
 
@@ -921,6 +968,8 @@ fn destroyBeautyCompositing(session: *Session) void {
     if (session.beauty_input_target) |target| render.Renderer.destroyOffscreenTarget(target);
     session.beauty_input_target = null;
     session.beauty_input_native = null;
+    session.beauty_input_persistent.deinit();
+    session.beauty_output_persistent.deinit();
     if (session.engine.renderer) |*r| {
         if (session.beauty_output_texture) |tex| r.destroyTexture(tex);
     }
@@ -1040,8 +1089,8 @@ const screenshot_path_max = 480;
 /// Requests a screenshot of the next presented frame, written as
 /// path ++ ".tga" through the renderer's own default callback (the same
 /// mechanism harness/conformance.zig already drives internally, exposed
-/// here so a real shell target - the ios simulator conformance run this
-/// exists for - can trigger it too). Debug/test tooling only; no shell
+/// here so a real SDK target - the ios simulator conformance run this
+/// exists for - can trigger it too). Debug/test tooling only; no SDK
 /// ships this behind a user-facing control.
 pub export fn goss_engine_request_screenshot(engine: ?*Engine, path: ?[*]const u8, path_len: usize) Status {
     const e = engine orelse return .invalid_argument;
@@ -1167,27 +1216,27 @@ pub export fn goss_session_submit_frame(session: ?*Session, desc: ?*const FrameD
     const s = session orelse return .invalid_argument;
     const d = desc orelse return .invalid_argument;
     const p = planes orelse return .invalid_argument;
-    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    if (s.engine.renderer == null) return .renderer_unavailable;
 
     releaseCurrentFrame(s);
     switch (d.pixel_format) {
         pixel_format_bgra8, pixel_format_rgba8 => {
             if (p.plane_count != 1) return .invalid_argument;
             const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
-            const texture = r.wrapExternalTexture(@intCast(d.width), @intCast(d.height), format, @intCast(p.planes[0]), false);
-            s.current = .{ .desc = d.*, .preview = .{ .bgra = .{ .texture = texture } } };
+            const texture = s.preview_bgra.rebind(@intCast(d.width), @intCast(d.height), format, @intCast(p.planes[0]));
+            s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .bgra = .{ .texture = texture } } };
         },
         pixel_format_nv12 => {
             if (p.plane_count != 2) return .invalid_argument;
-            const y = r.wrapExternalTexture(@intCast(d.width), @intCast(d.height), render.c.BGFX_TEXTURE_FORMAT_R8, @intCast(p.planes[0]), false);
-            const uv = r.wrapExternalTexture(@intCast(d.width / 2), @intCast(d.height / 2), render.c.BGFX_TEXTURE_FORMAT_RG8, @intCast(p.planes[1]), false);
+            const y = s.preview_y.rebind(@intCast(d.width), @intCast(d.height), render.c.BGFX_TEXTURE_FORMAT_R8, @intCast(p.planes[0]));
+            const uv = s.preview_uv.rebind(@intCast(d.width / 2), @intCast(d.height / 2), render.c.BGFX_TEXTURE_FORMAT_RG8, @intCast(p.planes[1]));
             const standard: math.color.Standard = switch (d.color_standard) {
                 0 => .bt601,
                 2 => .bt2020,
                 else => .bt709,
             };
             const range: math.color.Range = if (d.color_range == 1) .full else .video;
-            s.current = .{ .desc = d.*, .preview = .{ .nv12 = .{
+            s.current = .{ .desc = d.*, .owns_textures = false, .preview = .{ .nv12 = .{
                 .y = y,
                 .uv = uv,
                 .conversion = math.color.yuvToRgb(standard, range),
@@ -1199,8 +1248,8 @@ pub export fn goss_session_submit_frame(session: ?*Session, desc: ?*const FrameD
 }
 
 /// Writes the YCbCr to RGB conversion for a standard and range as one
-/// column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).xyz. Shells
-/// that own their GPU pipeline, the web shell today, get their color math
+/// column-major homogeneous matrix: rgb = (m * vec4(yuv, 1)).xyz. SDKs
+/// that own their GPU pipeline, the web SDK today, get their color math
 /// from the core instead of hardcoding it.
 pub export fn goss_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_matrix: ?*[16]f32) Status {
     const out = out_matrix orelse return .invalid_argument;
@@ -1226,7 +1275,7 @@ pub export fn goss_color_yuv_to_rgb(color_standard: u32, color_range: u32, out_m
     return .ok;
 }
 
-/// Copies NV12 planes into pooled textures. The stated CPU path: a shell
+/// Copies NV12 planes into pooled textures. The stated CPU path: an SDK
 /// uses it only where the zero-copy import is not wired yet, and the copy
 /// is counted so the budget report shows it.
 pub export fn goss_session_submit_frame_copy(session: ?*Session, desc: ?*const FrameDesc, y: ?[*]const u8, y_stride: u32, uv: ?[*]const u8, uv_stride: u32) Status {
@@ -1420,6 +1469,7 @@ pub export fn goss_session_disable_beauty(session: ?*Session) void {
     const s = session orelse return;
     if (s.beauty_chain) |chain| beauty.destroy(s.engine.gpa, chain);
     s.beauty_chain = null;
+    s.beauty_amounts = @splat(0);
     destroyBeautyCompositing(s);
     if (is_web) {
         s.web_beauty_amounts = @splat(0);
@@ -1442,6 +1492,7 @@ pub export fn goss_session_set_beauty(session: ?*Session, effect: i32, value: f3
     }
     const chain = s.beauty_chain orelse return .again;
     beauty.set(chain, @enumFromInt(effect), value);
+    s.beauty_amounts[@intCast(effect)] = std.math.clamp(value, 0.0, 1.0);
     return .ok;
 }
 

@@ -18,4 +18,4 @@ stable ships, the bump lands within a month with every gate green.
 
 Platform floors are current stable Xcode, current stable Android Gradle
 plugin and NDK, and evergreen browsers. They are reviewed monthly and
-recorded here as the shells take shape.
+recorded here as the SDKs take shape.

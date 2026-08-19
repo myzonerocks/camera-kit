@@ -1,0 +1,4 @@
+module CGosslens {
+    header "CGosslens.h"
+    export *
+}

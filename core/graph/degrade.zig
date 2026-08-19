@@ -31,7 +31,7 @@ pub const ThermalState = enum(u8) { nominal, fair, serious, critical };
 pub const Inputs = struct {
     /// Measured whole-pipeline time for the last frame.
     frame_time_us: u32,
-    /// Fed by the shell from the platform thermal API.
+    /// Fed by the SDK from the platform thermal API.
     thermal: ThermalState,
 };
 

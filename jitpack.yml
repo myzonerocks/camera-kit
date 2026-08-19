@@ -1,0 +1,8 @@
+# Builds com.myzonerocks:gosslens straight from a tagged commit here,
+# the group sdk/kotlin/build.gradle.kts sets. The SDK is that project's
+# own root, so this steps in and publishes to the local Maven repo
+# JitPack serves.
+jdk:
+  - openjdk21
+install:
+  - cd sdk/kotlin && ./gradlew publishToMavenLocal

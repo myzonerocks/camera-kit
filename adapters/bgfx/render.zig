@@ -1,5 +1,5 @@
 //! The render backend node: the one binding over bgfx. Owns renderer
-//! lifecycle, the preview pipeline, and shader assembly. Shells hand over a
+//! lifecycle, the preview pipeline, and shader assembly. SDKs hand over a
 //! native surface and zero-copy camera textures; everything after that
 //! happens here. Frame-path work allocates nothing after the pipelines are
 //! built: transient quad vertices come from bgfx's bounded pools.
@@ -83,6 +83,10 @@ const VkZeroCopy = if (is_android) struct {
     textures: [android_vk.ring_depth]c.bgfx_texture_handle_t = @splat(.{ .idx = invalid_handle }),
     width: u32 = 0,
     height: u32 = 0,
+    /// Beauty compositing's Vulkan-side imports: write side and read
+    /// side.
+    beauty_render_target: android_vk.BeautyRenderTarget = .{},
+    beauty_import: android_vk.BeautyImport = .{},
 } else struct {};
 
 pub const Renderer = struct {
@@ -187,8 +191,8 @@ pub const Renderer = struct {
         // is bgfx's own documented opt-in to single-threaded mode: this
         // thread becomes both the API thread and the render thread,
         // instead of bgfx spawning a separate render thread it would
-        // otherwise own. wrapExternalTexture's bgfx_override_internal_
-        // texture_ptr (zero-copy camera ingress, and the beauty
+        // otherwise own. PersistentTexture.rebind's bgfx_override_
+        // internal_texture_ptr (zero-copy camera ingress, and the beauty
         // compositing bridge) is documented "must be called only on
         // render thread" - every caller in this codebase runs it from
         // whatever thread submitted the frame, never from a thread bgfx
@@ -460,6 +464,8 @@ pub const Renderer = struct {
                 for (zc.textures) |texture| {
                     if (texture.idx != invalid_handle) c.bgfx_destroy_texture(texture);
                 }
+                zc.beauty_render_target.deinit(zc.converter.ctx.device);
+                zc.beauty_import.deinit(zc.converter.ctx.device);
                 zc.converter.deinit();
             }
         }
@@ -520,46 +526,77 @@ pub const Renderer = struct {
         c.bgfx_set_view_rect(0, 0, 0, @intCast(width), @intCast(height));
     }
 
-    /// Wraps a platform texture (MTLTexture and friends) as a bgfx handle
-    /// without copying pixels. The platform object must outlive the frame
-    /// that samples it; the shell guarantees that by holding the buffer
-    /// until the next frame completes. render_target must be true for a
-    /// handle createExternalTarget will wrap into a framebuffer - bgfx
-    /// validates the BGFX_TEXTURE_RT flag against the shell texture at
-    /// creation, before override ever runs, so a handle created without
-    /// it can never become a render target later no matter what the
-    /// underlying native texture itself supports.
-    pub fn wrapExternalTexture(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize, render_target: bool) c.bgfx_texture_handle_t {
+    /// A bgfx texture handle a caller keeps across calls and repeatedly
+    /// rebinds to new native pointers via PersistentTexture.rebind,
+    /// instead of creating a fresh handle every time.
+    pub const PersistentTexture = struct {
+        handle: c.bgfx_texture_handle_t = .{ .idx = invalid_handle },
+        width: u16 = 0,
+        height: u16 = 0,
+
+        /// A fresh handle every frame never survives long enough to
+        /// clear bgfx's own override-timing contract (0 means not yet
+        /// created from the main thread). Reusing the same handle,
+        /// recreated only on a real size change, fixes that.
+        pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) c.bgfx_texture_handle_t {
+            if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
+                if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+                const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+                self.handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
+                self.width = width;
+                self.height = height;
+            }
+            _ = c.bgfx_override_internal_texture_ptr(self.handle, native_ptr, 0);
+            return self.handle;
+        }
+
+        pub fn deinit(self: *PersistentTexture) void {
+            if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+            self.* = .{};
+        }
+    };
+
+    /// Verifies the override actually landed, keeping pt's handle alive
+    /// across a still-pending resolve rather than a fresh one every
+    /// retry - a fresh handle can never clear bgfx's one-frame gap, so
+    /// it fails identically forever, not just the first time.
+    pub fn wrapExternalRenderTarget(r: *Renderer, pt: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) ?c.bgfx_texture_handle_t {
         _ = r;
-        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | (if (render_target) c.BGFX_TEXTURE_RT else 0);
-        const handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
-        _ = c.bgfx_override_internal_texture_ptr(handle, native_ptr, 0);
+        if (pt.handle.idx == invalid_handle or pt.width != width or pt.height != height) {
+            if (pt.handle.idx != invalid_handle) c.bgfx_destroy_texture(pt.handle);
+            const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | c.BGFX_TEXTURE_RT;
+            pt.handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
+            pt.width = width;
+            pt.height = height;
+        }
+        const resolved = c.bgfx_override_internal_texture_ptr(pt.handle, native_ptr, 0);
+        if (resolved == 0) return null;
+        return pt.handle;
+    }
+
+    /// wrapExternalRenderTarget's Vulkan sibling: override is a no-op on
+    /// that backend, so this creates the texture in one step via
+    /// bgfx_create_texture_2d's own _external parameter instead. RGBA8,
+    /// matching the AHardwareBuffer's real format.
+    pub fn createAndroidBeautyRenderTarget(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?c.bgfx_texture_handle_t {
+        if (!is_android) return null;
+        const zc = if (r.zero_copy) |*z| z else return null;
+        const vk_image = zc.beauty_render_target.importRenderTarget(&zc.converter.ctx, @ptrCast(@alignCast(hardware_buffer)), width, height) catch return null;
+        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | c.BGFX_TEXTURE_RT;
+        const handle = c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, flags, null, vk_image);
+        if (handle.idx == invalid_handle) return null;
         return handle;
     }
 
-    /// Same as wrapExternalTexture(render_target: true), except it
-    /// verifies the override actually landed instead of assuming it
-    /// did. bgfx_override_internal_texture_ptr documents returning 0
-    /// when the handle's own creation - itself an asynchronously queued
-    /// command, only processed on a later bgfx_frame() - has not been
-    /// picked up yet. Every wrapExternalTexture caller elsewhere creates
-    /// and uses its handle across a natural gap of at least one frame()
-    /// (camera ingress submits on one call, render samples on a later
-    /// one); createExternalTarget's caller is the one case that would
-    /// otherwise create a handle and immediately draw into it inside the
-    /// same goss_engine_render_frame, before bgfx has ever had a frame
-    /// boundary to actually create it. Returns null on that still-
-    /// pending case so the caller can retry next frame instead of
-    /// caching a handle that silently never points at the real texture.
-    pub fn wrapExternalRenderTarget(r: *Renderer, width: u16, height: u16, format: u32, native_ptr: usize) ?c.bgfx_texture_handle_t {
-        _ = r;
-        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP | c.BGFX_TEXTURE_RT;
-        const handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
-        const resolved = c.bgfx_override_internal_texture_ptr(handle, native_ptr, 0);
-        if (resolved == 0) {
-            c.bgfx_destroy_texture(handle);
-            return null;
-        }
+    /// PersistentTexture.rebind's Vulkan sibling, same reason as
+    /// createAndroidBeautyRenderTarget above.
+    pub fn wrapAndroidBeautyOutput(r: *Renderer, width: u16, height: u16, hardware_buffer: *anyopaque) ?c.bgfx_texture_handle_t {
+        if (!is_android) return null;
+        const zc = if (r.zero_copy) |*z| z else return null;
+        const vk_image = zc.beauty_import.importRgba(&zc.converter.ctx, @ptrCast(@alignCast(hardware_buffer)), width, height) catch return null;
+        const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+        const handle = c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, flags, null, vk_image);
+        if (handle.idx == invalid_handle) return null;
         return handle;
     }
 
@@ -573,8 +610,8 @@ pub const Renderer = struct {
     /// id<MTLDevice> object metal-cpp wraps with no extra indirection.
     /// What lets a platform adapter (the beauty compositing bridge)
     /// create native resources bgfx can wrap back in without owning any
-    /// bgfx dependency itself - the same separation wrapExternalTexture's
-    /// own native_ptr argument already keeps.
+    /// bgfx dependency itself - the same separation PersistentTexture.
+    /// rebind's own native_ptr argument already keeps.
     pub fn nativeDevice(r: *Renderer) ?*anyopaque {
         _ = r;
         const data = c.bgfx_get_internal_data();
@@ -582,9 +619,15 @@ pub const Renderer = struct {
         return data.*.context;
     }
 
+    /// True only once Vulkan actually initialized, not just on Android -
+    /// false on the GLES fallback.
+    pub fn isAndroidVulkan(r: *const Renderer) bool {
+        return is_android and r.zero_copy != null;
+    }
+
     /// Uploads a decoded, immutable image (a lens's LUT, say) as a real
-    /// GPU texture, copying rgba once at creation - unlike
-    /// wrapExternalTexture, there is no live external buffer behind
+    /// GPU texture, copying rgba once at creation - unlike the
+    /// override-based wraps, there is no live external buffer behind
     /// this one to keep alive frame over frame. No instance state to
     /// touch, so this needs no receiver, the same as loadLensProgram.
     pub fn createStaticTexture(width: u16, height: u16, rgba: []const u8) TextureHandle {
@@ -687,7 +730,7 @@ pub const Renderer = struct {
         if (target.framebuffer.idx != invalid_handle) c.bgfx_destroy_frame_buffer(target.framebuffer);
     }
 
-    /// Wraps an existing texture handle (typically one wrapExternalTexture
+    /// Wraps an existing texture handle (typically one wrapExternalRenderTarget
     /// just produced, over a platform-shared surface) as a render target
     /// bgfx can draw into via setViewTarget - what lets a shared surface
     /// receive a bgfx draw instead of only ever being sampled from. The
@@ -924,8 +967,8 @@ pub const Renderer = struct {
 
     /// The CPU-copy path for a single-plane BGRA8/RGBA8 frame - a
     /// browser's own canvas/video frame byte buffer, say, with no
-    /// native GPU handle behind it for wrapExternalTexture's zero-copy
-    /// path to use. Same cached-and-updated shape as uploadNv12 above,
+    /// native GPU handle behind it for the zero-copy override path
+    /// to use. Same cached-and-updated shape as uploadNv12 above,
     /// not createStaticTexture's one-shot immutable upload - a live
     /// camera frame changes every call, the same texture reused rather
     /// than recreated each time.
