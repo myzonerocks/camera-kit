@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.hair-recolor",
+  "version": "1.0.0",
+  "display_name": "Hair Recolor",
+  "engine_compat": ">=0.9",
+  "capabilities": ["segmentation"],
+  "parameters": [],
+  "nodes": [
+    {"id": "hair_recolor", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}, "mask": "hair"}
+  ],
+  "triggers": []
+}
