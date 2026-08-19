@@ -25,6 +25,12 @@
             .license = "Apache-2.0",
         },
         .{
+            .name = "selfie_multiclass.tflite",
+            .url = "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite",
+            .sha256 = "c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0",
+            .license = "Apache-2.0",
+        },
+        .{
             .name = "gesture_recognizer.task",
             .url = "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
             .sha256 = "97952348cf6a6a4915c2ea1496b4b37ebabc50cbbf80571435643c455f2b0482",

@@ -750,6 +750,93 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (mask_max - mask_min < 0.05) return 1;
         }
 
+        // The multiclass segmenter through the same worker: the model's
+        // own output size sets the class count, the compat mask stays the
+        // person, and the portrait's long hair must actually land in the
+        // hair class - per-class means are the oracle.
+        {
+            const multiclass_bytes = try std.Io.Dir.cwd().readFileAlloc(
+                harness_io,
+                ".models/selfie_multiclass.tflite",
+                gpa,
+                .limited(32 << 20),
+            );
+            defer gpa.free(multiclass_bytes);
+
+            const seg = try segmentation.create(gpa, multiclass_bytes, 2);
+            defer segmentation.destroy(seg);
+            if (segmentation.classCount(seg) != 6) {
+                try out.print("multiclass segmentation: unexpected class count {d}\n", .{segmentation.classCount(seg)});
+                try out.flush();
+                return 1;
+            }
+
+            segmentation.submitNv12(
+                seg,
+                planes.width,
+                planes.height,
+                1000,
+                math.color.yuvToRgb(.bt601, .full),
+                planes.y.ptr,
+                planes.width,
+                planes.uv.ptr,
+                ((planes.width + 1) / 2) * 2,
+            );
+
+            var person: [segmentation.mask_len]f32 = undefined;
+            var mask_polls: usize = 0;
+            while (!segmentation.readMask(seg, &person)) {
+                std.Thread.yield() catch {};
+                mask_polls += 1;
+                if (mask_polls > 100_000_000) {
+                    try out.print("multiclass segmentation: timed out\n", .{});
+                    try out.flush();
+                    return 1;
+                }
+            }
+
+            var person_sum: f64 = 0;
+            var person_min: f32 = 1.0;
+            var person_max: f32 = 0.0;
+            for (person) |value| {
+                person_min = @min(person_min, value);
+                person_max = @max(person_max, value);
+                person_sum += value;
+            }
+            const person_mean = person_sum / @as(f64, @floatFromInt(person.len));
+            try out.print("multiclass segmentation: person range [{d:.3}, {d:.3}]\n", .{ person_min, person_max });
+            try out.flush();
+            if (person_min < -0.001 or person_max > 1.001) return 1;
+
+            var hair: [segmentation.mask_len]f32 = undefined;
+            if (!segmentation.readClassMask(seg, 1, &hair)) return 1;
+            var hair_sum: f64 = 0;
+            for (hair) |value| hair_sum += value;
+            const hair_mean = hair_sum / @as(f64, @floatFromInt(hair.len));
+
+            var background: [segmentation.mask_len]f32 = undefined;
+            if (!segmentation.readClassMask(seg, 0, &background)) return 1;
+            var background_sum: f64 = 0;
+            for (background) |value| background_sum += value;
+            const background_mean = background_sum / @as(f64, @floatFromInt(background.len));
+
+            var out_of_range: [segmentation.mask_len]f32 = undefined;
+            if (segmentation.readClassMask(seg, 6, &out_of_range)) return 1;
+
+            try out.print(
+                "multiclass segmentation: 6 classes, person mean {d:.3}, hair mean {d:.3}, background mean {d:.3}\n",
+                .{ person_mean, hair_mean, background_mean },
+            );
+            try out.flush();
+            // The portrait fills part of the frame with a person whose
+            // hair is prominent; the letterboxed square is mostly not
+            // person. Means far outside these bands mean class planes
+            // are swapped or interleaving is misread.
+            if (person_mean < 0.05 or person_mean > 0.8) return 1;
+            if (hair_mean < 0.01 or hair_mean > 0.5) return 1;
+            if (background_mean < 0.3) return 1;
+        }
+
         // Beauty through the same public surface, fed by the session's own
         // tracking result.
         if (comptime !beauty_available) {
