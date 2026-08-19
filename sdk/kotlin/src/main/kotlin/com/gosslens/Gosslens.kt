@@ -84,6 +84,8 @@ object Gosslens {
 }
 
 class Engine private constructor(internal val handle: Long) : AutoCloseable {
+    private var closed = false
+
     companion object {
         fun create(): Engine {
             val handle = Gosslens.nativeEngineCreate()
@@ -113,7 +115,13 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
     fun renderFrame(session: Session?): Boolean =
         Gosslens.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
 
-    override fun close() = Gosslens.nativeEngineDestroy(handle)
+    // Idempotent like destroy() everywhere else - a second close() must
+    // not hand the native side an already-freed handle.
+    override fun close() {
+        if (closed) return
+        closed = true
+        Gosslens.nativeEngineDestroy(handle)
+    }
 }
 
 /** One tracking result read back from the core. The buffer mirrors the
@@ -173,6 +181,8 @@ class LensSignals {
 }
 
 class Session private constructor(internal val handle: Long) : AutoCloseable {
+    private var closed = false
+
     companion object {
         fun create(engine: Engine): Session {
             val handle = Gosslens.nativeSessionCreate(engine.handle)
@@ -284,5 +294,9 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         1, 0, timestampUs,
     ) == 0
 
-    override fun close() = Gosslens.nativeSessionDestroy(handle)
+    override fun close() {
+        if (closed) return
+        closed = true
+        Gosslens.nativeSessionDestroy(handle)
+    }
 }
