@@ -174,14 +174,22 @@ struct AppleInterop {
   int width = 0;
   int height = 0;
 
+  // Raw GL objects die only on gpupixel's own GL thread - the destroy
+  // entry point dispatches here; the CoreVideo CF objects release
+  // anywhere and stay in the destructor.
+  void ReleaseGl() {
+    if (fbo) { glDeleteFramebuffers(1, &fbo); fbo = 0; }
+    if (blit_program) { glDeleteProgram(blit_program); blit_program = 0; }
+  }
+
+  bool HasGl() const { return fbo != 0 || blit_program != 0; }
+
   ~AppleInterop() {
     if (metal_texture) CFRelease(metal_texture);
     if (metal_cache) CFRelease(metal_cache);
     if (gl_texture) CFRelease(gl_texture);
     if (pixel_buffer) CFRelease(pixel_buffer);
     if (texture_cache) CFRelease(texture_cache);
-    if (fbo) glDeleteFramebuffers(1, &fbo);
-    if (blit_program) glDeleteProgram(blit_program);
   }
 
   bool EnsureSurface(int new_width, int new_height) {
@@ -274,7 +282,10 @@ struct AppleInterop {
   CVMetalTextureCacheRef metal_cache = nullptr;
   CVMetalTextureRef metal_texture = nullptr;
 
-  void ReleaseSurface() {
+  // The EGL surface and its GL texture die only on gpupixel's own GL
+  // thread - the resize path below is already there; the destroy entry
+  // point dispatches.
+  void ReleaseGlSurface() {
     auto* ctx = gpupixel::GPUPixelContext::GetInstance();
     if (egl_surface != EGL_NO_SURFACE) {
       if (texture) eglReleaseTexImage(ctx->GetEglDisplay(), egl_surface, EGL_BACK_BUFFER);
@@ -285,6 +296,20 @@ struct AppleInterop {
       glDeleteTextures(1, &texture);
       texture = 0;
     }
+  }
+
+  void ReleaseGl() {
+    ReleaseGlSurface();
+    if (fbo) { glDeleteFramebuffers(1, &fbo); fbo = 0; }
+    if (blit_program) { glDeleteProgram(blit_program); blit_program = 0; }
+  }
+
+  bool HasGl() const {
+    return egl_surface != EGL_NO_SURFACE || texture != 0 || fbo != 0 || blit_program != 0;
+  }
+
+  void ReleaseSurface() {
+    ReleaseGlSurface();
     if (metal_texture) {
       CFRelease(metal_texture);
       metal_texture = nullptr;
@@ -296,10 +321,9 @@ struct AppleInterop {
   }
 
   ~AppleInterop() {
-    ReleaseSurface();
+    if (metal_texture) CFRelease(metal_texture);
+    if (pixel_buffer) CFRelease(pixel_buffer);
     if (metal_cache) CFRelease(metal_cache);
-    if (fbo) glDeleteFramebuffers(1, &fbo);
-    if (blit_program) glDeleteProgram(blit_program);
   }
 
   bool EnsureSurface(int new_width, int new_height) {
@@ -408,6 +432,12 @@ struct AppleInputSurface {
   CVOpenGLTextureRef gl_texture = nullptr;
   int width = 0;
   int height = 0;
+
+  // Everything GL-facing here is a CoreVideo CF object, safe to release
+  // on any thread - nothing needs gpupixel's GL thread, unlike the iOS
+  // sibling below whose EGL import does.
+  void ReleaseGLImport() {}
+  bool HasGlImport() const { return false; }
 
   ~AppleInputSurface() {
     if (gl_texture) CFRelease(gl_texture);
@@ -526,6 +556,9 @@ struct AppleInputSurface {
   int width = 0;
   int height = 0;
 
+  // The EGL surface and its GL texture belong to gpupixel's GL thread
+  // (EnsureGLImport runs there) - teardown dispatches there too, from
+  // the resize path below and the destroy entry point alike.
   void ReleaseGLImport() {
     auto* ctx = gpupixel::GPUPixelContext::GetInstance();
     if (egl_surface != EGL_NO_SURFACE) {
@@ -539,8 +572,11 @@ struct AppleInputSurface {
     }
   }
 
+  bool HasGlImport() const {
+    return egl_surface != EGL_NO_SURFACE || gl_texture != 0;
+  }
+
   ~AppleInputSurface() {
-    ReleaseGLImport();
     if (metal_texture) CFRelease(metal_texture);
     if (metal_cache) CFRelease(metal_cache);
     if (pixel_buffer) CFRelease(pixel_buffer);
@@ -550,7 +586,9 @@ struct AppleInputSurface {
     if (metal_texture && width == new_width && height == new_height) return true;
     if (device == nil) return false;
 
-    ReleaseGLImport();
+    if (HasGlImport()) {
+      gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { ReleaseGLImport(); });
+    }
     if (metal_texture) { CFRelease(metal_texture); metal_texture = nullptr; }
     if (pixel_buffer) { CFRelease(pixel_buffer); pixel_buffer = nullptr; }
 
@@ -653,7 +691,14 @@ void* goss_beauty_interop_create(void) {
 }
 
 void goss_beauty_interop_destroy(void* handle) {
-  delete static_cast<AppleInterop*>(handle);
+  auto* interop = static_cast<AppleInterop*>(handle);
+  if (interop == nullptr) return;
+  // GL objects die on gpupixel's own GL thread - deleted anywhere else
+  // they silently leak; the CF objects release in the destructor.
+  if (interop->HasGl()) {
+    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { interop->ReleaseGl(); });
+  }
+  delete interop;
 }
 
 // Composites source_texture into the shared surface and returns the
@@ -712,7 +757,12 @@ void* goss_beauty_input_create(void) {
 }
 
 void goss_beauty_input_destroy(void* handle) {
-  delete static_cast<AppleInputSurface*>(handle);
+  auto* input = static_cast<AppleInputSurface*>(handle);
+  if (input == nullptr) return;
+  if (input->HasGlImport()) {
+    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { input->ReleaseGLImport(); });
+  }
+  delete input;
 }
 
 // Runs on bgfx's own thread. (Re)creates the shared surface against
@@ -740,8 +790,13 @@ int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
   if (input_handle == nullptr || beauty_handle == nullptr) return 1;
   auto* input = static_cast<AppleInputSurface*>(input_handle);
 
+  // Same ran tracking as goss_beauty_interop_composite: a dispatch
+  // skipped while the app isn't foreground-active must not report a
+  // frame the chain never processed as success.
+  bool ran = false;
   bool ok = true;
   gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    ran = true;
     if (!input->EnsureGLImport()) {
       ok = false;
       return;
@@ -750,7 +805,7 @@ int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
              beauty_handle, input->GLName(), input->SamplerKind(),
              width, height, landmarks106) == 0;
   });
-  return ok ? 0 : 1;
+  return (ran && ok) ? 0 : 1;
 }
 
 }  // extern "C"

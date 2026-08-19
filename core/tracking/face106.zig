@@ -61,6 +61,23 @@ pub fn fill(landmarks: *const [face.landmark_count]face.Landmark, width: f32, he
     }
 }
 
+/// Maps a fill()-normalized point from sensor space into the space of
+/// a frame drawn with the preview blit's mirror and quarter turns -
+/// mirror first, then rotation, the blit's own transform order.
+pub fn transformPoint(u: f32, v: f32, rotation_quarter_turns: u32, mirror: bool) [2]f32 {
+    var x = u * 2.0 - 1.0;
+    const y = 1.0 - v * 2.0;
+    if (mirror) x = -x;
+    const rotated: [2]f32 = switch (rotation_quarter_turns % 4) {
+        0 => .{ x, y },
+        1 => .{ -y, x },
+        2 => .{ -x, -y },
+        3 => .{ y, -x },
+        else => unreachable,
+    };
+    return .{ (rotated[0] + 1.0) * 0.5, (1.0 - rotated[1]) * 0.5 };
+}
+
 const t = std.testing;
 
 test "every entry addresses a mesh vertex" {
@@ -112,5 +129,42 @@ test "each hub point is exactly its neighbors' centroid" {
         const hub = base_point_count + at;
         try t.expectApproxEqAbs(sum_x / count, out[hub * 2], 1e-6);
         try t.expectApproxEqAbs(sum_y / count, out[hub * 2 + 1], 1e-6);
+    }
+}
+
+test "transformPoint matches the preview blit for every camera pose" {
+    const eps = 1e-6;
+    // No rotation, no mirror: identity.
+    const id = transformPoint(0.25, 0.75, 0, false);
+    try t.expectApproxEqAbs(@as(f32, 0.25), id[0], eps);
+    try t.expectApproxEqAbs(@as(f32, 0.75), id[1], eps);
+    // Rear camera (3 quarter turns, unmirrored): (u, v) -> (1 - v, u).
+    const rear = transformPoint(0.25, 0.75, 3, false);
+    try t.expectApproxEqAbs(@as(f32, 0.25), rear[0], eps);
+    try t.expectApproxEqAbs(@as(f32, 0.25), rear[1], eps);
+    // Front camera (1 quarter turn, mirrored): (u, v) -> (v, u).
+    const front = transformPoint(0.25, 0.75, 1, true);
+    try t.expectApproxEqAbs(@as(f32, 0.75), front[0], eps);
+    try t.expectApproxEqAbs(@as(f32, 0.25), front[1], eps);
+    // Mirror alone flips only the horizontal axis.
+    const mirrored = transformPoint(0.25, 0.75, 0, true);
+    try t.expectApproxEqAbs(@as(f32, 0.75), mirrored[0], eps);
+    try t.expectApproxEqAbs(@as(f32, 0.75), mirrored[1], eps);
+    // A half turn flips both axes.
+    const half = transformPoint(0.25, 0.75, 2, false);
+    try t.expectApproxEqAbs(@as(f32, 0.75), half[0], eps);
+    try t.expectApproxEqAbs(@as(f32, 0.25), half[1], eps);
+}
+
+test "transformPoint stays inside the unit square" {
+    var rotation: u32 = 0;
+    while (rotation < 4) : (rotation += 1) {
+        for ([_]bool{ false, true }) |mirror| {
+            for ([_][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 1, 1 }, .{ 0.5, 0.5 } }) |p| {
+                const out = transformPoint(p[0], p[1], rotation, mirror);
+                try t.expect(out[0] >= 0.0 and out[0] <= 1.0);
+                try t.expect(out[1] >= 0.0 and out[1] <= 1.0);
+            }
+        }
     }
 }

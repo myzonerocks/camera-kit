@@ -47,6 +47,7 @@ const char* kBlitVertexShader =
     "}\n";
 
 const char* kBlitFragmentShader =
+    "precision mediump float;\n"
     "varying vec2 textureCoordinate;\n"
     "uniform sampler2D inputTexture;\n"
     "void main() {\n"
@@ -132,15 +133,26 @@ struct AndroidInterop {
   int width = 0;
   int height = 0;
 
-  ~AndroidInterop() {
+  // GL/EGL teardown, valid only on gpupixel's own GL thread - the
+  // destroy entry point dispatches here; run anywhere else the deletes
+  // silently no-op and the EGLImage keeps its buffer reference alive.
+  void ReleaseGl() {
     EGLDisplay display = eglGetCurrentDisplay();
-    if (gl_texture) glDeleteTextures(1, &gl_texture);
+    if (gl_texture) { glDeleteTextures(1, &gl_texture); gl_texture = 0; }
     if (image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY) {
       eglDestroyImageKHR(display, image);
+      image = EGL_NO_IMAGE_KHR;
     }
+    if (fbo) { glDeleteFramebuffers(1, &fbo); fbo = 0; }
+    if (blit_program) { glDeleteProgram(blit_program); blit_program = 0; }
+  }
+
+  bool HasGl() const {
+    return gl_texture != 0 || image != EGL_NO_IMAGE_KHR || fbo != 0 || blit_program != 0;
+  }
+
+  ~AndroidInterop() {
     if (buffer) AHardwareBuffer_release(buffer);
-    if (fbo) glDeleteFramebuffers(1, &fbo);
-    if (blit_program) glDeleteProgram(blit_program);
   }
 
   bool EnsureSurface(int new_width, int new_height) {
@@ -219,14 +231,33 @@ struct AndroidInputSurface {
   int width = 0;
   int height = 0;
 
-  ~AndroidInputSurface() {
+  // The write objects live in the caller's (bgfx's) GL context, the
+  // read objects in gpupixel's - a GL object dies only on the thread
+  // whose context owns it, so teardown is split the same way creation
+  // already is.
+  void ReleaseWriteGl() {
     EGLDisplay display = eglGetCurrentDisplay();
-    if (write_texture) glDeleteTextures(1, &write_texture);
-    if (read_texture) glDeleteTextures(1, &read_texture);
-    if (display != EGL_NO_DISPLAY) {
-      if (write_image != EGL_NO_IMAGE_KHR) eglDestroyImageKHR(display, write_image);
-      if (read_image != EGL_NO_IMAGE_KHR) eglDestroyImageKHR(display, read_image);
+    if (write_texture) { glDeleteTextures(1, &write_texture); write_texture = 0; }
+    if (write_image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY) {
+      eglDestroyImageKHR(display, write_image);
+      write_image = EGL_NO_IMAGE_KHR;
     }
+  }
+
+  void ReleaseReadGl() {
+    EGLDisplay display = eglGetCurrentDisplay();
+    if (read_texture) { glDeleteTextures(1, &read_texture); read_texture = 0; }
+    if (read_image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY) {
+      eglDestroyImageKHR(display, read_image);
+      read_image = EGL_NO_IMAGE_KHR;
+    }
+  }
+
+  bool HasReadGl() const {
+    return read_texture != 0 || read_image != EGL_NO_IMAGE_KHR;
+  }
+
+  ~AndroidInputSurface() {
     if (buffer) AHardwareBuffer_release(buffer);
   }
 
@@ -236,11 +267,10 @@ struct AndroidInputSurface {
   bool EnsureBuffer(int new_width, int new_height) {
     if (buffer != nullptr && width == new_width && height == new_height) return true;
 
-    EGLDisplay display = eglGetCurrentDisplay();
-    if (write_texture) { glDeleteTextures(1, &write_texture); write_texture = 0; }
-    if (write_image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY) { eglDestroyImageKHR(display, write_image); write_image = EGL_NO_IMAGE_KHR; }
-    if (read_texture) { glDeleteTextures(1, &read_texture); read_texture = 0; }
-    if (read_image != EGL_NO_IMAGE_KHR && display != EGL_NO_DISPLAY) { eglDestroyImageKHR(display, read_image); read_image = EGL_NO_IMAGE_KHR; }
+    ReleaseWriteGl();
+    if (HasReadGl()) {
+      gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { ReleaseReadGl(); });
+    }
     if (buffer) { AHardwareBuffer_release(buffer); buffer = nullptr; }
 
     AHardwareBuffer_Desc desc = {};
@@ -331,7 +361,14 @@ void* goss_beauty_interop_create(void) {
 }
 
 void goss_beauty_interop_destroy(void* handle) {
-  delete static_cast<AndroidInterop*>(handle);
+  auto* interop = static_cast<AndroidInterop*>(handle);
+  if (interop == nullptr) return;
+  // GL/EGL objects die on gpupixel's own GL thread; run anywhere else
+  // the deletes no-op and the EGLImage pins the buffer forever.
+  if (interop->HasGl()) {
+    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { interop->ReleaseGl(); });
+  }
+  delete interop;
 }
 
 // Composites source_texture into the shared AHardwareBuffer and returns
@@ -344,8 +381,13 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
   if (handle == nullptr || width <= 0 || height <= 0) return nullptr;
   auto* interop = static_cast<AndroidInterop*>(handle);
 
+  // ran tracks whether the lambda actually executed - a dispatch that
+  // skips it would otherwise read as a successful composite of a
+  // buffer that was never touched this call, since ok defaults true.
+  bool ran = false;
   bool ok = true;
   gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    ran = true;
     if (!interop->EnsureSurface(width, height)) {
       ok = false;
       return;
@@ -383,7 +425,10 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
     glUseProgram(interop->blit_program);
 
     static const GLfloat position[] = {-1, -1, 1, -1, -1, 1, 1, 1};
-    static const GLfloat tex_coords[] = {0, 0, 1, 0, 0, 1, 1, 1};
+    // Y-flipped to match the chain's own ingest blit (beauty_shim.cc's
+    // kTexCoords) - the convention gpupixel corrects for on the way in
+    // has to be undone on the way back out, same as the apple egress.
+    static const GLfloat tex_coords[] = {0, 1, 1, 1, 0, 0, 1, 0};
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, position);
     glEnableVertexAttribArray(1);
@@ -408,7 +453,7 @@ void* goss_beauty_interop_composite(void* handle, uint32_t source_texture,
     glUseProgram(previous_program);
   });
 
-  return ok ? interop->buffer : nullptr;
+  return (ran && ok) ? interop->buffer : nullptr;
 }
 
 void* goss_beauty_input_create(void) {
@@ -416,7 +461,15 @@ void* goss_beauty_input_create(void) {
 }
 
 void goss_beauty_input_destroy(void* handle) {
-  delete static_cast<AndroidInputSurface*>(handle);
+  auto* input = static_cast<AndroidInputSurface*>(handle);
+  if (input == nullptr) return;
+  // Write objects die here on the caller's own (bgfx) GL thread; read
+  // objects die on gpupixel's, same split as their creation.
+  input->ReleaseWriteGl();
+  if (input->HasReadGl()) {
+    gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] { input->ReleaseReadGl(); });
+  }
+  delete input;
 }
 
 // Runs on bgfx's own thread. device is unused - GL has no separate
@@ -457,8 +510,10 @@ int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
   if (input_handle == nullptr || beauty_handle == nullptr) return 1;
   auto* input = static_cast<AndroidInputSurface*>(input_handle);
 
+  bool ran = false;
   bool ok = true;
   gpupixel::GPUPixelContext::GetInstance()->SyncRunWithContext([&] {
+    ran = true;
     if (!input->EnsureReadSurface()) {
       ok = false;
       return;
@@ -470,7 +525,7 @@ int32_t goss_beauty_input_process(void* input_handle, void* beauty_handle,
     ok = goss_beauty_process_external_texture(beauty_handle, input->read_texture, 0,
                                             width, height, landmarks106) == 0;
   });
-  return ok ? 0 : 1;
+  return (ran && ok) ? 0 : 1;
 }
 
 }  // extern "C"

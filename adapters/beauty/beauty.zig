@@ -123,18 +123,9 @@ fn contourFromResult(result: ?*const face.Result, width: u32, height: u32, rotat
     if (mirror or rotation_quarter_turns % 4 != 0) {
         var at: usize = 0;
         while (at < face106.point_count) : (at += 1) {
-            var x = contour[at * 2] * 2.0 - 1.0;
-            const y = 1.0 - contour[at * 2 + 1] * 2.0;
-            if (mirror) x = -x;
-            const rotated: [2]f32 = switch (rotation_quarter_turns % 4) {
-                0 => .{ x, y },
-                1 => .{ -y, x },
-                2 => .{ -x, -y },
-                3 => .{ y, -x },
-                else => unreachable,
-            };
-            contour[at * 2] = (rotated[0] + 1.0) * 0.5;
-            contour[at * 2 + 1] = (1.0 - rotated[1]) * 0.5;
+            const out = face106.transformPoint(contour[at * 2], contour[at * 2 + 1], rotation_quarter_turns, mirror);
+            contour[at * 2] = out[0];
+            contour[at * 2 + 1] = out[1];
         }
     }
     return contour;

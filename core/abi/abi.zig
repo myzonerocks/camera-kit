@@ -32,6 +32,7 @@ const face106 = @import("face106");
 /// own dispatch here in place of applyBeautyCompositing's gpupixel
 /// calls - guarded on this rather than reachable from every target.
 const is_web = builtin.os.tag == .emscripten;
+const is_android = builtin.os.tag == .linux and builtin.abi.isAndroid();
 
 // A directory-based lens activation needs to read files (manifest.json,
 // compiled shader bytecode) from within an exported goss_ function, which
@@ -450,6 +451,12 @@ fn beautyActive(s: *const Session) bool {
 /// state, same as blend.pass's mask.
 fn applyBeautyCompositing(r: *render.Renderer, s: *Session, next_view_id: *u8, width: u16, height: u16, rotation: u32, mirror: bool, input_texture: render.TextureHandle) render.TextureHandle {
     const chain = s.beauty_chain.?;
+
+    // Android's GLES fallback has no route from the composited buffer
+    // back into bgfx (the Metal-view bridge is apple-only, the
+    // AHardwareBuffer import needs Vulkan) - running the chain there
+    // burns a full gpupixel pass per frame nothing can ever display.
+    if (is_android and !r.isAndroidVulkan()) return input_texture;
 
     const input_surface = s.beauty_input orelse blk: {
         const created = beauty.inputSurfaceCreate(s.engine.gpa) catch return input_texture;
