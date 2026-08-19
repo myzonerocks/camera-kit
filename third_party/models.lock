@@ -43,6 +43,12 @@
             .license = "Apache-2.0",
         },
         .{
+            .name = "canonical_face_model.obj",
+            .url = "https://raw.githubusercontent.com/google-ai-edge/mediapipe/a908d668c730da128dfa8d9f6bd25d519d006692/mediapipe/modules/face_geometry/data/canonical_face_model.obj",
+            .sha256 = "8bac80443397e113f41a8b565ea72c59390bc031d9defab289dba7bc0c54e618",
+            .license = "Apache-2.0",
+        },
+        .{
             .name = "corpus/face_frontal_a.jpg",
             .url = "https://upload.wikimedia.org/wikipedia/commons/b/bd/Official_portrait_of_NASA_astronaut_Jack_Hathaway_%28jsc2025e068207_alt%29.jpg",
             .sha256 = "107a9a03a1a1114a082382a3d505bbeee3d4ed0cc0dd89aabad405ea586b7dd9",

@@ -182,6 +182,7 @@ pub fn build(b: *std.Build) void {
     const face_module = tracking_cores.face;
     const hand_core_module = tracking_cores.hand;
     const pose_core_module = tracking_cores.pose;
+    const face_mesh_topology_module = tracking_cores.face_mesh_topology;
     const tracker_module = tracking_cores.tracker;
     const face106_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/face106.zig"),
@@ -291,6 +292,7 @@ pub fn build(b: *std.Build) void {
     const sampler_tests = b.addTest(.{ .root_module = sampler_module });
     const face_tests = b.addTest(.{ .root_module = face_module });
     const pose_tests = b.addTest(.{ .root_module = pose_core_module });
+    const face_mesh_topology_tests = b.addTest(.{ .root_module = face_mesh_topology_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const face106_tests = b.addTest(.{ .root_module = face106_module });
     const segment_tests = b.addTest(.{ .root_module = segment_module });
@@ -313,6 +315,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(sampler_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(pose_tests).step);
+    test_step.dependOn(&b.addRunArtifact(face_mesh_topology_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
     test_step.dependOn(&b.addRunArtifact(segment_tests).step);
@@ -1305,6 +1308,7 @@ const TrackingCoreModules = struct {
     face: *std.Build.Module,
     hand: *std.Build.Module,
     pose: *std.Build.Module,
+    face_mesh_topology: *std.Build.Module,
     tracker: *std.Build.Module,
 };
 
@@ -1354,6 +1358,11 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
             .{ .name = "detector", .module = detector_module },
         },
     });
+    const face_mesh_topology_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/face_mesh_topology.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const tracker_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/tracker.zig"),
         .target = target,
@@ -1370,6 +1379,7 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .face = face_module,
         .hand = hand_module,
         .pose = pose_module,
+        .face_mesh_topology = face_mesh_topology_module,
         .tracker = tracker_module,
     };
 }
