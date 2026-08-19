@@ -517,13 +517,21 @@ pub fn main(init_args: std.process.Init) !u8 {
             if (tracked_presence < 0.5) return 1;
         }
 
-        // The same frame through the public surface: enable, one
-        // track_frame, polled goss_session_hand_result.
+        // The same frame through the public surface, fed the gesture
+        // recognizer bundle: enable proves the nested-bundle path, the
+        // raised palm must come back classified as an open palm.
+        const gesture_task_bytes = try std.Io.Dir.cwd().readFileAlloc(
+            harness_io,
+            ".models/gesture_recognizer.task",
+            gpa,
+            .limited(16 << 20),
+        );
+        defer gpa.free(gesture_task_bytes);
         const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
         defer abi.destroyEngine(engine);
         const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
         defer abi.destroySession(session);
-        const enable_hand = abi.goss_session_enable_hand_tracking(session, hand_task_bytes.ptr, hand_task_bytes.len, 2);
+        const enable_hand = abi.goss_session_enable_hand_tracking(session, gesture_task_bytes.ptr, gesture_task_bytes.len, 2);
         if (enable_hand != .ok) {
             try out.print("abi enable hand tracking: {s}\n", .{@tagName(enable_hand)});
             try out.flush();
@@ -554,14 +562,21 @@ pub fn main(init_args: std.process.Init) !u8 {
                 return 1;
             }
         }
-        try out.print(
-            "abi hand surface: serial {d}, hands {d}, presence {d:.3}, timestamp {d}\n",
-            .{ hand_result.frame_serial, hand_result.hand_count, hand_result.hands[0].presence, hand_result.timestamp_us },
-        );
+        var open_palm_seen = false;
+        for (hand_result.hands[0..hand_result.hand_count]) |tracked| {
+            try out.print(
+                "abi hand surface: presence {d:.3}, handedness {d:.3}, gesture {s} ({d:.3})\n",
+                .{ tracked.presence, tracked.handedness, hand.gesture_names[tracked.gesture], tracked.gesture_score },
+            );
+            if (tracked.gesture == 2) open_palm_seen = true;
+        }
         try out.flush();
         if (hand_result.hand_count == 0) return 1;
         if (hand_result.hands[0].presence < 0.5) return 1;
         if (hand_result.timestamp_us != 2000) return 1;
+        // The corpus frame's raised right palm is the gesture oracle: the
+        // classifier must call it an open palm through the whole rail.
+        if (!open_palm_seen) return 1;
     }
 
     // The same portrait through the public surface: session, worker
