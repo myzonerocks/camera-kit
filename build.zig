@@ -2867,13 +2867,11 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             inference_libs.append(b.allocator, lib) catch @panic("oom");
         }
         inference_libs.appendSlice(b.allocator, family_libs.items) catch @panic("oom");
-        if (config.abi == .none) {
-            // Device only for now - simulator needs its own proof later.
-            // gpupixel links this lib internally already; installing it
-            // separately is what makes zig-out/ios/libangle.a exist for
-            // Xcode's own -langle (zig's cache dedupes the real compile).
-            inference_libs.append(b.allocator, buildAngleLib(b, ios_target, optimize)) catch @panic("oom");
-        }
+        // gpupixel links this lib internally already; installing it
+        // separately is what makes zig-out/<target>/libangle.a exist for
+        // Xcode's own -langle (zig's cache dedupes the real compile).
+        // Both device and simulator: the demo links -langle on either SDK.
+        inference_libs.append(b.allocator, buildAngleLib(b, ios_target, optimize)) catch @panic("oom");
     } else {
         abi_ios.addImport("tracking", trackingStubModule(b, ios_target, optimize, tracking_cores_ios.face, math_ios));
         abi_ios.addImport("segmentation", segmentationStubModule(b, ios_target, optimize, math_ios));
