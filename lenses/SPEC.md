@@ -83,9 +83,10 @@ before any node, shader, or asset is touched.
 
 A lens declares the inputs it needs so the runtime can decide, before
 splicing, whether it can run: `face` (landmarks + blendshapes), `hands`
-(hand landmarks), `segmentation` (selfie or hair mask), `world` (pose,
-planes, anchors, light — Part 6 of the engineering brief), `audio_level`
-(input signal envelope, for audio-reactive triggers). A capability the
+(hand landmarks, handedness, and canned gesture classes), `segmentation`
+(selfie or hair mask), `world` (pose, planes, anchors, light),
+`audio_level` (input signal envelope, for audio-reactive triggers). A
+capability the
 running session cannot provide is a defined degradation, not a load
 failure: the lens still splices, its triggers gated on that capability
 simply never fire, and any node consuming that capability's data holds its
