@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 12u
+#define GOSS_ABI_MINOR 13u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -284,6 +284,24 @@ goss_status goss_engine_capture_frame(goss_engine *engine, goss_session *session
  * (invalid_argument) tells the caller exactly what to retry with. The
  * encoding is deterministic: the same pixels, the same bytes. */
 goss_status goss_engine_capture_photo(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height);
+
+typedef struct goss_recording_config {
+  uint32_t width;       /* 0 picks the renderer's output size (rounded to even) */
+  uint32_t height;
+  uint32_t bitrate_bps; /* 0 lets the backend pick a rate for the size */
+  uint32_t codec;       /* 0 = H.264, 1 = HEVC */
+} goss_recording_config;
+
+/* Starts recording the session's rendered frames, effects baked in,
+ * into the file at path. One recording per engine; every subsequent
+ * goss_engine_render_frame of this session appends one video frame at
+ * the frame's own timestamp until goss_engine_recording_stop. Returns
+ * GOSS_ERROR_UNSUPPORTED where no recording backend exists yet. */
+goss_status goss_engine_recording_start(goss_engine *engine, goss_session *session, const uint8_t *path, size_t path_len, const goss_recording_config *config);
+
+/* Stops the engine's recording, flushing frames still in flight and
+ * finalizing the container. */
+goss_status goss_engine_recording_stop(goss_engine *engine);
 
 /* Graph thread. config may be null for defaults. */
 goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);

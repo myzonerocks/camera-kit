@@ -18,6 +18,7 @@ const segmentation = @import("segmentation");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
+const media_recording = @import("media_recording");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -61,7 +62,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 12;
+pub const abi_minor: u16 = 13;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -190,6 +191,33 @@ pub const Engine = struct {
     capture_staging: ?render.TextureHandle = null,
     capture_width: u16 = 0,
     capture_height: u16 = 0,
+    /// Active video recording, fed one composited frame per rendered
+    /// frame of recording_session; frames commit two engine frames
+    /// after they render so the GPU has finished writing them.
+    recording: ?media_recording.Recording = null,
+    recording_session: ?*Session = null,
+    /// External render targets per encoder pool buffer, keyed by the
+    /// native texture pointer - the pool cycles a few buffers, each
+    /// needing its own persistent wrap.
+    recording_slots: std.AutoHashMapUnmanaged(usize, RecordingSlot) = .empty,
+    recording_pending: [2]?PendingRecordingFrame = .{ null, null },
+    recording_pending_at: u8 = 0,
+    /// The slot the current frame's composite renders into, when this
+    /// frame both records and its wrap has landed.
+    recording_frame_target: ?render.Renderer.OffscreenTarget = null,
+    recording_last_timestamp: i64 = std.math.minInt(i64),
+    recording_warmups: u32 = 0,
+    recording_dropped: u32 = 0,
+};
+
+const RecordingSlot = struct {
+    persistent: render.Renderer.PersistentTexture = .{},
+    target: ?render.Renderer.OffscreenTarget = null,
+};
+
+const PendingRecordingFrame = struct {
+    frame: media_recording.Frame,
+    timestamp_us: i64,
 };
 
 const CurrentFrame = struct {
@@ -399,6 +427,7 @@ pub fn createEngine(gpa: std.mem.Allocator, config: EngineConfig) error{OutOfMem
 }
 
 pub fn destroyEngine(engine: *Engine) void {
+    if (engine.recording != null) _ = finishRecording(engine);
     for (engine.chain_targets) |slot| {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
     }
@@ -787,6 +816,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         render.Renderer.setViewTarget(0, finalTarget(e, s), @intCast(r.width), @intCast(r.height));
         r.submitPreview(0, current.preview, rotation * 90, mirror);
         if (s.capture_requested) blitCaptureToSwapChain(e, r, 1);
+        blitRecordingToSwapChain(e, r, 1);
         return;
     }
 
@@ -970,6 +1000,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     }
 
     if (s.capture_requested and ready_count > 0) blitCaptureToSwapChain(e, r, next_view_id);
+    if (ready_count > 0) blitRecordingToSwapChain(e, r, next_view_id + 1);
 
     if (ready_count == 0) {
         // beauty_active is guaranteed true here (the ready_count == 0
@@ -980,6 +1011,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         render.Renderer.setViewTarget(next_view_id, finalTarget(e, s), output_width, output_height);
         r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
         if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 1);
+        blitRecordingToSwapChain(e, r, next_view_id + 2);
     }
 }
 
@@ -989,7 +1021,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
 /// real output lands somewhere bgfx_read_texture can read it back from
 /// after the frame completes.
 fn finalTarget(e: *Engine, s: *Session) ?render.Renderer.OffscreenTarget {
-    return if (s.capture_requested) e.capture_target else null;
+    if (s.capture_requested) return e.capture_target;
+    return e.recording_frame_target;
 }
 
 /// Draws the just-composited capture target to the swap chain, so a
@@ -998,6 +1031,15 @@ fn finalTarget(e: *Engine, s: *Session) ?render.Renderer.OffscreenTarget {
 /// swap chain, reused here for the same reason.
 fn blitCaptureToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
     const target = e.capture_target orelse return;
+    render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
+    r.submitShaderPass(view_id, r.passthroughProgram(), target.texture, r.default_mask_texture);
+}
+
+/// The recording sibling of blitCaptureToSwapChain: a recorded frame's
+/// composite lands in the encoder's own surface, so the swap chain
+/// still needs a passthrough of it to display normally.
+fn blitRecordingToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
+    const target = e.recording_frame_target orelse return;
     render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
     r.submitShaderPass(view_id, r.passthroughProgram(), target.texture, r.default_mask_texture);
 }
@@ -1023,6 +1065,7 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
 }
 
 pub fn destroySession(session: *Session) void {
+    if (session.engine.recording_session == session) _ = finishRecording(session.engine);
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
     session.shader_masks.deinit(session.engine.gpa);
@@ -1209,16 +1252,111 @@ pub export fn goss_engine_request_screenshot(engine: ?*Engine, path: ?[*]const u
     return .ok;
 }
 
+/// Begins an encoder frame and wraps its surface as this frame's final
+/// render target. Null while a pool slot warms up (its first wrap
+/// cannot land the same frame) - that frame displays normally and is
+/// counted, never silently lost.
+fn prepareRecordingFrame(e: *Engine, r: *render.Renderer) ?media_recording.Frame {
+    var rec = &(e.recording.?);
+    const frame = rec.beginFrame() catch return null;
+    const width: u16 = @intCast(rec.config.width);
+    const height: u16 = @intCast(rec.config.height);
+    const key = @intFromPtr(frame.native_texture);
+    const slot = e.recording_slots.getOrPut(e.gpa, key) catch {
+        rec.abortFrame(frame);
+        return null;
+    };
+    if (!slot.found_existing) slot.value_ptr.* = .{};
+    const wrapped = r.wrapExternalRenderTarget(&slot.value_ptr.persistent, width, height, render.c.BGFX_TEXTURE_FORMAT_BGRA8, key) orelse {
+        e.recording_warmups += 1;
+        rec.abortFrame(frame);
+        return null;
+    };
+    if (slot.value_ptr.target == null) {
+        slot.value_ptr.target = render.Renderer.createExternalTarget(wrapped) catch {
+            e.recording_warmups += 1;
+            rec.abortFrame(frame);
+            return null;
+        };
+    }
+    e.recording_frame_target = slot.value_ptr.target;
+    return frame;
+}
+
+/// Commits the pending frame whose GPU work two engine frames have now
+/// finished, then queues this frame's own. Non-monotonic timestamps
+/// abort rather than fail the writer.
+fn queueRecordingCommit(e: *Engine, frame: ?media_recording.Frame, timestamp_us: i64) void {
+    var rec = &(e.recording.?);
+    const at = e.recording_pending_at % 2;
+    if (e.recording_pending[at]) |aged| {
+        if (aged.timestamp_us > e.recording_last_timestamp) {
+            rec.commitFrame(aged.frame, aged.timestamp_us) catch {
+                e.recording_dropped += 1;
+            };
+            e.recording_last_timestamp = aged.timestamp_us;
+        } else {
+            rec.abortFrame(aged.frame);
+            e.recording_dropped += 1;
+        }
+        e.recording_pending[at] = null;
+    }
+    if (frame) |live| {
+        e.recording_pending[at] = .{ .frame = live, .timestamp_us = timestamp_us };
+    }
+    e.recording_pending_at +%= 1;
+}
+
+/// Flushes the in-flight tail, finalizes the container, and releases
+/// every recording resource. Returns whether the file finalized.
+fn finishRecording(e: *Engine) bool {
+    var ok = true;
+    if (e.recording) |*rec| {
+        if (e.renderer) |*r| {
+            _ = r.frame();
+            _ = r.frame();
+        }
+        for (0..2) |_| queueRecordingCommit(e, null, 0);
+        rec.finish() catch {
+            ok = false;
+        };
+    } else {
+        ok = false;
+    }
+    var it = e.recording_slots.valueIterator();
+    while (it.next()) |slot| {
+        if (slot.target) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.persistent.deinit();
+    }
+    e.recording_slots.deinit(e.gpa);
+    e.recording_slots = .empty;
+    e.recording = null;
+    e.recording_session = null;
+    e.recording_frame_target = null;
+    e.recording_pending = .{ null, null };
+    e.recording_pending_at = 0;
+    e.recording_last_timestamp = std.math.minInt(i64);
+    return ok;
+}
+
 pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Status {
     const e = engine orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    e.recording_frame_target = null;
+    var recording_frame: ?media_recording.Frame = null;
+    var recording_timestamp: i64 = 0;
     if (session) |s| {
         pollLutLoaders(s, r, s.engine.gpa);
         pollBlendLoaders(s, r, s.engine.gpa);
-    pollMeshFaceLoaders(s, r, s.engine.gpa);
         pollMeshFaceLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
+        if (e.recording != null and e.recording_session == s and !s.capture_requested) {
+            if (s.current) |current| {
+                recording_frame = prepareRecordingFrame(e, r);
+                recording_timestamp = current.desc.timestamp_us;
+            }
+        }
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
             const mirror = current.desc.flags & frame_flag_mirror != 0;
@@ -1247,6 +1385,11 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         }
     } else {
         r.touch();
+    }
+    if (e.recording != null and (recording_frame != null or e.recording_pending[e.recording_pending_at % 2] != null)) {
+        queueRecordingCommit(e, recording_frame, recording_timestamp);
+    } else if (recording_frame) |frame| {
+        e.recording.?.abortFrame(frame);
     }
     _ = r.frame();
     return .ok;
@@ -1352,6 +1495,61 @@ pub export fn goss_engine_capture_photo(engine: ?*Engine, session: ?*Session, ou
     if (out_capacity < encoded.items.len) return .invalid_argument;
     @memcpy(data[0..encoded.items.len], encoded.items);
     return .ok;
+}
+
+/// Harness-facing re-exports of the recording backend's proof surface
+/// (decode-probe and frame export); never part of the C ABI.
+pub const recordingProbe = media_recording.probe;
+pub const recordingExportFrame = media_recording.exportFrame;
+pub const recording_supported = media_recording.supported;
+
+pub const RecordingConfig = extern struct {
+    /// Zero picks the renderer's own output size (rounded down to
+    /// even, as the encoders require).
+    width: u32,
+    height: u32,
+    /// Zero lets the backend pick a rate fitting the dimensions.
+    bitrate_bps: u32,
+    /// 0 = H.264, 1 = HEVC.
+    codec: u32,
+};
+
+/// Starts recording session's rendered frames, effects baked in, into
+/// the file at path. One recording per engine; every subsequent
+/// goss_engine_render_frame of this session appends one video frame at
+/// the frame's own timestamp until goss_engine_recording_stop.
+pub export fn goss_engine_recording_start(engine: ?*Engine, session: ?*Session, path: ?[*]const u8, path_len: usize, config: ?*const RecordingConfig) Status {
+    const e = engine orelse return .invalid_argument;
+    const s = session orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    const p = path orelse return .invalid_argument;
+    if (path_len == 0) return .invalid_argument;
+    if (!media_recording.supported) return .unsupported;
+    if (e.recording != null) return .invalid_argument;
+
+    const cfg: RecordingConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .bitrate_bps = 0, .codec = 0 };
+    const width = (if (cfg.width == 0) @as(u32, r.width) else cfg.width) & ~@as(u32, 1);
+    const height = (if (cfg.height == 0) @as(u32, r.height) else cfg.height) & ~@as(u32, 1);
+    if (width == 0 or height == 0 or cfg.codec > 1) return .invalid_argument;
+
+    e.recording = media_recording.Recording.start(p[0..path_len], .{
+        .width = width,
+        .height = height,
+        .bitrate_bps = cfg.bitrate_bps,
+        .codec = @enumFromInt(cfg.codec),
+    }) catch return .invalid_argument;
+    e.recording_session = s;
+    e.recording_warmups = 0;
+    e.recording_dropped = 0;
+    return .ok;
+}
+
+/// Stops the engine's recording and finalizes the container, flushing
+/// the frames still in flight first.
+pub export fn goss_engine_recording_stop(engine: ?*Engine) Status {
+    const e = engine orelse return .invalid_argument;
+    if (e.recording == null) return .invalid_argument;
+    return if (finishRecording(e)) .ok else .invalid_argument;
 }
 
 pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
