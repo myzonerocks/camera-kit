@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 14u
+#define GOSS_ABI_MINOR 15u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -308,6 +308,12 @@ goss_status goss_engine_recording_start(goss_engine *engine, goss_session *sessi
 /* Stops the engine's recording, flushing frames still in flight and
  * finalizing the container. */
 goss_status goss_engine_recording_stop(goss_engine *engine);
+
+/* Feeds interleaved f32 PCM into the session: the engine's own level
+ * and beat analysis always consumes it (driving the audio.level and
+ * audio.beat trigger signals), and an active recording of this session
+ * muxes it as the audio track where the backend supports audio. */
+goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us);
 
 /* Graph thread. config may be null for defaults. */
 goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);

@@ -92,4 +92,13 @@ extension Engine {
     public func stopRecording() throws {
         try checked(goss_engine_recording_stop(handle))
     }
+
+    /// Feeds interleaved f32 PCM into the session: the engine's level
+    /// and beat analysis drives audio triggers, and an active recording
+    /// muxes it as the audio track.
+    public func submitAudio(session: Session, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32, timestampUs: Int64) throws {
+        try samples.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_submit_audio(session.handle, buffer.baseAddress, frameCount, sampleRate, channels, timestampUs))
+        }
+    }
 }

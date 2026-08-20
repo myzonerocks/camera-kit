@@ -5,6 +5,8 @@
 /// platform window the renderer presents into.
 pub const NativeHandleKind = enum { texture, window };
 pub const native_handle_kind: NativeHandleKind = .texture;
+/// Whether this backend muxes a submitted audio track.
+pub const audio_supported = false;
 
 /// Whether a real backend exists on this target.
 pub const supported = false;
@@ -55,6 +57,16 @@ pub const Recording = struct {
         return error.FrameFailed;
     }
 
+    pub fn submitAudio(recording: *Recording, samples: []const f32, frame_count: u32, sample_rate: u32, channels: u32, timestamp_us: i64) Error!void {
+        _ = recording;
+        _ = samples;
+        _ = frame_count;
+        _ = sample_rate;
+        _ = channels;
+        _ = timestamp_us;
+        return error.FrameFailed;
+    }
+
     pub fn abortFrame(recording: *Recording, frame: Frame) void {
         _ = recording;
         _ = frame;
@@ -82,5 +94,10 @@ pub fn exportFrame(path: []const u8, frame_index: u32, out_bgra: []u8) Error!str
     _ = path;
     _ = frame_index;
     _ = out_bgra;
+    return error.OpenFailed;
+}
+
+pub fn probeAudio(path: []const u8) Error!i64 {
+    _ = path;
     return error.OpenFailed;
 }

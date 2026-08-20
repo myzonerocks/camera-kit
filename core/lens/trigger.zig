@@ -13,6 +13,7 @@ pub const max_depth = 8;
 pub const SignalKind = enum {
     face_blendshape,
     face_present,
+    audio_beat,
     hands_present,
     world_tracking_state,
     audio_level,
@@ -23,7 +24,7 @@ pub const SignalKind = enum {
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap => true,
+        .face_present, .hands_present, .tap, .audio_beat => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param => false,
     };
 }
@@ -74,6 +75,7 @@ pub const Signals = struct {
     hands_present: bool = false,
     world_tracking_state: f64 = 0,
     audio_level: f64 = 0,
+    audio_beat: bool = false,
     tap: bool = false,
     blendshapes: ?*const [face.blendshape_count]f32 = null,
     params: []const f64 = &.{},
@@ -95,6 +97,7 @@ fn readBool(s: Signal, signals: Signals) bool {
         .face_present => signals.face_present,
         .hands_present => signals.hands_present,
         .tap => signals.tap,
+        .audio_beat => signals.audio_beat,
         else => unreachable,
     };
 }
@@ -473,6 +476,9 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "level")) {
             return .{ .kind = .audio_level };
         }
+        if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "beat")) {
+            return .{ .kind = .audio_beat };
+        }
         return self.fail("unknown signal '{s}.{s}'", .{ head, tail });
     }
 };
@@ -636,4 +642,11 @@ test "trailing garbage after a valid expression is rejected" {
     const err = try compileFails("tap tap");
     defer t.allocator.free(err.message);
     try t.expect(std.mem.indexOf(u8, err.message, "trailing") != null);
+}
+
+test "audio.beat compiles as a boolean signal and reads live" {
+    var expr = try compileOk("audio.beat");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .audio_beat = true }));
 }

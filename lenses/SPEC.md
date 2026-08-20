@@ -181,7 +181,8 @@ small closed grammar, parsed once at load time into a typed expression tree
 (no runtime parsing, no `eval`):
 
 - Signal reads: `face.blendshape('name')`, `face.present`, `hands.present`,
-  `world.tracking_state`, `audio.level`, `timer('name')` (seconds since the
+  `world.tracking_state`, `audio.level`, `audio.beat` (true exactly on
+onset hops), `timer('name')` (seconds since the
   timer's last reset, see actions below), `tap`, `param('name')`.
 - Comparisons: `>`, `<`, `>=`, `<=`, `==`, `!=` between a signal and a
   numeric or boolean literal.
