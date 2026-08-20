@@ -2,6 +2,7 @@ package com.gosslens
 
 import android.view.Surface
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 // The Kotlin face of the goss_ ABI. The native names mirror the C surface one
 // to one and carry no logic; Session and Engine below are the idiomatic
@@ -17,6 +18,7 @@ object Gosslens {
     internal external fun nativeInitRenderer(engine: Long, surface: Surface, width: Int, height: Int): Int
     internal external fun nativeResize(engine: Long, width: Int, height: Int)
     internal external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
+    internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
@@ -166,6 +168,24 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
 
     fun renderFrame(session: Session?): Boolean =
         Gosslens.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
+
+    /** Renders like renderFrame and returns the composited output
+     * encoded as PNG bytes, sized by a probe call first. Deterministic:
+     * the same composited pixels, the same bytes. Null when the
+     * renderer is unavailable. */
+    fun capturePhoto(session: Session?): ByteArray? {
+        val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        val probeStatus = Gosslens.nativeCapturePhoto(handle, session?.handle ?: 0L, probe, 0L, info)
+        val needed = info.getLong(0)
+        if (probeStatus == 0 && needed == 0L) return ByteArray(0)
+        if (needed <= 0L) return null
+        val data = ByteBuffer.allocateDirect(needed.toInt())
+        if (Gosslens.nativeCapturePhoto(handle, session?.handle ?: 0L, data, needed, info) != 0) return null
+        val encoded = ByteArray(info.getLong(0).toInt())
+        data.get(encoded)
+        return encoded
+    }
 
     // Idempotent like destroy() everywhere else - a second close() must
     // not hand the native side an already-freed handle.

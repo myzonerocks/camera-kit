@@ -290,6 +290,24 @@ export fn Java_com_gosslens_Gosslens_nativeFacePose(env: *JniEnv, cls: jobject, 
     return @intFromEnum(abi.goss_session_face_pose(sessionFromHandle(session), matrix));
 }
 
+/// info_buffer receives {encoded_len: u64, width: u32, height: u32};
+/// a too-small data buffer still fills it, so the caller can retry
+/// with the exact size (the ABI's own probe contract).
+export fn Java_com_gosslens_Gosslens_nativeCapturePhoto(env: *JniEnv, cls: jobject, engine: i64, session: i64, data_buffer: jobject, data_capacity: i64, info_buffer: jobject) i32 {
+    _ = cls;
+    const info_bytes = getDirectBufferAddress(env, info_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const info: *extern struct { encoded_len: u64, width: u32, height: u32 } = @ptrCast(@alignCast(info_bytes));
+    const data = getDirectBufferAddress(env, data_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var encoded_len: usize = 0;
+    var width: u32 = 0;
+    var height: u32 = 0;
+    const status = abi.goss_engine_capture_photo(engineFromHandle(engine), sessionFromHandle(session), @ptrCast(data), @intCast(data_capacity), &encoded_len, &width, &height);
+    info.encoded_len = encoded_len;
+    info.width = width;
+    info.height = height;
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
     _ = path_len;
