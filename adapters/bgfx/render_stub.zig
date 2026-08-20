@@ -195,6 +195,13 @@ pub const Renderer = struct {
         _ = step;
     }
 
+    pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = grade;
+    }
+
     pub fn submitBeautyFace(r: *Renderer, view_id: u16, input_texture: TextureHandle, mean_texture: TextureHandle, lookup_gray: TextureHandle, lookup_origin: TextureHandle, lookup_skin: TextureHandle, lookup_custom: TextureHandle, smooth_amount: f32, whiten_amount: f32) void {
         _ = r;
         _ = view_id;
@@ -470,6 +477,10 @@ pub const Renderer = struct {
     }
 
     pub fn loadBlurProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadGradeProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

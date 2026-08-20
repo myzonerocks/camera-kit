@@ -3949,6 +3949,10 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // different u_blurStep values the caller submits it with, same
         // program both times.
         .{ .name = "fs_blur_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // grade.pass's own fixed fragment shader: a parametric color
+        // grade (exposure, contrast, saturation, temperature), same
+        // reasoning as fs_lut_pass above.
+        .{ .name = "fs_grade_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // beauty.face's own fixed fragment shader: smooth and whiten,
         // same reasoning as fs_lut_pass above.
         .{ .name = "fs_beauty_face", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },

@@ -101,6 +101,7 @@ pub const Renderer = struct {
     lut_program: c.bgfx_program_handle_t,
     blend_program: c.bgfx_program_handle_t,
     blur_program: c.bgfx_program_handle_t,
+    grade_program: c.bgfx_program_handle_t,
     beauty_face_program: c.bgfx_program_handle_t,
     beauty_reshape_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
@@ -135,6 +136,7 @@ pub const Renderer = struct {
     tex_lookup_custom: c.bgfx_uniform_handle_t,
     tex_makeup: c.bgfx_uniform_handle_t,
     blur_step_uniform: c.bgfx_uniform_handle_t,
+    grade_params_uniform: c.bgfx_uniform_handle_t,
     beauty_params_uniform: c.bgfx_uniform_handle_t,
     reshape_params_uniform: c.bgfx_uniform_handle_t,
     makeup_params_uniform: c.bgfx_uniform_handle_t,
@@ -262,6 +264,7 @@ pub const Renderer = struct {
         const lut_program = try loadLutProgram();
         const blend_program = try loadBlendProgram();
         const blur_program = try loadBlurProgram();
+        const grade_program = try loadGradeProgram();
         const beauty_face_program = try loadBeautyFaceProgram();
         const beauty_reshape_program = try loadBeautyReshapeProgram();
         const makeup_program = try loadMakeupProgram();
@@ -316,6 +319,7 @@ pub const Renderer = struct {
             .lut_program = lut_program,
             .blend_program = blend_program,
             .blur_program = blur_program,
+            .grade_program = grade_program,
             .beauty_face_program = beauty_face_program,
             .beauty_reshape_program = beauty_reshape_program,
             .makeup_program = makeup_program,
@@ -340,6 +344,7 @@ pub const Renderer = struct {
             .tex_lookup_custom = c.bgfx_create_uniform("s_texLookupCustom", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_makeup = c.bgfx_create_uniform("s_texMakeup", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .blur_step_uniform = c.bgfx_create_uniform("u_blurStep", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .beauty_params_uniform = c.bgfx_create_uniform("u_beautyParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .reshape_params_uniform = c.bgfx_create_uniform("u_reshapeParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -425,6 +430,18 @@ pub const Renderer = struct {
             c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_blur_pass_spirv),
             c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_blur_pass_essl),
             c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_blur_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// grade.pass's own fixed parametric-grade program every lens shares -
+    /// kit-authored like lut_program, same reasoning.
+    pub fn loadGradeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_grade_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_grade_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_grade_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_grade_pass_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -519,6 +536,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_lookup_custom);
         c.bgfx_destroy_uniform(r.tex_makeup);
         c.bgfx_destroy_uniform(r.blur_step_uniform);
+        c.bgfx_destroy_uniform(r.grade_params_uniform);
         c.bgfx_destroy_uniform(r.beauty_params_uniform);
         c.bgfx_destroy_uniform(r.reshape_params_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
@@ -530,6 +548,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.lut_program);
         c.bgfx_destroy_program(r.blend_program);
         c.bgfx_destroy_program(r.blur_program);
+        c.bgfx_destroy_program(r.grade_program);
         c.bgfx_destroy_program(r.beauty_face_program);
         c.bgfx_destroy_program(r.beauty_reshape_program);
         c.bgfx_destroy_program(r.makeup_program);
@@ -862,6 +881,18 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.blur_step_uniform, &step_vec4, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.blur_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws one lens grade.pass node as a full-screen pass into view_id:
+    /// the frame on unit 0, its four grade params (exposure, contrast,
+    /// saturation, temperature) in u_grade, the one fixed grade_program
+    /// every grade.pass node shares.
+    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.grade_params_uniform, &grade, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.grade_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one beauty.face node (smooth+whiten) as a full-screen pass

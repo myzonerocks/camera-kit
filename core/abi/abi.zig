@@ -446,6 +446,10 @@ pub const Session = struct {
     /// One bgfx texture per blend.pass node whose background finished
     /// loading.
     blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// The parametric color grade of each spliced grade.pass node, packed
+    /// as (exposure, contrast, saturation, temperature) - resolved once at
+    /// activation since grade.pass ships no asset and needs no loader.
+    grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
@@ -874,6 +878,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A blur pass needs no loaded resource - the blur program is
             // built in - so it is always ready to draw.
             .blur => true,
+            // A grade pass ships no asset either; its params are resolved
+            // at activation, so it is ready once they are in place.
+            .grade => s.grade_params.contains(entry.graph_index),
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -1000,6 +1007,21 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, rect_w, rect_h) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 const step: [2]f32 = .{ 1.5 / @as(f32, @floatFromInt(rect_w)), 1.5 / @as(f32, @floatFromInt(rect_h)) };
                 r.submitBlurPass(view_id, input_texture, step);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .grade => {
+                const grade = s.grade_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitGradePass(view_id, input_texture, grade);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -1353,6 +1375,7 @@ pub fn destroySession(session: *Session) void {
     destroyMeshFaceState(session);
     session.blend_loaders.deinit(session.engine.gpa);
     session.blend_textures.deinit(session.engine.gpa);
+    session.grade_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
     session.model_face_anchors.deinit(session.engine.gpa);
@@ -2750,6 +2773,8 @@ fn destroyBlendState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
     }
     session.blend_textures.clearRetainingCapacity();
+    // grade.pass holds only plain params, no GPU resource to free.
+    session.grade_params.clearRetainingCapacity();
 }
 
 fn destroyMeshFaceState(session: *Session) void {
@@ -3006,6 +3031,18 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         if (pass.mask_channel) |channel| {
             session.shader_masks.put(gpa, pass.graph_index, channel) catch {};
         }
+    }
+}
+
+/// Resolves every spliced grade.pass node's parametric grade into
+/// session.grade_params, once at activation - grade.pass ships no asset
+/// and runs no loader, so its params are ready the moment the chain is.
+fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const grades = try lens.gradePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(grades);
+    for (grades) |g| {
+        session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
     }
 }
 
@@ -3336,6 +3373,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createBlendLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createModelLoaders(session, gpa, bundle_path);
+    try createGradeParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
 }

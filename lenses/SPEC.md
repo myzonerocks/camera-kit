@@ -193,6 +193,15 @@ program is kit-authored and fixed - so it is always ready and never
 degrades. Place it anywhere in the chain; it blurs its input and hands the
 softened frame to the next node.
 
+A `"grade.pass"` node is a parametric color grade post-effect. It carries a
+`"grade": {"exposure", "contrast", "saturation", "temperature"}` block and
+shifts whatever frame reaches it - exposure in stops, contrast and
+saturation as multipliers around 1, temperature a warm/cool push - then
+hands the graded frame down the chain. Every field is optional and defaults
+to the identity, so a `grade.pass` with an empty block leaves the frame
+untouched. Like `blur.pass` it ships no asset and is always ready; it lets a
+lens warm, cool, brighten or push contrast without authoring a LUT.
+
 A `"script"` node carries an inline `"source"` string of JavaScript that
 defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers

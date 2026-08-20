@@ -89,6 +89,16 @@ pub const ParticleField = struct {
     lifetime: f32,
 };
 
+pub const GradeField = struct {
+    /// A grade.pass node's parametric color grade. Defaults are the
+    /// identity (nothing changes): exposure in stops, contrast and
+    /// saturation as multipliers around 1, temperature a warm/cool shift.
+    exposure: f32 = 0,
+    contrast: f32 = 1,
+    saturation: f32 = 1,
+    temperature: f32 = 0,
+};
+
 pub const PhysicsBody = struct {
     shape: enum { box, sphere },
     /// Box half extents; a sphere reads its radius from [0].
@@ -123,6 +133,8 @@ pub const Node = struct {
     hair: ?HairField = null,
     /// Set when the node is a particle fountain instead of a glb.
     particles: ?ParticleField = null,
+    /// Set only on a grade.pass node: its parametric color grade.
+    grade: ?GradeField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -688,6 +700,23 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(pmark);
         }
+        var grade_field: ?GradeField = null;
+        if (getField(object, "grade")) |gv| {
+            const gmark = path.push("grade");
+            if (!std.mem.eql(u8, node_type, "grade.pass")) {
+                try diags.add(path.slice(), "grade is a grade.pass field, found it on '{s}'", .{node_type});
+            } else if (gv != .object) {
+                try diags.add(path.slice(), "grade must be an object", .{});
+            } else {
+                var field: GradeField = .{};
+                if (getField(gv.object, "exposure")) |v| field.exposure = @floatCast(numberOf(v) orelse field.exposure);
+                if (getField(gv.object, "contrast")) |v| field.contrast = @floatCast(numberOf(v) orelse field.contrast);
+                if (getField(gv.object, "saturation")) |v| field.saturation = @floatCast(numberOf(v) orelse field.saturation);
+                if (getField(gv.object, "temperature")) |v| field.temperature = @floatCast(numberOf(v) orelse field.temperature);
+                grade_field = field;
+            }
+            path.pop(gmark);
+        }
         if (getField(object, "hair")) |hair_value| {
             const hair_mark = path.push("hair");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -889,6 +918,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .cloth = cloth_field,
             .hair = hair_field,
             .particles = particle_field,
+            .grade = grade_field,
             .script = script_source,
         });
     }
