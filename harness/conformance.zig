@@ -1338,6 +1338,47 @@ fn proveBloom(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the session lifecycle leaks no memory: many activate/tick/destroy
+/// cycles of the adapter-heavy lenses (blur, grade, bloom, audio, script) run
+/// on a headless engine under a leak-checking allocator, which reports no leak
+/// only if every session and the engine free everything - a phone-heat gate.
+fn proveNoLeaks(gpa: std.mem.Allocator) !bool {
+    _ = gpa;
+    const leak_lenses = [_][]const u8{
+        ".lens-packages/soft-blur",
+        ".lens-packages/warm-grade",
+        ".lens-packages/glow-bloom",
+        ".lens-packages/sound-beat",
+        ".lens-packages/script-param",
+    };
+    var check: std.heap.DebugAllocator(.{}) = .init;
+    const leak_gpa = check.allocator();
+    {
+        const engine = try abi.createEngine(leak_gpa, .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+        defer abi.destroyEngine(engine);
+        var cycle: usize = 0;
+        while (cycle < 32) : (cycle += 1) {
+            for (leak_lenses) |pkg| {
+                const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+                defer abi.destroySession(session);
+                _ = abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len);
+                var signals = std.mem.zeroes(abi.LensSignals);
+                signals.has_face = true;
+                var t: u32 = 0;
+                while (t < 4) : (t += 1) {
+                    _ = abi.goss_session_tick_lens(session, 33_333, &signals);
+                }
+            }
+        }
+    }
+    if (check.deinit() == .leak) {
+        std.debug.print("conformance: FAIL the session lifecycle leaked memory across activate/tick/destroy cycles\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF repeated lens activate/tick/destroy cycles leak no memory (blur, grade, bloom, audio, script)\n", .{});
+    return true;
+}
+
 /// Proves lens strand hair: the strands hang and settle deterministically
 /// across frames (the head pose drives them live on device; here a fixed
 /// pose gives a bit-stable host proof), settled differing from initial.
@@ -1738,5 +1779,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;
+    if (!try proveNoLeaks(gpa)) return 1;
     return 0;
 }
