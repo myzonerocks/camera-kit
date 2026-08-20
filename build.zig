@@ -1389,11 +1389,26 @@ fn photoModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 // honestly absent rather than pretending.
 fn recordingModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const apple = target.result.os.tag == .macos or target.result.os.tag == .ios;
+    const android = target.result.abi.isAndroid();
+    const root = if (apple)
+        "adapters/media/recording.zig"
+    else if (android)
+        "adapters/media/recording_android.zig"
+    else
+        "adapters/media/recording_stub.zig";
     const module = b.createModule(.{
-        .root_source_file = b.path(if (apple) "adapters/media/recording.zig" else "adapters/media/recording_stub.zig"),
+        .root_source_file = b.path(root),
         .target = target,
         .optimize = optimize,
     });
+    if (android) {
+        // Translation-only sysroot includes: link_libc here would mix
+        // zig's bundled bionic headers with the sysroot's and conflict;
+        // libc itself links at the shared-library level.
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
+        module.linkSystemLibrary("mediandk", .{});
+        module.linkSystemLibrary("android", .{});
+    }
     if (apple) {
         module.addCSourceFile(.{
             .file = b.path("adapters/media/recording_apple.mm"),
@@ -2075,7 +2090,13 @@ fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     const module = b.createModule(.{ .target = yuv_target, .optimize = optimize });
     module.link_libc = true;
     module.link_libcpp = true;
-    if (target.result.abi.isAndroid()) module.pic = true;
+    if (target.result.abi.isAndroid()) {
+        module.pic = true;
+        // The pinned libyuv pulls libc headers gpupixel's older bundled
+        // copy never did; like every other android C++ module, it needs
+        // the NDK sysroot includes.
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
+    }
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     module.addIncludePath(b.path(b.fmt("{s}/include", .{root})));
     var yuv_sources: std.ArrayList([]const u8) = .empty;

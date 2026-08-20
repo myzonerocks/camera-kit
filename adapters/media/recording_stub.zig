@@ -1,6 +1,11 @@
 //! Recording for targets whose backend has not landed: same surface,
 //! every operation reports the capability honestly absent.
 
+/// How the vended native handle binds: a sampleable texture, or a
+/// platform window the renderer presents into.
+pub const NativeHandleKind = enum { texture, window };
+pub const native_handle_kind: NativeHandleKind = .texture;
+
 /// Whether a real backend exists on this target.
 pub const supported = false;
 
