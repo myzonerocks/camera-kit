@@ -3953,6 +3953,11 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // grade (exposure, contrast, saturation, temperature), same
         // reasoning as fs_lut_pass above.
         .{ .name = "fs_grade_pass", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // bloom.pass's two fixed fragment shaders: a bright-pass extract
+        // and an additive composite, run either side of the shared
+        // separable blur, same reasoning as fs_lut_pass above.
+        .{ .name = "fs_bloom_extract", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        .{ .name = "fs_bloom_composite", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
         // beauty.face's own fixed fragment shader: smooth and whiten,
         // same reasoning as fs_lut_pass above.
         .{ .name = "fs_beauty_face", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },

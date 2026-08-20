@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, model_gltf, mesh_face };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, grade_pass, bloom_pass, model_gltf, mesh_face };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -49,6 +49,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
     if (std.mem.eql(u8, type_str, "blur.pass")) return .blur_pass;
     if (std.mem.eql(u8, type_str, "grade.pass")) return .grade_pass;
+    if (std.mem.eql(u8, type_str, "bloom.pass")) return .bloom_pass;
     if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
     return null;
 }
@@ -73,7 +74,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .model_gltf, .mesh_face => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .grade_pass, .bloom_pass, .model_gltf, .mesh_face => &.{},
     };
 }
 
@@ -107,6 +108,8 @@ const LensNode = struct {
     particles: ?manifest.ParticleField = null,
     /// .grade_pass only: the node's parametric color grade.
     grade: ?manifest.GradeField = null,
+    /// .bloom_pass only: the node's glow threshold and intensity.
+    bloom: ?manifest.BloomField = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -172,7 +175,14 @@ pub const GradePassNode = struct {
     grade: [4]f32,
 };
 
-pub const PassKind = enum { shader, lut, blend, blur, grade, model, mesh };
+/// One bloom.pass node ready for the caller to draw - which graph node it
+/// is, and its glow packed as (threshold, intensity, 0, 0) for u_bloom.
+pub const BloomPassNode = struct {
+    graph_index: graph.NodeIndex,
+    bloom: [4]f32,
+};
+
+pub const PassKind = enum { shader, lut, blend, blur, grade, bloom, model, mesh };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -313,6 +323,21 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every bloom.pass node this lens spliced, in execution order, each
+    /// carrying its glow params - mirrors gradePassNodes.
+    pub fn bloomPassNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]BloomPassNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(BloomPassNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .bloom_pass) continue;
+            const bl = node.bloom orelse manifest.BloomField{};
+            try out.append(gpa, .{ .graph_index = node.graph_index, .bloom = .{ bl.threshold, bl.intensity, 0, 0 } });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every model.gltf node this lens spliced, in the graph's real
     /// execution order - mirrors shaderPassNodes/lutPassNodes/
     /// blendPassNodes exactly, one more node type over.
@@ -359,6 +384,7 @@ pub const Lens = struct {
                 .blend_pass => .blend,
                 .blur_pass => .blur,
                 .grade_pass => .grade,
+                .bloom_pass => .bloom,
                 .model_gltf => .model,
                 .mesh_face => .mesh,
                 else => continue,
@@ -523,6 +549,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .hair = if (node_type == .model_gltf) node.hair else null,
             .particles = if (node_type == .model_gltf) node.particles else null,
             .grade = if (node_type == .grade_pass) node.grade else null,
+            .bloom = if (node_type == .bloom_pass) node.bloom else null,
         };
 
         for (node.inputs) |input| {

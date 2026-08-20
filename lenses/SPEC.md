@@ -202,6 +202,13 @@ to the identity, so a `grade.pass` with an empty block leaves the frame
 untouched. Like `blur.pass` it ships no asset and is always ready; it lets a
 lens warm, cool, brighten or push contrast without authoring a LUT.
 
+A `"bloom.pass"` node is a glow post-effect. It carries a `"bloom":
+{"threshold", "intensity"}` block: it extracts the frame's highlights - what
+sits above `threshold` in luma - blurs them, and adds that blurred glow back
+over the frame scaled by `intensity`, so bright areas bleed a soft halo.
+Both fields are optional with engine defaults. Like `blur.pass` and
+`grade.pass` it ships no asset and is always ready.
+
 A `"script"` node carries an inline `"source"` string of JavaScript that
 defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers

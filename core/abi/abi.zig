@@ -185,6 +185,11 @@ pub const Engine = struct {
     /// never per frame - only one chain is ever in flight at a time, so
     /// two targets are enough regardless of how many passes a lens has.
     chain_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
+    /// A bloom.pass node's own scratch pair, sized alongside chain_targets:
+    /// the bright pass extracts into one, blurs H into the other and V back,
+    /// leaving the chain's two ping-pong targets free to hold the frame
+    /// being read and the composite being written.
+    bloom_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
     chain_width: u16 = 0,
     chain_height: u16 = 0,
     /// Dedicated target for goss_engine_capture_frame - separate from
@@ -450,6 +455,9 @@ pub const Session = struct {
     /// as (exposure, contrast, saturation, temperature) - resolved once at
     /// activation since grade.pass ships no asset and needs no loader.
     grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// The glow of each spliced bloom.pass node, packed as (threshold,
+    /// intensity, 0, 0) - resolved once at activation like grade_params.
+    bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
@@ -515,6 +523,9 @@ pub fn destroyEngine(engine: *Engine) void {
     for (engine.chain_targets) |slot| {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
     }
+    for (engine.bloom_targets) |slot| {
+        if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
+    }
     if (engine.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (engine.capture_staging) |staging| {
         if (engine.renderer) |*r| r.destroyTexture(staging);
@@ -531,6 +542,10 @@ pub fn destroyEngine(engine: *Engine) void {
 fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
     if (e.chain_width == width and e.chain_height == height and e.chain_targets[0] != null) return;
     for (&e.chain_targets) |*slot| {
+        if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+    }
+    for (&e.bloom_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
@@ -881,6 +896,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // A grade pass ships no asset either; its params are resolved
             // at activation, so it is ready once they are in place.
             .grade => s.grade_params.contains(entry.graph_index),
+            // Bloom is the same: no asset, params resolved at activation.
+            .bloom => s.bloom_params.contains(entry.graph_index),
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -1022,6 +1039,47 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitGradePass(view_id, input_texture, grade);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .bloom => {
+                const bloom = s.bloom_params.get(entry.graph_index) orelse continue;
+                const scratch0 = e.bloom_targets[0] orelse continue;
+                const scratch1 = e.bloom_targets[1] orelse continue;
+                drawn += 1;
+                const is_final = drawn == ready_count;
+                const base_texture = input_texture;
+
+                // Bright pass, then a separable blur (H then V) through the
+                // two bloom scratch targets - all at working resolution,
+                // never tiled, leaving the frame in base_texture intact.
+                r.tile = null;
+                var bloom_view = next_view_id;
+                next_view_id += 1;
+                render.Renderer.setViewTarget(bloom_view, scratch0, width, height);
+                r.submitBloomExtract(bloom_view, base_texture, bloom);
+
+                bloom_view = next_view_id;
+                next_view_id += 1;
+                render.Renderer.setViewTarget(bloom_view, scratch1, width, height);
+                r.submitBlurPass(bloom_view, scratch0.texture, .{ 2.0 / @as(f32, @floatFromInt(width)), 0.0 });
+
+                bloom_view = next_view_id;
+                next_view_id += 1;
+                render.Renderer.setViewTarget(bloom_view, scratch0, width, height);
+                r.submitBlurPass(bloom_view, scratch1.texture, .{ 0.0, 2.0 / @as(f32, @floatFromInt(height)) });
+
+                // Composite the blurred glow back over the base, honoring
+                // is_final's target, rect, and capture tile like every
+                // other chain stage's final draw.
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitBloomComposite(view_id, base_texture, scratch0.texture, bloom);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -1376,6 +1434,7 @@ pub fn destroySession(session: *Session) void {
     session.blend_loaders.deinit(session.engine.gpa);
     session.blend_textures.deinit(session.engine.gpa);
     session.grade_params.deinit(session.engine.gpa);
+    session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
     session.model_face_anchors.deinit(session.engine.gpa);
@@ -2773,8 +2832,9 @@ fn destroyBlendState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
     }
     session.blend_textures.clearRetainingCapacity();
-    // grade.pass holds only plain params, no GPU resource to free.
+    // grade.pass and bloom.pass hold only plain params, nothing to free.
     session.grade_params.clearRetainingCapacity();
+    session.bloom_params.clearRetainingCapacity();
 }
 
 fn destroyMeshFaceState(session: *Session) void {
@@ -3043,6 +3103,17 @@ fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
     defer gpa.free(grades);
     for (grades) |g| {
         session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
+    }
+}
+
+/// Resolves every spliced bloom.pass node's glow into session.bloom_params,
+/// once at activation - mirrors createGradeParams, one node type over.
+fn createBloomParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const blooms = try lens.bloomPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(blooms);
+    for (blooms) |b| {
+        session.bloom_params.put(gpa, b.graph_index, b.bloom) catch {};
     }
 }
 
@@ -3374,6 +3445,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createModelLoaders(session, gpa, bundle_path);
     try createGradeParams(session, gpa);
+    try createBloomParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
 }

@@ -1268,6 +1268,76 @@ fn proveGrade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a bloom.pass post-effect: the bright pass, separable blur and
+/// additive composite bleed a glow from the highlights, so a bloomed
+/// capture differs from the plain one and is bit-stable across runs (no
+/// asset, ready at activation).
+fn proveBloom(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_]?[]const u8{ null, ".lens-packages/glow-bloom", ".lens-packages/glow-bloom" };
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |lens_pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (lens_pkg) |pkg| {
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL bloom lens activation\n", .{});
+                return false;
+            }
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL bloom is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL bloom.pass did not change the frame\n", .{});
+        return false;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[1], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-glow-bloom.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF a bloom.pass glows the frame's highlights deterministically, differing from the plain capture\n", .{});
+    return true;
+}
+
 /// Proves lens strand hair: the strands hang and settle deterministically
 /// across frames (the head pose drives them live on device; here a fixed
 /// pose gives a bit-stable host proof), settled differing from initial.
@@ -1667,5 +1737,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveAudio(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
+    if (!try proveBloom(gpa, engine)) return 1;
     return 0;
 }

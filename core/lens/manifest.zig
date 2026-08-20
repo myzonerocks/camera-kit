@@ -99,6 +99,13 @@ pub const GradeField = struct {
     temperature: f32 = 0,
 };
 
+pub const BloomField = struct {
+    /// A bloom.pass node's glow: threshold is the luma above which a pixel
+    /// blooms, intensity how strongly the blurred highlights add back.
+    threshold: f32 = 0.7,
+    intensity: f32 = 0.6,
+};
+
 pub const PhysicsBody = struct {
     shape: enum { box, sphere },
     /// Box half extents; a sphere reads its radius from [0].
@@ -135,6 +142,8 @@ pub const Node = struct {
     particles: ?ParticleField = null,
     /// Set only on a grade.pass node: its parametric color grade.
     grade: ?GradeField = null,
+    /// Set only on a bloom.pass node: its glow threshold and intensity.
+    bloom: ?BloomField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -717,6 +726,21 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             }
             path.pop(gmark);
         }
+        var bloom_field: ?BloomField = null;
+        if (getField(object, "bloom")) |bv| {
+            const bmark = path.push("bloom");
+            if (!std.mem.eql(u8, node_type, "bloom.pass")) {
+                try diags.add(path.slice(), "bloom is a bloom.pass field, found it on '{s}'", .{node_type});
+            } else if (bv != .object) {
+                try diags.add(path.slice(), "bloom must be an object", .{});
+            } else {
+                var field: BloomField = .{};
+                if (getField(bv.object, "threshold")) |v| field.threshold = @floatCast(numberOf(v) orelse field.threshold);
+                if (getField(bv.object, "intensity")) |v| field.intensity = @floatCast(numberOf(v) orelse field.intensity);
+                bloom_field = field;
+            }
+            path.pop(bmark);
+        }
         if (getField(object, "hair")) |hair_value| {
             const hair_mark = path.push("hair");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -919,6 +943,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .hair = hair_field,
             .particles = particle_field,
             .grade = grade_field,
+            .bloom = bloom_field,
             .script = script_source,
         });
     }

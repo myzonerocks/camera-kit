@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.glow-bloom",
+  "version": "1.0.0",
+  "display_name": "Glow Bloom",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "glow", "type": "bloom.pass", "inputs": {"frame": "camera"}, "params": {}, "bloom": {"threshold": 0.6, "intensity": 0.8}}
+  ],
+  "triggers": []
+}

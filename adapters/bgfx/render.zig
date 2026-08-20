@@ -102,6 +102,8 @@ pub const Renderer = struct {
     blend_program: c.bgfx_program_handle_t,
     blur_program: c.bgfx_program_handle_t,
     grade_program: c.bgfx_program_handle_t,
+    bloom_extract_program: c.bgfx_program_handle_t,
+    bloom_composite_program: c.bgfx_program_handle_t,
     beauty_face_program: c.bgfx_program_handle_t,
     beauty_reshape_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
@@ -137,6 +139,8 @@ pub const Renderer = struct {
     tex_makeup: c.bgfx_uniform_handle_t,
     blur_step_uniform: c.bgfx_uniform_handle_t,
     grade_params_uniform: c.bgfx_uniform_handle_t,
+    bloom_params_uniform: c.bgfx_uniform_handle_t,
+    tex_bloom: c.bgfx_uniform_handle_t,
     beauty_params_uniform: c.bgfx_uniform_handle_t,
     reshape_params_uniform: c.bgfx_uniform_handle_t,
     makeup_params_uniform: c.bgfx_uniform_handle_t,
@@ -265,6 +269,8 @@ pub const Renderer = struct {
         const blend_program = try loadBlendProgram();
         const blur_program = try loadBlurProgram();
         const grade_program = try loadGradeProgram();
+        const bloom_extract_program = try loadBloomExtractProgram();
+        const bloom_composite_program = try loadBloomCompositeProgram();
         const beauty_face_program = try loadBeautyFaceProgram();
         const beauty_reshape_program = try loadBeautyReshapeProgram();
         const makeup_program = try loadMakeupProgram();
@@ -320,6 +326,8 @@ pub const Renderer = struct {
             .blend_program = blend_program,
             .blur_program = blur_program,
             .grade_program = grade_program,
+            .bloom_extract_program = bloom_extract_program,
+            .bloom_composite_program = bloom_composite_program,
             .beauty_face_program = beauty_face_program,
             .beauty_reshape_program = beauty_reshape_program,
             .makeup_program = makeup_program,
@@ -345,6 +353,8 @@ pub const Renderer = struct {
             .tex_makeup = c.bgfx_create_uniform("s_texMakeup", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .blur_step_uniform = c.bgfx_create_uniform("u_blurStep", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .bloom_params_uniform = c.bgfx_create_uniform("u_bloom", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .tex_bloom = c.bgfx_create_uniform("s_texBloom", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .beauty_params_uniform = c.bgfx_create_uniform("u_beautyParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .reshape_params_uniform = c.bgfx_create_uniform("u_reshapeParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
@@ -446,6 +456,30 @@ pub const Renderer = struct {
         };
     }
 
+    /// bloom.pass's bright-extract program every lens shares - kit-authored
+    /// like lut_program, same reasoning.
+    pub fn loadBloomExtractProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_bloom_extract_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_bloom_extract_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_bloom_extract_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_bloom_extract_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// bloom.pass's additive-composite program every lens shares -
+    /// kit-authored like lut_program, same reasoning.
+    pub fn loadBloomCompositeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_bloom_composite_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_bloom_composite_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_bloom_composite_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_bloom_composite_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// The one fixed beauty.face program every lens shares - kit-authored
     /// like lut_program, same reasoning.
     pub fn loadBeautyFaceProgram() !c.bgfx_program_handle_t {
@@ -537,6 +571,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_makeup);
         c.bgfx_destroy_uniform(r.blur_step_uniform);
         c.bgfx_destroy_uniform(r.grade_params_uniform);
+        c.bgfx_destroy_uniform(r.bloom_params_uniform);
+        c.bgfx_destroy_uniform(r.tex_bloom);
         c.bgfx_destroy_uniform(r.beauty_params_uniform);
         c.bgfx_destroy_uniform(r.reshape_params_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
@@ -549,6 +585,8 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.blend_program);
         c.bgfx_destroy_program(r.blur_program);
         c.bgfx_destroy_program(r.grade_program);
+        c.bgfx_destroy_program(r.bloom_extract_program);
+        c.bgfx_destroy_program(r.bloom_composite_program);
         c.bgfx_destroy_program(r.beauty_face_program);
         c.bgfx_destroy_program(r.beauty_reshape_program);
         c.bgfx_destroy_program(r.makeup_program);
@@ -893,6 +931,29 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.grade_params_uniform, &grade, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, r.grade_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// bloom.pass's bright-extract stage into view_id: the frame on unit 0,
+    /// the bloom params (threshold, intensity) in u_bloom, writing only the
+    /// highlights that clear the threshold into the bloom scratch target.
+    pub fn submitBloomExtract(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.bloom_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.bloom_extract_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// bloom.pass's composite stage into view_id: the original frame on
+    /// unit 0, the blurred bright pass on unit 1, added back over the base
+    /// scaled by intensity (u_bloom.y).
+    pub fn submitBloomComposite(r: *Renderer, view_id: c.bgfx_view_id_t, base_texture: c.bgfx_texture_handle_t, bloom_texture: c.bgfx_texture_handle_t, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, base_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_bloom, bloom_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.bloom_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.bloom_composite_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one beauty.face node (smooth+whiten) as a full-screen pass

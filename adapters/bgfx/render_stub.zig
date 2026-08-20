@@ -202,6 +202,21 @@ pub const Renderer = struct {
         _ = grade;
     }
 
+    pub fn submitBloomExtract(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+    }
+
+    pub fn submitBloomComposite(r: *Renderer, view_id: u16, base_texture: TextureHandle, bloom_texture: TextureHandle, params: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = base_texture;
+        _ = bloom_texture;
+        _ = params;
+    }
+
     pub fn submitBeautyFace(r: *Renderer, view_id: u16, input_texture: TextureHandle, mean_texture: TextureHandle, lookup_gray: TextureHandle, lookup_origin: TextureHandle, lookup_skin: TextureHandle, lookup_custom: TextureHandle, smooth_amount: f32, whiten_amount: f32) void {
         _ = r;
         _ = view_id;
@@ -481,6 +496,14 @@ pub const Renderer = struct {
     }
 
     pub fn loadGradeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadBloomExtractProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadBloomCompositeProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 
