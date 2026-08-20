@@ -154,6 +154,11 @@ pub const Renderer = struct {
     yuv_uniform: c.bgfx_uniform_handle_t,
     upload_cache: ?UploadCache = null,
     rgba_upload_cache: ?RgbaUploadCache = null,
+    /// The tile a capture is compositing, or null for a whole frame. When
+    /// set, the final full-screen pass samples only this tile's UV span, so
+    /// a tile rendered into a small target is byte-identical to that region
+    /// of one full-size render - what lets a capture exceed the texture cap.
+    tile: ?Tile = null,
 
     /// Web/wasm renderer choice: WebGPU when this build has it compiled
     /// in, auto-select (OpenGLES/WebGL2) otherwise. Queries bgfx's own
@@ -691,11 +696,19 @@ pub const Renderer = struct {
         c.bgfx_alloc_transient_vertex_buffer(&tvb, 4, &r.layout);
         c.bgfx_alloc_transient_index_buffer(&tib, 6, false);
 
+        // A tile restricts the sampled UV to its region of the virtual
+        // output; the quad still fills the tile target. Each output pixel
+        // samples the identical UV whether tiled or whole. v0 is the top
+        // edge, v1 the bottom, matching the layout below.
+        const uv_l: f32 = if (r.tile) |tl| tl.u0 else 0.0;
+        const uv_r: f32 = if (r.tile) |tl| tl.u1 else 1.0;
+        const uv_top: f32 = if (r.tile) |tl| tl.v0 else 0.0;
+        const uv_bot: f32 = if (r.tile) |tl| tl.v1 else 1.0;
         const verts: [*][5]f32 = @ptrCast(@alignCast(tvb.data));
-        verts[0] = .{ -1.0, -1.0, 0.0, 0.0, 1.0 };
-        verts[1] = .{ 1.0, -1.0, 0.0, 1.0, 1.0 };
-        verts[2] = .{ 1.0, 1.0, 0.0, 1.0, 0.0 };
-        verts[3] = .{ -1.0, 1.0, 0.0, 0.0, 0.0 };
+        verts[0] = .{ -1.0, -1.0, 0.0, uv_l, uv_bot };
+        verts[1] = .{ 1.0, -1.0, 0.0, uv_r, uv_bot };
+        verts[2] = .{ 1.0, 1.0, 0.0, uv_r, uv_top };
+        verts[3] = .{ -1.0, 1.0, 0.0, uv_l, uv_top };
         const idx: [*]u16 = @ptrCast(@alignCast(tib.data));
         for ([6]u16{ 0, 1, 2, 0, 2, 3 }, 0..) |v, i| idx[i] = v;
 
@@ -767,6 +780,17 @@ pub const Renderer = struct {
     pub fn destroyOffscreenTarget(target: OffscreenTarget) void {
         if (target.framebuffer.idx != invalid_handle) c.bgfx_destroy_frame_buffer(target.framebuffer);
     }
+
+    /// One tile of a larger capture output: the UV sub-rect a full-screen
+    /// pass samples (u0,v0 top-left, u1,v1 bottom-right). An exact remap of
+    /// the whole-frame UVs, so a tile is byte-identical to the same pixels
+    /// of a single full-size render.
+    pub const Tile = struct {
+        u0: f32,
+        v0: f32,
+        u1: f32,
+        v1: f32,
+    };
 
     /// Wraps an existing texture handle (typically one wrapExternalRenderTarget
     /// just produced, over a platform-shared surface) as a render target
