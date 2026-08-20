@@ -53,6 +53,7 @@ pub const Renderer = struct {
     zero_mask_texture: TextureHandle = .{},
     width: u32 = 0,
     height: u32 = 0,
+    tile: ?Tile = null,
 
     pub fn init(gpa: std.mem.Allocator, options: InitOptions) !Renderer {
         _ = gpa;
@@ -462,6 +463,13 @@ pub const Renderer = struct {
     }
 
     pub const OffscreenTarget = struct { texture: TextureHandle = .{} };
+
+    pub const Tile = struct {
+        u0: f32,
+        v0: f32,
+        u1: f32,
+        v1: f32,
+    };
 
     pub fn createOffscreenTarget(width: u16, height: u16) !OffscreenTarget {
         _ = width;

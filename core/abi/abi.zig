@@ -297,6 +297,15 @@ pub const Session = struct {
     /// chain, so a still is not clamped to preview size.
     capture_res_width: u16 = 0,
     capture_res_height: u16 = 0,
+    /// Set while compositing one tile of a capture whose full size exceeds
+    /// the GPU's max texture size: the capture target is the tile's own
+    /// size and the final full-screen pass samples only this tile's UV
+    /// span, so the tiles stitch byte-identical to a single full render.
+    capture_tile: ?render.Renderer.Tile = null,
+    /// Overrides the tile size a still capture splits at; zero uses the
+    /// 16384 texture-size floor. Only conformance sets it, to force
+    /// tiling at a small resolution and prove the stitch is byte-identical.
+    capture_tile_cap: u32 = 0,
     face_tracking: ?*tracking.Tracking = null,
     hand_tracking: ?*tracking.hand_worker.HandTracking = null,
     pose_tracking: ?*tracking.pose_worker.PoseTracking = null,
@@ -839,6 +848,9 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
 /// unavailable still draws, against the renderer's always-foreground
 /// default mask.
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
+    // The tile is set per final full-screen pass below; every source-res
+    // intermediate draw and every non-capture frame renders untiled.
+    r.tile = null;
     var ready_count: usize = 0;
     for (s.chain_order) |entry| {
         const ready = switch (entry.kind) {
@@ -873,6 +885,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // then back to 0), not a static read.
         const preview_rect_w: u16 = if (s.capture_requested) capture_out_width else @intCast(r.width);
         const preview_rect_h: u16 = if (s.capture_requested) capture_out_height else @intCast(r.height);
+        // A plain capture (no passes) draws straight into the final target,
+        // so the tile applies here too; capture_still only sets a tile when
+        // the frame is upright, keeping the tiled quad axis-aligned.
+        r.tile = s.capture_tile;
         render.Renderer.setViewTarget(0, finalTarget(e, s), preview_rect_w, preview_rect_h);
         r.submitPreview(0, current.preview, rotation * 90, mirror);
         if (s.capture_requested) blitCaptureToSwapChain(e, r, 1);
@@ -923,6 +939,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 next_view_id += 1;
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 const shader_mask = blk: {
                     // A named channel with no live data samples zero:
@@ -945,6 +962,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 next_view_id += 1;
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitLutPass(view_id, input_texture, lut_texture);
                 if (output) |target| {
@@ -960,6 +978,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 next_view_id += 1;
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitBlendPass(view_id, input_texture, background_texture, mask_texture);
                 if (output) |target| {
@@ -1944,40 +1963,104 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     };
     const render_w: u32 = @as(u32, still_w) * supersample;
     const render_h: u32 = @as(u32, still_h) * supersample;
-    if (render_w > 16384 or render_h > 16384) return .invalid_argument;
+    // Above the max texture size a single target is impossible, so the
+    // output composites in tiles and stitches. Exact only when the final
+    // draw is the axis-aligned full-screen pass: 3D content and rotated or
+    // mirrored plain frames stay single-target under the cap.
+    const tile_cap: u32 = if (s.capture_tile_cap != 0) s.capture_tile_cap else 16384;
+    const has_3d = s.model_meshes.count() > 0 or s.mesh_face_textures.count() > 0 or
+        s.cloth_meshes.count() > 0 or s.hair_meshes.count() > 0;
+    const rot = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
+    const upright = rot == 0 and (current.desc.flags & frame_flag_mirror) == 0;
+    const tileable = !has_3d and upright;
+    if ((render_w > tile_cap or render_h > tile_cap) and !tileable) return .invalid_argument;
 
-    s.capture_res_width = @intCast(render_w);
-    s.capture_res_height = @intCast(render_h);
-    defer {
-        s.capture_res_width = 0;
-        s.capture_res_height = 0;
-    }
-    const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
-    const render_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
+    const gpa = e.gpa;
+    const render_size = @as(usize, render_w) * @as(usize, render_h) * 4;
     if (render_size == 0) {
         w.* = 0;
         h.* = 0;
         return .ok;
     }
-
-    const gpa = e.gpa;
     const rendered = gpa.alloc(u8, render_size) catch return .out_of_memory;
     defer gpa.free(rendered);
-    const staging = e.capture_staging orelse return .renderer_unavailable;
-    render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
-    const ready_frame = render.Renderer.readTexture(staging, rendered.ptr);
-    while (r.frame() < ready_frame) {}
+
+    const cols: u32 = if (render_w > tile_cap) (render_w + tile_cap - 1) / tile_cap else 1;
+    const rows: u32 = if (render_h > tile_cap) (render_h + tile_cap - 1) / tile_cap else 1;
+    defer {
+        s.capture_res_width = 0;
+        s.capture_res_height = 0;
+        s.capture_tile = null;
+    }
+
+    if (cols == 1 and rows == 1) {
+        // Whole frame in one target: read straight into the output buffer,
+        // the same fast path a preview-size capture already takes.
+        s.capture_res_width = @intCast(render_w);
+        s.capture_res_height = @intCast(render_h);
+        s.capture_tile = null;
+        const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
+        if (e.capture_width == 0 or e.capture_height == 0) {
+            w.* = 0;
+            h.* = 0;
+            return .ok;
+        }
+        const staging = e.capture_staging orelse return .renderer_unavailable;
+        render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+        const ready_frame = render.Renderer.readTexture(staging, rendered.ptr);
+        while (r.frame() < ready_frame) {}
+    } else {
+        // Composite each tile into its own small target and stitch the
+        // rows into the full buffer at the tile's offset.
+        var ty: u32 = 0;
+        while (ty < rows) : (ty += 1) {
+            const tile_y = ty * tile_cap;
+            const th: u32 = @min(tile_cap, render_h - tile_y);
+            var tx: u32 = 0;
+            while (tx < cols) : (tx += 1) {
+                const tile_x = tx * tile_cap;
+                const tw: u32 = @min(tile_cap, render_w - tile_x);
+                s.capture_res_width = @intCast(tw);
+                s.capture_res_height = @intCast(th);
+                s.capture_tile = .{
+                    .u0 = @as(f32, @floatFromInt(tile_x)) / @as(f32, @floatFromInt(render_w)),
+                    .v0 = @as(f32, @floatFromInt(tile_y)) / @as(f32, @floatFromInt(render_h)),
+                    .u1 = @as(f32, @floatFromInt(tile_x + tw)) / @as(f32, @floatFromInt(render_w)),
+                    .v1 = @as(f32, @floatFromInt(tile_y + th)) / @as(f32, @floatFromInt(render_h)),
+                };
+                const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
+                if (e.capture_width == 0 or e.capture_height == 0) {
+                    w.* = 0;
+                    h.* = 0;
+                    return .ok;
+                }
+                const staging = e.capture_staging orelse return .renderer_unavailable;
+                const tile_size = @as(usize, tw) * @as(usize, th) * 4;
+                const tile_buf = gpa.alloc(u8, tile_size) catch return .out_of_memory;
+                defer gpa.free(tile_buf);
+                render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+                const ready_frame = render.Renderer.readTexture(staging, tile_buf.ptr);
+                while (r.frame() < ready_frame) {}
+                var row: u32 = 0;
+                while (row < th) : (row += 1) {
+                    const dst = (@as(usize, tile_y + row) * @as(usize, render_w) + tile_x) * 4;
+                    const src = @as(usize, row) * @as(usize, tw) * 4;
+                    @memcpy(rendered[dst..][0 .. @as(usize, tw) * 4], tile_buf[src..][0 .. @as(usize, tw) * 4]);
+                }
+            }
+        }
+    }
 
     // The pixels to encode: the rendered buffer directly at 1x, or the
     // box-downsampled buffer at the still size when supersampling.
     var pixels: []u8 = rendered;
-    var out_w: u32 = e.capture_width;
-    var out_h: u32 = e.capture_height;
+    var out_w: u32 = render_w;
+    var out_h: u32 = render_h;
     var downsampled: []u8 = &.{};
     defer if (downsampled.len > 0) gpa.free(downsampled);
     if (supersample > 1) {
         downsampled = gpa.alloc(u8, @as(usize, still_w) * still_h * 4) catch return .out_of_memory;
-        image.downsampleBox(rendered, e.capture_width, e.capture_height, downsampled, still_w, still_h) catch return .unsupported;
+        image.downsampleBox(rendered, render_w, render_h, downsampled, still_w, still_h) catch return .unsupported;
         pixels = downsampled;
         out_w = still_w;
         out_h = still_h;
