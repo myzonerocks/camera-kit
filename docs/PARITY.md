@@ -16,6 +16,7 @@ CaptureOutput, Events.
 | Lens runtime | demonstrated on device | built, no hardware yet | demonstrated in browser, beauty-baseline only |
 | Photo capture (deterministic PNG) | proven in the host harness | built, no hardware yet | not wired |
 | Video recording | proven in the host harness on the Apple encoder | backend not landed, reports unsupported | backend not landed, reports unsupported |
+| Platform photo formats (JPEG, HEIC) | proven in the host harness | backend not landed, reports unsupported | backend not landed, reports unsupported |
 
 "Demonstrated" means executed on the real target through the public
 path; "built" means the code exists and compiles but no physical device

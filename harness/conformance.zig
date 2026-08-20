@@ -282,6 +282,118 @@ fn proveVideoRecording(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the platform photo formats end to end: JPEG and HEIC
+/// captures decode back at the right shape within a small error of
+/// the deterministic PNG capture's pixels. Lossy encoders are not
+/// bit-stable across hosts, so nothing here pins a hash.
+fn provePlatformPhotos(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    if (!abi.photo_supported) {
+        std.debug.print("conformance: FAIL platform photo backend missing on this host\n", .{});
+        return false;
+    }
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL photo formats lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // The deterministic PNG capture is the pixel reference.
+    var ref_needed: usize = 0;
+    var photo_width: u32 = 0;
+    var photo_height: u32 = 0;
+    var probe_byte: [1]u8 = undefined;
+    if (abi.goss_engine_capture_photo(engine, session, &probe_byte, 0, &ref_needed, &photo_width, &photo_height) != .invalid_argument or ref_needed == 0) {
+        std.debug.print("conformance: FAIL reference png probe\n", .{});
+        return false;
+    }
+    const ref_png = try gpa.alloc(u8, ref_needed);
+    defer gpa.free(ref_png);
+    var ref_len: usize = 0;
+    if (abi.goss_engine_capture_photo(engine, session, ref_png.ptr, ref_png.len, &ref_len, &photo_width, &photo_height) != .ok) {
+        std.debug.print("conformance: FAIL reference png capture\n", .{});
+        return false;
+    }
+    const reference_image = image_adapter.decode(gpa, ref_png[0..ref_len]) catch {
+        std.debug.print("conformance: FAIL reference png does not decode\n", .{});
+        return false;
+    };
+    defer gpa.free(reference_image.rgba);
+    const reference = reference_image.rgba;
+    if (reference_image.width != photo_width or reference_image.height != photo_height) {
+        std.debug.print("conformance: FAIL reference png shape\n", .{});
+        return false;
+    }
+
+    for ([_]struct { format: u32, name: []const u8 }{
+        .{ .format = 1, .name = "jpeg" },
+        .{ .format = 2, .name = "heic" },
+    }) |case| {
+        var needed: usize = 0;
+        if (abi.goss_engine_capture_photo_as(engine, session, case.format, 85, &probe_byte, 0, &needed, &photo_width, &photo_height) != .invalid_argument or needed == 0) {
+            std.debug.print("conformance: FAIL {s} size probe\n", .{case.name});
+            return false;
+        }
+        const encoded = try gpa.alloc(u8, needed);
+        defer gpa.free(encoded);
+        var encoded_len: usize = 0;
+        if (abi.goss_engine_capture_photo_as(engine, session, case.format, 85, encoded.ptr, encoded.len, &encoded_len, &photo_width, &photo_height) != .ok) {
+            std.debug.print("conformance: FAIL {s} capture\n", .{case.name});
+            return false;
+        }
+        const decoded = try gpa.alloc(u8, @as(usize, photo_width) * photo_height * 4);
+        defer gpa.free(decoded);
+        var decoded_width: u32 = 0;
+        var decoded_height: u32 = 0;
+        abi.photoDecode(encoded[0..encoded_len], decoded, &decoded_width, &decoded_height) catch {
+            std.debug.print("conformance: FAIL {s} does not decode\n", .{case.name});
+            return false;
+        };
+        if (decoded_width != photo_width or decoded_height != photo_height) {
+            std.debug.print("conformance: FAIL {s} decoded shape {d}x{d}\n", .{ case.name, decoded_width, decoded_height });
+            return false;
+        }
+        var total_error: u64 = 0;
+        for (0..@as(usize, photo_width) * photo_height) |at| {
+            for (0..3) |ch| {
+                const a: i32 = reference[at * 4 + ch];
+                const b: i32 = decoded[at * 4 + ch];
+                total_error += @abs(a - b);
+            }
+        }
+        const mean_error = @as(f64, @floatFromInt(total_error)) / @as(f64, @floatFromInt(@as(usize, photo_width) * photo_height * 3));
+        if (mean_error > 6.0) {
+            std.debug.print("conformance: FAIL {s} mean channel error {d:.2} vs the png capture\n", .{ case.name, mean_error });
+            return false;
+        }
+        std.debug.print("conformance: PROOF {s} photo capture decodes back within {d:.2} mean channel error ({d} bytes)\n", .{ case.name, mean_error, encoded_len });
+    }
+    return true;
+}
+
 /// Proves the zero-mask degradation: hair-recolor against a model with
 /// no hair class renders exactly the frame it renders with no
 /// segmentation at all, and both differ from the real multiclass
@@ -592,5 +704,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try provePhotoCapture(gpa, engine)) return 1;
     if (!try proveMaskDegradation(gpa, engine)) return 1;
     if (!try proveVideoRecording(gpa, engine)) return 1;
+    if (!try provePlatformPhotos(gpa, engine)) return 1;
     return 0;
 }

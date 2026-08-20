@@ -19,6 +19,7 @@ const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
 const media_recording = @import("media_recording");
+const photo = @import("photo");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -62,7 +63,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 13;
+pub const abi_minor: u16 = 14;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -1502,6 +1503,45 @@ pub export fn goss_engine_capture_photo(engine: ?*Engine, session: ?*Session, ou
 pub const recordingProbe = media_recording.probe;
 pub const recordingExportFrame = media_recording.exportFrame;
 pub const recording_supported = media_recording.supported;
+
+/// Harness-facing re-export of the photo backend's decode proof
+/// surface; never part of the C ABI.
+pub const photoDecode = photo.decode;
+pub const photo_supported = photo.supported;
+
+/// Captures the composited frame as a platform photo (1 = JPEG,
+/// 2 = HEIC) at quality percent; out_len always receives the needed
+/// size. Lossy and not bit-stable across runs, so the plain
+/// goss_engine_capture_photo stays the deterministic PNG surface.
+pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session, format: u32, quality: u32, out_data: ?[*]u8, out_capacity: usize, out_len: ?*usize, out_width: ?*u32, out_height: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const s = session orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    const data = out_data orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const w = out_width orelse return .invalid_argument;
+    const h = out_height orelse return .invalid_argument;
+    len_out.* = 0;
+    if (!photo.supported) return .unsupported;
+    if (format < 1 or format > 2 or quality > 100) return .invalid_argument;
+
+    const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
+    w.* = e.capture_width;
+    h.* = e.capture_height;
+    const full_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
+    if (full_size == 0) return .ok;
+
+    const gpa = e.gpa;
+    const pixels = gpa.alloc(u8, full_size) catch return .out_of_memory;
+    defer gpa.free(pixels);
+    const staging = e.capture_staging orelse return .renderer_unavailable;
+    render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+    const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
+    while (r.frame() < ready_frame) {}
+
+    photo.encode(pixels, e.capture_width, e.capture_height, @enumFromInt(format), quality, data[0..out_capacity], len_out) catch return .invalid_argument;
+    return .ok;
+}
 
 pub const RecordingConfig = extern struct {
     /// Zero picks the renderer's own output size (rounded down to

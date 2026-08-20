@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 13u
+#define GOSS_ABI_MINOR 14u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -284,6 +284,12 @@ goss_status goss_engine_capture_frame(goss_engine *engine, goss_session *session
  * (invalid_argument) tells the caller exactly what to retry with. The
  * encoding is deterministic: the same pixels, the same bytes. */
 goss_status goss_engine_capture_photo(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height);
+
+/* Captures the composited frame as a platform photo (1 = JPEG,
+ * 2 = HEIC) at quality percent; out_len always receives the needed
+ * size. Lossy and not bit-stable across runs - capture_photo stays
+ * the deterministic PNG surface. UNSUPPORTED without a backend. */
+goss_status goss_engine_capture_photo_as(goss_engine *engine, goss_session *session, uint32_t format, uint32_t quality, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height);
 
 typedef struct goss_recording_config {
   uint32_t width;       /* 0 picks the renderer's output size (rounded to even) */
