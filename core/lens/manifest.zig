@@ -90,6 +90,10 @@ pub const ParticleField = struct {
     /// When true, each point fades out over its life (alpha-blended) rather
     /// than drawing at full opacity until it respawns.
     fade: bool = false,
+    /// The rgb a point cools toward as it dies; set, a point starts at the
+    /// node colour and crosses to this by the end of its life (an ember
+    /// glowing hot then cooling). Null keeps the node colour throughout.
+    cool: ?[3]f32 = null,
 };
 
 pub const GradeField = struct {
@@ -710,6 +714,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "lifetime")) |v| field.lifetime = @floatCast(numberOf(v) orelse field.lifetime);
                 if (getField(pv.object, "fade")) |v| {
                     if (v == .bool) field.fade = v.bool;
+                }
+                if (getField(pv.object, "cool")) |v| {
+                    var rgb: [3]f32 = .{ 0, 0, 0 };
+                    if (readVec3(v, &rgb)) field.cool = rgb else try diags.add(path.slice(), "particles cool must be three numbers", .{});
                 }
                 particle_field = field;
             }

@@ -184,7 +184,9 @@ deterministic CPU integration - no clock, no randomness - so the same
 field and frame count produce the same picture, conformance bit-stable; it
 needs no glb asset. Add `"fade": true` and each point is alpha-blended by
 its remaining life, dimming to nothing as it ages rather than popping out
-when it respawns.
+when it respawns; add `"cool": [r, g, b]` and a fading point also crosses
+from the draw colour at birth toward that colour by death, an ember glowing
+hot then cooling.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the

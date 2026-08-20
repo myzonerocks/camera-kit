@@ -12,6 +12,9 @@ pub const Field = struct {
     /// Rendering hint the sim itself ignores: fade each point out over its
     /// life rather than drawing it at full opacity.
     fade: bool = false,
+    /// Rendering hint the sim ignores: the rgb a point cools toward as it
+    /// dies. Null holds the draw colour for the whole life.
+    cool: ?[3]f32 = null,
 };
 
 pub const Particle = struct {

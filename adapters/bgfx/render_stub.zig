@@ -392,13 +392,14 @@ pub const Renderer = struct {
         _ = mesh;
     }
 
-    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32, fade: bool) void {
+    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool) void {
         _ = r;
         _ = blit_view;
         _ = mesh_view;
         _ = input_texture;
         _ = mesh;
         _ = base_color;
+        _ = cool_color;
         _ = aspect_ratio;
         _ = fade;
     }

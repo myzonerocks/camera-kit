@@ -149,6 +149,7 @@ pub const Renderer = struct {
     /// fs_beauty_reshape.sc's own u_facePoints packing.
     face_points_uniform: c.bgfx_uniform_handle_t,
     model_color_uniform: c.bgfx_uniform_handle_t,
+    particle_cool_uniform: c.bgfx_uniform_handle_t,
     /// Solid white 1x1: blend.pass's mask input when segmentation is
     /// unavailable. A mask of 1.0 everywhere means "always foreground,"
     /// so binding this reproduces the SPEC's degradation rule exactly -
@@ -363,6 +364,7 @@ pub const Renderer = struct {
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .particle_cool_uniform = c.bgfx_create_uniform("u_particleCool", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .default_mask_texture = createMaskTexture(1, 1, &[_]u8{255}),
             .zero_mask_texture = createMaskTexture(1, 1, &[_]u8{0}),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
@@ -593,6 +595,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.model_color_uniform);
+        c.bgfx_destroy_uniform(r.particle_cool_uniform);
         c.bgfx_destroy_uniform(r.yuv_uniform);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
@@ -1255,7 +1258,7 @@ pub const Renderer = struct {
     /// Draws particles as points over the frame. Opaque through the model
     /// program by default; when fade is set, alpha-blended through the
     /// particle program so each point dims by its remaining-life fraction.
-    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32, fade: bool) void {
+    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
@@ -1268,6 +1271,7 @@ pub const Renderer = struct {
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         const base_state = c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_PT_POINTS;
         if (fade) {
+            c.bgfx_set_uniform(r.particle_cool_uniform, &cool_color, 1);
             c.bgfx_set_state(base_state | c.BGFX_STATE_BLEND_FUNC(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA), 0);
             c.bgfx_submit(mesh_view, r.particle_fade_program, 0, c.BGFX_DISCARD_ALL);
         } else {

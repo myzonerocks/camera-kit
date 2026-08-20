@@ -3,12 +3,14 @@ $input v_texcoord0
 #include <bgfx_shader.sh>
 
 uniform vec4 u_modelColor;
+uniform vec4 u_particleCool;
 
-// A fading particle point: the node's colour with its alpha scaled by the
-// point's remaining-life fraction (carried in v_texcoord0.x by writeFaded),
-// so a point dims to nothing as it ages instead of popping out when it
-// respawns. Alpha-blended over the frame by the caller's draw state.
+// A fading particle point: alpha scaled by the remaining-life fraction
+// (v_texcoord0.x from writeFaded) so it dims to nothing as it ages, and rgb
+// crossing from the node colour at birth toward u_particleCool at death (an
+// ember cooling). u_particleCool equals u_modelColor when the lens sets none.
 void main()
 {
-	gl_FragColor = vec4(u_modelColor.rgb, u_modelColor.a * v_texcoord0.x);
+	vec3 rgb = mix(u_particleCool.rgb, u_modelColor.rgb, v_texcoord0.x);
+	gl_FragColor = vec4(rgb, u_modelColor.a * v_texcoord0.x);
 }
