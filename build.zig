@@ -212,8 +212,13 @@ pub fn build(b: *std.Build) void {
         b.build_root.handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
         break :blk true;
     };
+    const have_miniaudio = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/miniaudio/miniaudio.h", .{}) catch break :blk false;
+        break :blk true;
+    };
     abi_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
     abi_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
+    abi_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -353,6 +358,10 @@ pub fn build(b: *std.Build) void {
     if (have_quickjs) {
         const script_tests = b.addTest(.{ .root_module = scriptModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(script_tests).step);
+    }
+    if (have_miniaudio) {
+        const audio_playback_tests = b.addTest(.{ .root_module = audioPlaybackModule(b, target, optimize, true) });
+        test_step.dependOn(&b.addRunArtifact(audio_playback_tests).step);
     }
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
@@ -1475,6 +1484,27 @@ fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
             .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
         });
         module.linkLibrary(buildQuickjsLib(b, target, optimize));
+    }
+    return module;
+}
+
+// Lens audio playback: miniaudio compiled with no device backends
+// (MA_NO_DEVICE_IO) so the engine only decodes and mixes, deterministic and
+// hardware-free; the SDK pulls the mixed PCM and routes it to the platform.
+// _GNU_SOURCE for the same glibc reason quickjs needs it.
+fn audioPlaybackModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, real: bool) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path(if (real) "adapters/audio/audio_playback.zig" else "adapters/audio/audio_playback_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (real) {
+        module.link_libc = true;
+        module.addIncludePath(b.path(".vendor/miniaudio"));
+        module.addCSourceFile(.{
+            .file = b.path("adapters/audio/ma_shim.c"),
+            .flags = &.{ "-std=c11", "-fno-sanitize=undefined", "-w", "-DMA_NO_DEVICE_IO", "-D_GNU_SOURCE" },
+        });
     }
     return module;
 }
