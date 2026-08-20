@@ -160,6 +160,16 @@ extension Session {
         result.parse()
     }
 
+    /// Fills matrix with the column-major head transform - canonical
+    /// metric space into frame pixels. Throws .again until a face is
+    /// tracked; matrix must hold at least sixteen floats.
+    public func facePose(_ matrix: inout [Float]) throws {
+        precondition(matrix.count >= 16)
+        try matrix.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_face_pose(handle, buffer.baseAddress))
+        }
+    }
+
     /// The degradation level currently in effect.
     public func degradeLevel() -> DegradeLevel {
         DegradeLevel(rawValue: goss_session_degrade_level(handle).rawValue) ?? .passthrough

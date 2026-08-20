@@ -283,6 +283,13 @@ export fn Java_com_gosslens_Gosslens_nativePoseResult(env: *JniEnv, cls: jobject
     return @intFromEnum(abi.goss_session_pose_result(sessionFromHandle(session), result));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeFacePose(env: *JniEnv, cls: jobject, session: i64, matrix_buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, matrix_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const matrix: *[16]f32 = @ptrCast(@alignCast(bytes));
+    return @intFromEnum(abi.goss_session_face_pose(sessionFromHandle(session), matrix));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
     _ = path_len;
