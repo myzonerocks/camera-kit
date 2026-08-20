@@ -1450,7 +1450,10 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
     }
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
-    const flags = [_][]const u8{ "-std=c11", "-fno-sanitize=undefined", "-w" };
+    // _GNU_SOURCE exposes clock_gettime, readlink, and pthread_condattr_setclock
+    // on glibc; without it quickjs fails to compile on Linux (macOS declares
+    // them unconditionally, so the gap only shows up on the CI runners).
+    const flags = [_][]const u8{ "-std=c11", "-fno-sanitize=undefined", "-w", "-D_GNU_SOURCE" };
     const files = [_][]const u8{ "quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c" };
     for (files) |file| {
         module.addCSourceFile(.{ .file = b.path(b.fmt("{s}/{s}", .{ root, file })), .flags = &flags });
