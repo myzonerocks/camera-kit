@@ -1144,17 +1144,25 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     }
                     // A capture is a snapshot; only a live frame advances the
                     // fountain, at a fixed step so the sim stays deterministic.
+                    var fade = false;
                     if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
                         if (!s.capture_requested) sys.step(1.0 / 60.0);
+                        fade = sys.field.fade;
                         const count = sys.field.count;
-                        if (s.engine.gpa.alloc(f32, count * 3)) |positions| {
-                            defer s.engine.gpa.free(positions);
-                            sys.writePositions(positions);
-                            r.updateParticleMesh(particle_mesh, positions);
+                        const floats_per: usize = if (fade) 5 else 3;
+                        if (s.engine.gpa.alloc(f32, count * floats_per)) |verts| {
+                            defer s.engine.gpa.free(verts);
+                            if (fade) {
+                                sys.writeFaded(verts);
+                                render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
+                            } else {
+                                sys.writePositions(verts);
+                                r.updateParticleMesh(particle_mesh, verts);
+                            }
                         } else |_| {}
                     }
                     const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
-                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, .{ 0.9, 0.8, 0.3, 1.0 }, aspect_ratio);
+                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, .{ 0.9, 0.8, 0.3, 1.0 }, aspect_ratio, fade);
                     if (output) |target| {
                         input_texture = target.texture;
                         if (!is_final) next_slot += 1;
@@ -3285,7 +3293,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime })) |sys| {
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .fade = pf.fade })) |sys| {
                     if (r.createParticleMesh(pf.count)) |mesh| {
                         session.particle_systems.put(gpa, model.graph_index, sys) catch {
                             var s2 = sys;

@@ -1129,6 +1129,85 @@ fn proveParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the fading-particle path: the ember-fountain lens sets fade, so each
+/// point is alpha-blended by its remaining life through the particle program
+/// rather than drawn opaque. The fountain still develops (settled differs from
+/// initial) and the whole thing is bit-stable across runs.
+fn proveEmber(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/ember-fountain", ".lens-packages/ember-fountain".len) != .ok) {
+            std.debug.print("conformance: FAIL ember lens activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var initial_shot: []u8 = &.{};
+        defer if (initial_shot.len > 0) gpa.free(initial_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 2 or i == 85) {
+                var shot_width: u32 = 0;
+                var shot_height: u32 = 0;
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 2) initial_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, initial_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL the ember fountain did not move\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(initial_shot);
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            var png_bytes: std.ArrayList(u8) = .empty;
+            defer png_bytes.deinit(gpa);
+            try png.encodeRgba(gpa, &png_bytes, settled_shot, 400, 300);
+            try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-ember-fountain.png", .data = png_bytes.items });
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL the ember fountain is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a fading particle fountain alpha-blends each point by its life deterministically, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves a blur.pass post-effect: the built-in separable blur softens the
 /// frame, so a blurred capture differs from the un-blurred one and is
 /// bit-stable across runs (no asset, always ready).
@@ -1902,6 +1981,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveBloom(gpa, engine)) return 1;
     if (!try proveStackedPostEffects(gpa, engine)) return 1;
     if (!try proveExpressionScript(gpa, engine)) return 1;
+    if (!try proveEmber(gpa, engine)) return 1;
     if (!try proveNoLeaks(gpa)) return 1;
     return 0;
 }

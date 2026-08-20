@@ -383,11 +383,16 @@ pub const Renderer = struct {
         _ = positions;
     }
 
+    pub fn updateParticleMeshFaded(mesh: ParticleMesh, faded: []const f32) void {
+        _ = mesh;
+        _ = faded;
+    }
+
     pub fn destroyParticleMesh(mesh: ParticleMesh) void {
         _ = mesh;
     }
 
-    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32) void {
+    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32, fade: bool) void {
         _ = r;
         _ = blit_view;
         _ = mesh_view;
@@ -395,6 +400,7 @@ pub const Renderer = struct {
         _ = mesh;
         _ = base_color;
         _ = aspect_ratio;
+        _ = fade;
     }
 
     pub const HairMesh = struct {

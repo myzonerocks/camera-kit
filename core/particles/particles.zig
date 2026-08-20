@@ -9,6 +9,9 @@ pub const Field = struct {
     gravity: f32 = 9.8,
     speed: f32 = 2.0,
     lifetime: f32 = 2.0,
+    /// Rendering hint the sim itself ignores: fade each point out over its
+    /// life rather than drawing it at full opacity.
+    fade: bool = false,
 };
 
 pub const Particle = struct {
@@ -73,6 +76,22 @@ pub const System = struct {
             out[i * 3 + 0] = p.pos[0];
             out[i * 3 + 1] = p.pos[1];
             out[i * 3 + 2] = p.pos[2];
+        }
+    }
+
+    /// Writes xyz plus the remaining-life fraction (1 at birth, 0 at death)
+    /// per particle into out (count * 5 floats: position, life, 0), matching
+    /// the shared vertex layout, so a fading particle program can dim each
+    /// point as it ages rather than popping it out.
+    pub fn writeFaded(self: *const System, out: []f32) void {
+        const lifetime = @max(self.field.lifetime, 1e-6);
+        for (self.particles, 0..) |p, i| {
+            const frac = std.math.clamp(p.life / lifetime, 0.0, 1.0);
+            out[i * 5 + 0] = p.pos[0];
+            out[i * 5 + 1] = p.pos[1];
+            out[i * 5 + 2] = p.pos[2];
+            out[i * 5 + 3] = frac;
+            out[i * 5 + 4] = 0.0;
         }
     }
 };

@@ -87,6 +87,9 @@ pub const ParticleField = struct {
     gravity: f32,
     speed: f32,
     lifetime: f32,
+    /// When true, each point fades out over its life (alpha-blended) rather
+    /// than drawing at full opacity until it respawns.
+    fade: bool = false,
 };
 
 pub const GradeField = struct {
@@ -705,6 +708,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "gravity")) |v| field.gravity = @floatCast(numberOf(v) orelse field.gravity);
                 if (getField(pv.object, "speed")) |v| field.speed = @floatCast(numberOf(v) orelse field.speed);
                 if (getField(pv.object, "lifetime")) |v| field.lifetime = @floatCast(numberOf(v) orelse field.lifetime);
+                if (getField(pv.object, "fade")) |v| {
+                    if (v == .bool) field.fade = v.bool;
+                }
                 particle_field = field;
             }
             path.pop(pmark);

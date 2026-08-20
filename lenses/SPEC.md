@@ -182,7 +182,9 @@ index-spread velocity, integrate under `gravity`, and respawn when their
 `lifetime` runs out, drawn as points over the frame. The sim is a
 deterministic CPU integration - no clock, no randomness - so the same
 field and frame count produce the same picture, conformance bit-stable; it
-needs no glb asset.
+needs no glb asset. Add `"fade": true` and each point is alpha-blended by
+its remaining life, dimming to nothing as it ages rather than popping out
+when it respawns.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the
