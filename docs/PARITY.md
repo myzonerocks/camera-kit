@@ -28,6 +28,7 @@ CaptureOutput, Events.
 | Lens strand hair (Jolt compute) | proven in the host harness, deterministic settle | stub, holds initial pose | stub, holds initial pose |
 | Lens scripting (QuickJS-ng, sandboxed, deterministic) | proven in the host harness: a script drives a parameter from a signal, bit-stable | stub until the backend is linked | stub until the backend is linked |
 | Lens audio playback (miniaudio, deterministic mixer) | proven in the host harness: a play_sound trigger mixes a voice, silent before, bit-stable after | stub until the backend is linked | stub until the backend is linked |
+| Lens particles (deterministic CPU fountain, GPU points) | proven in the host harness: the fountain falls, settled differs from initial, bit-stable across runs | pure-Zig sim, runs on device | pure-Zig sim, runs in browser |
 
 "Demonstrated" means executed on the real target through the public
 path; "built" means the code exists and compiles but no physical device

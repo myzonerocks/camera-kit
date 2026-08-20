@@ -24,6 +24,7 @@ const audio_analysis = @import("audio_analysis");
 const physics = @import("physics");
 const script = @import("script");
 const audio_playback = @import("audio_playback");
+const particles = @import("particles");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -275,6 +276,8 @@ pub const Session = struct {
     /// graph index. Hair is driven by the tracked head pose.
     hair_ids: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     hair_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.HairMesh) = .empty,
+    particle_systems: std.AutoHashMapUnmanaged(graph.NodeIndex, particles.System) = .empty,
+    particle_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
     hair_vcount: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     physics_last_us: i64 = 0,
 
@@ -877,7 +880,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
-            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index),
+            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index) or s.particle_meshes.contains(entry.graph_index),
         };
         if (ready) ready_count += 1;
     }
@@ -1022,6 +1025,42 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .model => {
+                if (s.particle_meshes.get(entry.graph_index)) |particle_mesh| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    // A capture is a snapshot; only a live frame advances the
+                    // fountain, at a fixed step so the sim stays deterministic.
+                    if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
+                        if (!s.capture_requested) sys.step(1.0 / 60.0);
+                        const count = sys.field.count;
+                        if (s.engine.gpa.alloc(f32, count * 3)) |positions| {
+                            defer s.engine.gpa.free(positions);
+                            sys.writePositions(positions);
+                            r.updateParticleMesh(particle_mesh, positions);
+                        } else |_| {}
+                    }
+                    const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
+                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, .{ 0.9, 0.8, 0.3, 1.0 }, aspect_ratio);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 if (s.hair_meshes.get(entry.graph_index)) |hair_mesh| {
                     drawn += 1;
                     const blit_view = next_view_id;
@@ -1306,6 +1345,8 @@ pub fn destroySession(session: *Session) void {
     session.hair_ids.deinit(session.engine.gpa);
     session.hair_meshes.deinit(session.engine.gpa);
     session.hair_vcount.deinit(session.engine.gpa);
+    session.particle_meshes.deinit(session.engine.gpa);
+    session.particle_systems.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -1983,7 +2024,7 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     // mirrored plain frames stay single-target under the cap.
     const tile_cap: u32 = if (s.capture_tile_cap != 0) s.capture_tile_cap else 16384;
     const has_3d = s.model_meshes.count() > 0 or s.mesh_face_textures.count() > 0 or
-        s.cloth_meshes.count() > 0 or s.hair_meshes.count() > 0;
+        s.cloth_meshes.count() > 0 or s.hair_meshes.count() > 0 or s.particle_meshes.count() > 0;
     const rot = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
     const upright = rot == 0 and (current.desc.flags & frame_flag_mirror) == 0;
     const tileable = !has_3d and upright;
@@ -2704,6 +2745,15 @@ fn destroyMeshFaceState(session: *Session) void {
         var hm_it = session.hair_meshes.valueIterator();
         while (hm_it.next()) |mesh| render.Renderer.destroyHairMesh(mesh.*);
     }
+    if (session.engine.renderer) |*r| {
+        _ = r;
+        var pm_it = session.particle_meshes.valueIterator();
+        while (pm_it.next()) |mesh| render.Renderer.destroyParticleMesh(mesh.*);
+    }
+    var ps_it = session.particle_systems.valueIterator();
+    while (ps_it.next()) |sys| sys.deinit();
+    session.particle_meshes.clearRetainingCapacity();
+    session.particle_systems.clearRetainingCapacity();
     session.hair_meshes.clearRetainingCapacity();
     session.hair_ids.clearRetainingCapacity();
     session.hair_vcount.clearRetainingCapacity();
@@ -3091,6 +3141,24 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.world_anchor) {
             session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
+        if (model.particles) |pf| {
+            if (session.engine.renderer) |*r| {
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime })) |sys| {
+                    if (r.createParticleMesh(pf.count)) |mesh| {
+                        session.particle_systems.put(gpa, model.graph_index, sys) catch {
+                            var s2 = sys;
+                            s2.deinit();
+                        };
+                        session.particle_meshes.put(gpa, model.graph_index, mesh) catch {};
+                    } else |_| {
+                        var s2 = sys;
+                        s2.deinit();
+                    }
+                } else |_| {}
+            }
+            // Particles generate their own points; no glb load.
+            continue;
         }
         if (model.hair) |hair| {
             if (physics.supported) {

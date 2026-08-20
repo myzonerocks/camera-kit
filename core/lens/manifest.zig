@@ -81,6 +81,14 @@ pub const HairField = struct {
     length: f32,
 };
 
+pub const ParticleField = struct {
+    /// Particle count and the fountain's gravity, launch speed, and lifetime.
+    count: u32,
+    gravity: f32,
+    speed: f32,
+    lifetime: f32,
+};
+
 pub const PhysicsBody = struct {
     shape: enum { box, sphere },
     /// Box half extents; a sphere reads its radius from [0].
@@ -113,6 +121,8 @@ pub const Node = struct {
     cloth: ?ClothField = null,
     /// Set when the node is simulated strand hair instead of a glb.
     hair: ?HairField = null,
+    /// Set when the node is a particle fountain instead of a glb.
+    particles: ?ParticleField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -659,6 +669,25 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var world_anchor = false;
         var physics_body: ?PhysicsBody = null;
         var hair_field: ?HairField = null;
+        var particle_field: ?ParticleField = null;
+        if (getField(object, "particles")) |pv| {
+            const pmark = path.push("particles");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "particles is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (pv != .object) {
+                try diags.add(path.slice(), "particles must be an object", .{});
+            } else {
+                var field: ParticleField = .{ .count = 128, .gravity = 9.8, .speed = 2.0, .lifetime = 2.0 };
+                if (getField(pv.object, "count")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= 4096) field.count = @intCast(v.integer);
+                }
+                if (getField(pv.object, "gravity")) |v| field.gravity = @floatCast(numberOf(v) orelse field.gravity);
+                if (getField(pv.object, "speed")) |v| field.speed = @floatCast(numberOf(v) orelse field.speed);
+                if (getField(pv.object, "lifetime")) |v| field.lifetime = @floatCast(numberOf(v) orelse field.lifetime);
+                particle_field = field;
+            }
+            path.pop(pmark);
+        }
         if (getField(object, "hair")) |hair_value| {
             const hair_mark = path.push("hair");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -859,6 +888,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .physics = physics_body,
             .cloth = cloth_field,
             .hair = hair_field,
+            .particles = particle_field,
             .script = script_source,
         });
     }

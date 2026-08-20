@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.sparkles",
+  "version": "1.0.0",
+  "display_name": "Sparkles",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "spark", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 256, "gravity": 9.8, "speed": 2.0, "lifetime": 2.0}}
+  ],
+  "triggers": []
+}
