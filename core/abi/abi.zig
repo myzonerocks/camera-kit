@@ -3077,10 +3077,18 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     const s = session orelse return .invalid_argument;
     const bytes = manifest_json orelse return .invalid_argument;
     if (manifest_len == 0) return .invalid_argument;
-    activateLens(s, s.engine.gpa, bytes[0..manifest_len]) catch |err| return switch (err) {
+    const gpa = s.engine.gpa;
+    activateLens(s, gpa, bytes[0..manifest_len]) catch |err| return switch (err) {
         error.OutOfMemory => .out_of_memory,
         else => .invalid_argument,
     };
+    // The asset-free composite nodes (blur.pass, grade.pass, bloom.pass) need
+    // no bundle, so build the chain and their params here too - a lens
+    // activated from raw json, as on the web, gets its post-effects. Nodes
+    // that need packaged assets stay not-ready until a directory load.
+    createGradeParams(s, gpa) catch {};
+    createBloomParams(s, gpa) catch {};
+    buildChainOrder(s, gpa) catch {};
     return .ok;
 }
 

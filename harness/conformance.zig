@@ -1208,6 +1208,74 @@ fn proveEmber(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a post-effect lens activates from raw json, no bundle directory:
+/// goss_session_activate_lens on a blur.pass manifest builds the composite
+/// chain (the asset-free path the web uses), so the capture differs from the
+/// plain frame and is bit-stable - post-effects reach the browser too.
+fn proveJsonPostEffect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const blur_manifest =
+        \\{"glf":"1.0","id":"goss.test.json-blur","version":"1.0.0","display_name":"JSON Blur","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"b","type":"blur.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[]}
+    ;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (0..3) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (run > 0) {
+            if (abi.goss_session_activate_lens(session, blur_manifest.ptr, blur_manifest.len) != .ok) {
+                std.debug.print("conformance: FAIL json blur activation\n", .{});
+                return false;
+            }
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL json post-effect is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL a json-activated blur.pass did not change the frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a post-effect lens activates from raw json and renders deterministically, no bundle directory needed\n", .{});
+    return true;
+}
+
 /// Proves a blur.pass post-effect: the built-in separable blur softens the
 /// frame, so a blurred capture differs from the un-blurred one and is
 /// bit-stable across runs (no asset, always ready).
@@ -1982,6 +2050,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveStackedPostEffects(gpa, engine)) return 1;
     if (!try proveExpressionScript(gpa, engine)) return 1;
     if (!try proveEmber(gpa, engine)) return 1;
+    if (!try proveJsonPostEffect(gpa, engine)) return 1;
     if (!try proveNoLeaks(gpa)) return 1;
     return 0;
 }
