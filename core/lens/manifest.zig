@@ -72,6 +72,13 @@ pub const PhysicsBody = struct {
     size: [3]f32,
     position: [3]f32,
     dynamic: bool,
+    /// The engine drives this body's pose from its anchor each frame;
+    /// chained bodies hang off it.
+    kinematic: bool = false,
+    /// The id of the node this body is chained to, and the chain
+    /// length, for content hanging off an anchor.
+    chain_to: ?[]const u8 = null,
+    chain_length: f32 = 0,
 };
 
 pub const Node = struct {
@@ -669,8 +676,31 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                             body.dynamic = false;
                         } else if (std.mem.eql(u8, motion_name, "dynamic")) {
                             body.dynamic = true;
+                        } else if (std.mem.eql(u8, motion_name, "kinematic")) {
+                            body.dynamic = false;
+                            body.kinematic = true;
                         } else {
                             try diags.add(path.slice(), "unknown physics motion '{s}'", .{motion_name});
+                        }
+                    }
+                }
+                if (getField(physics_value.object, "chain")) |chain_value| {
+                    if (chain_value != .object) {
+                        try diags.add(path.slice(), "physics chain must be an object", .{});
+                    } else {
+                        if (getField(chain_value.object, "to")) |to_value| {
+                            if (try expectString(diags, path, to_value)) |to_name| {
+                                body.chain_to = to_name;
+                            }
+                        } else {
+                            try diags.add(path.slice(), "physics chain needs a to", .{});
+                        }
+                        if (getField(chain_value.object, "length")) |len_value| {
+                            switch (len_value) {
+                                .float => |f| body.chain_length = @floatCast(f),
+                                .integer => |n| body.chain_length = @floatFromInt(n),
+                                else => try diags.add(path.slice(), "physics chain length must be a number", .{}),
+                            }
                         }
                     }
                 }
