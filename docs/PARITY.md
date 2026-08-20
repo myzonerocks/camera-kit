@@ -19,7 +19,7 @@ CaptureOutput, Events.
 | Platform photo formats (JPEG, HEIC) | proven in the host harness | backend not landed, reports unsupported | backend not landed, reports unsupported |
 | Audio triggers (level, beat) | proven in the host harness | built, no hardware yet | not wired |
 | Recording audio track + A/V sync | proven in the host harness, zero end drift | video-only until the audio encoder lands | backend not landed |
-| World tracking (pose, planes, anchors, light) | ARKit source built, no hardware yet; seam proven on the replay track in the host harness | binding ready, ARCore feed lands with the demo | not wired |
+| World tracking (pose, planes, anchors, light) | ARKit source built, no hardware yet; seam proven on the replay track in the host harness | ARCore demo feeder built, no hardware yet | WebXR source built and typechecked, no browser run yet |
 
 "Demonstrated" means executed on the real target through the public
 path; "built" means the code exists and compiles but no physical device
