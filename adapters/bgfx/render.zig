@@ -148,6 +148,9 @@ pub const Renderer = struct {
     /// the pass draws the frame through unblended rather than blocking
     /// the chain or sampling an unbound texture.
     default_mask_texture: c.bgfx_texture_handle_t,
+    /// The absence-of-signal mask: a named mask channel with no live
+    /// data samples zero so the effect draws nothing, never everywhere.
+    zero_mask_texture: c.bgfx_texture_handle_t,
     yuv_uniform: c.bgfx_uniform_handle_t,
     upload_cache: ?UploadCache = null,
     rgba_upload_cache: ?RgbaUploadCache = null,
@@ -338,6 +341,7 @@ pub const Renderer = struct {
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .default_mask_texture = createMaskTexture(1, 1, &[_]u8{255}),
+            .zero_mask_texture = createMaskTexture(1, 1, &[_]u8{0}),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
         };
     }
@@ -496,6 +500,7 @@ pub const Renderer = struct {
             c.bgfx_destroy_texture(cache.texture);
         }
         c.bgfx_destroy_texture(r.default_mask_texture);
+        c.bgfx_destroy_texture(r.zero_mask_texture);
         c.bgfx_destroy_uniform(r.tex_color);
         c.bgfx_destroy_uniform(r.tex_y);
         c.bgfx_destroy_uniform(r.tex_uv);

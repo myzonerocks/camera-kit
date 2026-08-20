@@ -835,9 +835,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 const shader_mask = blk: {
+                    // A named channel with no live data samples zero:
+                    // no signal means the subject is absent, so the
+                    // effect draws nothing rather than everywhere.
                     const channel = s.shader_masks.get(entry.graph_index) orelse break :blk r.default_mask_texture;
-                    if (channel == 0) break :blk s.segmentation_texture orelse r.default_mask_texture;
-                    break :blk s.segmentation_class_textures[channel] orelse r.default_mask_texture;
+                    if (channel == 0) break :blk s.segmentation_texture orelse r.zero_mask_texture;
+                    break :blk s.segmentation_class_textures[channel] orelse r.zero_mask_texture;
                 };
                 r.submitShaderPass(view_id, .{ .idx = program_idx }, input_texture, shader_mask);
                 if (output) |target| {

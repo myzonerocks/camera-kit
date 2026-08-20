@@ -90,7 +90,10 @@ capability the
 running session cannot provide is a defined degradation, not a load
 failure: the lens still splices, its triggers gated on that capability
 simply never fire, and any node consuming that capability's data holds its
-last-known or default state. A lens whose *every* node depends on an
+last-known or default state. A named mask channel without live data
+(the capability absent, the running model lacking that class, or the
+first result not yet landed) samples the zero mask - the masked effect
+draws nothing, never everywhere. A lens whose *every* node depends on an
 unavailable capability degrades to not rendering, which the host app is
 told about (so it can hide the lens from its picker) rather than the
 runtime silently producing a blank frame with no explanation.

@@ -50,6 +50,7 @@ pub const PreviewFrame = union(enum) {
 
 pub const Renderer = struct {
     default_mask_texture: TextureHandle = .{},
+    zero_mask_texture: TextureHandle = .{},
     width: u32 = 0,
     height: u32 = 0,
 

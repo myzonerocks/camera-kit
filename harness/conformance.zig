@@ -25,11 +25,24 @@ extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 
 const width: u32 = 400;
 const height: u32 = 300;
-const reference_lenses = [_][]const u8{ "shader-tint", "beauty-baseline", "background-swap", "trigger-anim", "hair-recolor", "face-paint", "face-mask" };
+/// Each lens runs with the segmentation model a real host would pick
+/// for it: the single-class segmenter's person confidence is crisper
+/// for subject compositing, the multiclass model carries the class
+/// channels (hair) the channel lenses need.
+const reference_lenses = [_]struct { name: []const u8, segmentation_model: []const u8 }{
+    .{ .name = "shader-tint", .segmentation_model = single_class_model_path },
+    .{ .name = "beauty-baseline", .segmentation_model = single_class_model_path },
+    .{ .name = "background-swap", .segmentation_model = single_class_model_path },
+    .{ .name = "trigger-anim", .segmentation_model = single_class_model_path },
+    .{ .name = "hair-recolor", .segmentation_model = multiclass_model_path },
+    .{ .name = "face-paint", .segmentation_model = single_class_model_path },
+    .{ .name = "face-mask", .segmentation_model = single_class_model_path },
+};
 const baseline_path = "lenses/conformance-baseline.txt";
 const corpus_path = ".models/corpus/face_frontal_b.jpg";
 const face_bundle_path = ".models/face_landmarker.task";
-const segmentation_model_path = ".models/selfie_segmenter.tflite";
+const multiclass_model_path = ".models/selfie_multiclass.tflite";
+const single_class_model_path = ".models/selfie_segmenter.tflite";
 const beauty_resource_path = ".vendor/gpupixel/src";
 
 var harness_io: std.Io = undefined;
@@ -92,7 +105,7 @@ fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
 /// bgfx's own default callback (no custom one is wired here, since
 /// RendererDesc has no callback field to carry one through the frozen
 /// ABI) writes it as out_path ++ ".tga".
-fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, out_path: [:0]const u8) !void {
+fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const u8, out_path: [:0]const u8, segmentation_model: ?[]const u8) !void {
     const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
     defer abi.destroySession(session);
 
@@ -101,10 +114,12 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
     if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) {
         return error.EnableFaceTrackingFailed;
     }
-    const segmentation_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, segmentation_model_path, gpa, .limited(16 << 20));
-    defer gpa.free(segmentation_bytes);
-    if (abi.goss_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) {
-        return error.EnableSegmentationFailed;
+    if (segmentation_model) |model_path| {
+        const segmentation_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, model_path, gpa, .limited(16 << 20));
+        defer gpa.free(segmentation_bytes);
+        if (abi.goss_session_enable_segmentation(session, segmentation_bytes.ptr, segmentation_bytes.len, 2) != .ok) {
+            return error.EnableSegmentationFailed;
+        }
     }
     // Enabled unconditionally, same as face tracking and segmentation
     // above: only beauty-baseline actually splices a beauty node, so
@@ -159,6 +174,20 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         return error.SubmitFailed;
     }
 
+    // Like the face wait above: heavier segmentation models publish
+    // later than the face result, so render until the mask texture
+    // exists - render_frame itself polls the worker, the same way a
+    // real app's frame loop picks the mask up.
+    if (segmentation_model != null) {
+        var mask_polls: usize = 0;
+        while (session.segmentation_texture == null) {
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            mask_polls += 1;
+            if (mask_polls > 100_000) return error.SegmentationTimedOut;
+        }
+    }
+
     for (0..5) |_| {
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
@@ -168,6 +197,34 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
+}
+
+/// Proves the zero-mask degradation: hair-recolor against a model with
+/// no hair class renders exactly the frame it renders with no
+/// segmentation at all, and both differ from the real multiclass
+/// render - the masked effect draws nothing, never everywhere.
+fn proveMaskDegradation(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    try renderOnce(gpa, engine, ".lens-packages/hair-recolor", "zig-out/conformance-hair-degraded", single_class_model_path);
+    settle(engine);
+    try renderOnce(gpa, engine, ".lens-packages/hair-recolor", "zig-out/conformance-hair-unsegmented", null);
+    settle(engine);
+
+    const degraded = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-hair-degraded.tga", gpa, .limited(8 << 20));
+    defer gpa.free(degraded);
+    const unsegmented = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-hair-unsegmented.tga", gpa, .limited(8 << 20));
+    defer gpa.free(unsegmented);
+    if (!std.mem.eql(u8, degraded, unsegmented)) {
+        std.debug.print("conformance: FAIL a hair mask without a hair class must render exactly like no segmentation\n", .{});
+        return false;
+    }
+    const real = try std.Io.Dir.cwd().readFileAlloc(harness_io, "zig-out/conformance-hair-recolor-a.tga", gpa, .limited(8 << 20));
+    defer gpa.free(real);
+    if (std.mem.eql(u8, degraded, real)) {
+        std.debug.print("conformance: FAIL the multiclass hair render must differ from the degraded render\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a named mask channel without live data degrades to zero, never all-foreground\n", .{});
+    return true;
 }
 
 /// Proves goss_engine_capture_photo end to end: the size probe
@@ -273,7 +330,7 @@ fn sha256Hex(data: []const u8) [64]u8 {
 /// byte-identical - proving the lens is bit-stable, not just that it
 /// happened to render something. Returns the hex hash of that output on
 /// success, null (with a printed reason) on failure.
-fn checkDeterminism(gpa: std.mem.Allocator, engine: *abi.Engine, lens_name: []const u8) !?[64]u8 {
+fn checkDeterminism(gpa: std.mem.Allocator, engine: *abi.Engine, lens_name: []const u8, segmentation_model: []const u8) !?[64]u8 {
     var bundle_buf: [256]u8 = undefined;
     const bundle_path = try std.fmt.bufPrint(&bundle_buf, ".lens-packages/{s}", .{lens_name});
     var out_a_buf: [256:0]u8 = undefined;
@@ -281,9 +338,9 @@ fn checkDeterminism(gpa: std.mem.Allocator, engine: *abi.Engine, lens_name: []co
     var out_b_buf: [256:0]u8 = undefined;
     const out_b = try std.fmt.bufPrintZ(&out_b_buf, "zig-out/conformance-{s}-b", .{lens_name});
 
-    try renderOnce(gpa, engine, bundle_path, out_a);
+    try renderOnce(gpa, engine, bundle_path, out_a, segmentation_model);
     settle(engine);
-    try renderOnce(gpa, engine, bundle_path, out_b);
+    try renderOnce(gpa, engine, bundle_path, out_b, segmentation_model);
     settle(engine);
 
     var path_a_buf: [256]u8 = undefined;
@@ -421,9 +478,9 @@ pub fn main(init_args: std.process.Init) !u8 {
 
     var current: std.Io.Writer.Allocating = .init(gpa);
     defer current.deinit();
-    for (reference_lenses) |name| {
-        const hash = try checkDeterminism(gpa, engine, name) orelse return 1;
-        try current.writer.print("{s} {s}\n", .{ name, hash });
+    for (reference_lenses) |lens| {
+        const hash = try checkDeterminism(gpa, engine, lens.name, lens.segmentation_model) orelse return 1;
+        try current.writer.print("{s} {s}\n", .{ lens.name, hash });
     }
 
     if (print_mode) {
@@ -450,5 +507,6 @@ pub fn main(init_args: std.process.Init) !u8 {
 
     if (!try proveTriggerAnimFires(gpa, engine)) return 1;
     if (!try provePhotoCapture(gpa, engine)) return 1;
+    if (!try proveMaskDegradation(gpa, engine)) return 1;
     return 0;
 }
