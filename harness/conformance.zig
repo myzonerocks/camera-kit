@@ -13,6 +13,7 @@ const std = @import("std");
 const abi = @import("abi");
 const sampler = @import("sampler");
 const image_adapter = @import("image");
+const png = @import("png");
 const math = @import("math");
 
 const c = @cImport({
@@ -197,6 +198,88 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
+}
+
+/// Proves video recording end to end through the public surface: a
+/// real lens composites the corpus frame while recording, the finished
+/// file decodes back with the recorded shape, and a decoded frame is
+/// exported as the by-eye artifact.
+fn proveVideoRecording(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    if (!abi.recording_supported) {
+        std.debug.print("conformance: FAIL recording backend missing on this host\n", .{});
+        return false;
+    }
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL recording lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const path = "zig-out/conformance-recording.mp4";
+    if (abi.goss_engine_recording_start(engine, session, path.ptr, path.len, null) != .ok) {
+        std.debug.print("conformance: FAIL recording start\n", .{});
+        return false;
+    }
+    const total_frames = 40;
+    for (0..total_frames) |i| {
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = @intCast((i + 1) * 33_333),
+        };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+    if (abi.goss_engine_recording_stop(engine) != .ok) {
+        std.debug.print("conformance: FAIL recording stop\n", .{});
+        return false;
+    }
+
+    const shape = abi.recordingProbe(path) catch {
+        std.debug.print("conformance: FAIL the recorded file does not decode\n", .{});
+        return false;
+    };
+    // Every encoder pool slot skips exactly its first frame while the
+    // render-target wrap lands, and the engine counts those plus any
+    // timestamp drops - the decoded count must match that identity,
+    // and warmups must stay a minority of the recording.
+    const accounted = total_frames - engine.recording_warmups - engine.recording_dropped;
+    if (shape.frames != accounted or shape.frames < total_frames / 2 or shape.width != 400 or shape.height != 300) {
+        std.debug.print("conformance: FAIL recorded shape {d} frames ({d} warmups, {d} dropped) {d}x{d}\n", .{ shape.frames, engine.recording_warmups, engine.recording_dropped, shape.width, shape.height });
+        return false;
+    }
+
+    const bgra = try gpa.alloc(u8, @as(usize, shape.width) * shape.height * 4);
+    defer gpa.free(bgra);
+    const exported = abi.recordingExportFrame(path, shape.frames / 2, bgra) catch {
+        std.debug.print("conformance: FAIL recorded frame export\n", .{});
+        return false;
+    };
+    for (0..@as(usize, exported.width) * exported.height) |at| {
+        std.mem.swap(u8, &bgra[at * 4], &bgra[at * 4 + 2]);
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, bgra, exported.width, exported.height);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-recording-frame.png", .data = png_bytes.items });
+
+    std.debug.print("conformance: PROOF recording is a decodable video of the composited frames ({d}/{d} frames, {d} pool warmups, {d}x{d}, {d}us)\n", .{ shape.frames, total_frames, engine.recording_warmups, shape.width, shape.height, shape.duration_us });
+    return true;
 }
 
 /// Proves the zero-mask degradation: hair-recolor against a model with
@@ -508,5 +591,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveTriggerAnimFires(gpa, engine)) return 1;
     if (!try provePhotoCapture(gpa, engine)) return 1;
     if (!try proveMaskDegradation(gpa, engine)) return 1;
+    if (!try proveVideoRecording(gpa, engine)) return 1;
     return 0;
 }
