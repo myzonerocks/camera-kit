@@ -16,6 +16,7 @@ const render = @import("render");
 const tracking = @import("tracking");
 const segmentation = @import("segmentation");
 const face = @import("face");
+const face_geometry = @import("face_geometry");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -59,7 +60,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 10;
+pub const abi_minor: u16 = 11;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -1575,6 +1576,29 @@ pub export fn goss_session_pose_result(session: ?*Session, out_result: ?*pose.Re
     const out = out_result orelse return .invalid_argument;
     const worker = s.pose_tracking orelse return .again;
     if (!tracking.pose_worker.readResult(worker, out)) return .again;
+    return .ok;
+}
+
+/// Fits the canonical face onto the newest tracked landmarks and writes
+/// the head transform - canonical metric space into frame pixels - as a
+/// column-major 4x4. Reports again until a face is tracked or while the
+/// fit is degenerate.
+pub export fn goss_session_face_pose(session: ?*Session, out_matrix: ?*[16]f32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_matrix orelse return .invalid_argument;
+    const worker = s.face_tracking orelse return .again;
+    var result: face.Result = undefined;
+    if (!tracking.readResult(worker, &result)) return .again;
+    if (result.landmark_count_out == 0 or result.presence < 0.5) return .again;
+    const head = face_geometry.estimateHeadPose(&result.landmarks) orelse return .again;
+    var at: usize = 0;
+    for (head.cols) |col| {
+        out[at] = col[0];
+        out[at + 1] = col[1];
+        out[at + 2] = col[2];
+        out[at + 3] = col[3];
+        at += 4;
+    }
     return .ok;
 }
 

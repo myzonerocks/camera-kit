@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 10u
+#define GOSS_ABI_MINOR 11u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -360,6 +360,12 @@ goss_status goss_session_hand_result(goss_session *session, goss_hand_result *ou
  * memory. Reports GOSS_AGAIN until the worker has published its first
  * result. */
 goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result);
+
+/* Graph thread. Fits the canonical face onto the newest tracked
+ * landmarks and writes the head transform - canonical metric space
+ * (centimeters) into frame pixels - as a column-major 4x4. Reports
+ * GOSS_AGAIN until a face is tracked or while the fit is degenerate. */
+goss_status goss_session_face_pose(goss_session *session, float *out_matrix);
 
 /* Effect identifiers for goss_session_set_beauty. Values clamp to zero and
  * one; zero disables the effect. */

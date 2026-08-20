@@ -14,6 +14,7 @@ const sampler = @import("sampler");
 const face = @import("face");
 const hand = @import("hand");
 const pose = @import("pose");
+const face_geometry = @import("face_geometry");
 const tracker = @import("tracker");
 
 const abi = @import("abi");
@@ -817,6 +818,39 @@ pub fn main(init_args: std.process.Init) !u8 {
         if (result.presence < 0.5) return 1;
         if (result.landmark_count_out != face.landmark_count) return 1;
         if (result.timestamp_us != 1000) return 1;
+
+        // The head pose through the same public surface: the fit must
+        // resolve on the tracked portrait, and reprojecting the basis
+        // landmarks through it must land near where tracking put them.
+        var head: [16]f32 = undefined;
+        if (abi.goss_session_face_pose(session, &head) != .ok) {
+            try out.print("abi face pose: refused\n", .{});
+            try out.flush();
+            return 1;
+        }
+        var reprojection_sum: f64 = 0;
+        for (face_geometry.pose_basis) |entry| {
+            const i: usize = entry.landmark;
+            const cx = face_geometry.canonical_positions[i * 3];
+            const cy = face_geometry.canonical_positions[i * 3 + 1];
+            const cz = face_geometry.canonical_positions[i * 3 + 2];
+            const px = head[0] * cx + head[4] * cy + head[8] * cz + head[12];
+            const py = head[1] * cx + head[5] * cy + head[9] * cz + head[13];
+            const dx = px - result.landmarks[i * 3];
+            const dy = py - result.landmarks[i * 3 + 1];
+            reprojection_sum += @sqrt(@as(f64, dx * dx + dy * dy));
+        }
+        const reprojection_mean = reprojection_sum / @as(f64, @floatFromInt(face_geometry.pose_basis.len));
+        const face_span = @abs(result.landmarks[454 * 3] - result.landmarks[234 * 3]);
+        try out.print(
+            "abi face pose: basis reprojection mean {d:.1}px, face span {d:.0}px\n",
+            .{ reprojection_mean, face_span },
+        );
+        try out.flush();
+        // A weak-perspective fit of a real face lands the stable basis
+        // within a small fraction of the face's own width.
+        if (face_span <= 0) return 1;
+        if (reprojection_mean > @as(f64, face_span) * 0.15) return 1;
 
         // Segmentation through the same public surface: one session, one
         // enable call, the same NV12 frame goss_session_track_frame already
