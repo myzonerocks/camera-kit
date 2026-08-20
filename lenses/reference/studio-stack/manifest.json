@@ -1,0 +1,15 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.studio-stack",
+  "version": "1.0.0",
+  "display_name": "Studio Stack",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "blur", "type": "blur.pass", "inputs": {"frame": "camera"}, "params": {}},
+    {"id": "grade", "type": "grade.pass", "inputs": {"frame": "blur"}, "params": {}, "grade": {"exposure": 0.1, "contrast": 1.15, "saturation": 1.2, "temperature": 0.05}},
+    {"id": "glow", "type": "bloom.pass", "inputs": {"frame": "grade"}, "params": {}, "bloom": {"threshold": 0.6, "intensity": 0.7}}
+  ],
+  "triggers": []
+}
