@@ -8,6 +8,7 @@ pub const matrix = @import("matrix.zig");
 pub const quat = @import("quat.zig");
 pub const pose = @import("pose.zig");
 pub const color = @import("color.zig");
+pub const fit = @import("fit.zig");
 
 pub const Vec2 = vec.Vec2;
 pub const Vec3 = vec.Vec3;

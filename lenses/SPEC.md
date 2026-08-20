@@ -132,6 +132,15 @@ other nodes in the same list by their `id`:
 }
 ```
 
+A `model.gltf` node may add `"anchor": "face"`, pinning the model to the
+tracked head: the runtime fits the canonical face's metric geometry to
+the live landmarks and poses the model with that transform, so model
+space is the canonical face's centimeter space (origin between the eyes,
+x toward the subject's left, y up, z out of the face). Without a tracked
+face the node draws nothing, the standard capability degradation.
+`anchor` is rejected on every other node type, and `"face"` is the only
+anchor GLF 1.0 defines.
+
 The set of known `type` values is closed and versioned with the *engine*, not
 the format — GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
@@ -277,9 +286,9 @@ pass reading the hair mask channel), face-paint (capabilities: face; a
 mesh.face node warping a texture over the tracked face), beauty-baseline (capabilities: face; the beauty node
 type), background-swap (capabilities: segmentation), trigger-anim
 (capabilities: none required; a timer-driven trigger playing a glTF
-animation clip, proving 6.2/6.3 without needing a live face). Planned to
-complete the set: face-mask (capabilities: face; a glTF model anchored
-to landmarks, blocked on head-pose estimation) and world-anchor
+animation clip, proving 6.2/6.3 without needing a live face), face-mask
+(capabilities: face; a glTF model pinned to the head through
+`"anchor": "face"`). Planned to complete the set: world-anchor
 (capabilities: world, blocked on the world-tracking seam). Each reference lens runs through the conformance
 harness on all three platforms and is asserted bit-stable per platform
 (pixel output) and value-stable across platforms for anything

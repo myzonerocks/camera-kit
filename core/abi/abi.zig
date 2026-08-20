@@ -16,6 +16,7 @@ const render = @import("render");
 const tracking = @import("tracking");
 const segmentation = @import("segmentation");
 const face = @import("face");
+const face_geometry = @import("face_geometry");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -59,7 +60,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 10;
+pub const abi_minor: u16 = 11;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -337,6 +338,8 @@ pub const Session = struct {
     blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// model.gltf nodes anchored to the tracked face, by graph index.
+    model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     /// One background loader per currently-spliced model.gltf node
     /// still waiting on its .glb - mirrors lut_loaders/blend_loaders,
     /// one node type over.
@@ -908,9 +911,42 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
                 const elapsed_us = if (s.active_lens) |*lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
                 const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
-                const model_matrix = if (loaded.animation) |*anim| anim.sample(elapsed_seconds) else math.Mat4.identity;
+                var model_matrix = if (loaded.animation) |*anim| anim.sample(elapsed_seconds) else math.Mat4.identity;
+                var anchored_without_face = false;
+                if (s.model_face_anchors.contains(entry.graph_index)) {
+                    anchored_without_face = true;
+                    if (s.face_tracking) |worker| {
+                        var tracked: face.Result = undefined;
+                        if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                            if (face_geometry.estimateHeadPose(&tracked.landmarks)) |head| {
+                                // The head transform lands in source-frame
+                                // pixels, stretched by the preview blit to
+                                // fill a rect whose z=0 plane spans
+                                // 4*tan(22.5) world units vertically.
+                                const world_height: f32 = 1.6568542;
+                                const rect_aspect = @as(f32, @floatFromInt(rect_width)) / @as(f32, @floatFromInt(rect_height));
+                                const sx = world_height * rect_aspect / @as(f32, @floatFromInt(width));
+                                const sy = world_height / @as(f32, @floatFromInt(height));
+                                const pixel_to_world: math.Mat4 = .{ .cols = .{
+                                    .{ sx, 0, 0, 0 },
+                                    .{ 0, -sy, 0, 0 },
+                                    .{ 0, 0, -sy, 0 },
+                                    .{ -0.5 * world_height * rect_aspect, 0.5 * world_height, 0, 1 },
+                                } };
+                                model_matrix = pixel_to_world.mul(head).mul(model_matrix);
+                                anchored_without_face = false;
+                            }
+                        }
+                    }
+                }
                 const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_width)) / @as(f32, @floatFromInt(rect_height));
-                r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, aspect_ratio);
+                if (anchored_without_face) {
+                    // The anchor's capability degradation: the frame
+                    // still passes through, the mesh alone stays off.
+                    r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                } else {
+                    r.submitModel(blit_view, mesh_view, input_texture, loaded.mesh, model_matrix, loaded.base_color, aspect_ratio);
+                }
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;
@@ -985,6 +1021,7 @@ pub fn destroySession(session: *Session) void {
     session.blend_textures.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
+    session.model_face_anchors.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -1578,6 +1615,29 @@ pub export fn goss_session_pose_result(session: ?*Session, out_result: ?*pose.Re
     return .ok;
 }
 
+/// Fits the canonical face onto the newest tracked landmarks and writes
+/// the head transform - canonical metric space into frame pixels - as a
+/// column-major 4x4. Reports again until a face is tracked or while the
+/// fit is degenerate.
+pub export fn goss_session_face_pose(session: ?*Session, out_matrix: ?*[16]f32) Status {
+    const s = session orelse return .invalid_argument;
+    const out = out_matrix orelse return .invalid_argument;
+    const worker = s.face_tracking orelse return .again;
+    var result: face.Result = undefined;
+    if (!tracking.readResult(worker, &result)) return .again;
+    if (result.landmark_count_out == 0 or result.presence < 0.5) return .again;
+    const head = face_geometry.estimateHeadPose(&result.landmarks) orelse return .again;
+    var at: usize = 0;
+    for (head.cols) |col| {
+        out[at] = col[0];
+        out[at + 1] = col[1];
+        out[at + 2] = col[2];
+        out[at + 3] = col[3];
+        at += 4;
+    }
+    return .ok;
+}
+
 /// Stands the beauty chain up for a session. The resource path names the
 /// directory holding the effect engine's shader and image assets; builds
 /// without the effects engine report unsupported.
@@ -1828,6 +1888,7 @@ fn destroyBlendState(session: *Session) void {
 }
 
 fn destroyMeshFaceState(session: *Session) void {
+    session.model_face_anchors.clearRetainingCapacity();
     var loader_it = session.mesh_face_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
     session.mesh_face_loaders.clearRetainingCapacity();
@@ -2072,6 +2133,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
     const models = try lens.modelNodes(gpa, &session.lens_graph);
     defer gpa.free(models);
     for (models) |model| {
+        if (model.face_anchor) {
+            session.model_face_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.glb", .{ bundle_path, model.model_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ModelLoader.start(gpa, path) catch continue;

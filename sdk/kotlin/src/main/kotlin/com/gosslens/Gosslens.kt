@@ -42,6 +42,7 @@ object Gosslens {
     internal external fun nativeEnablePoseTracking(session: Long, taskBuffer: ByteBuffer, taskLen: Int, threads: Int): Int
     internal external fun nativeDisablePoseTracking(session: Long)
     internal external fun nativePoseResult(session: Long, resultBuffer: ByteBuffer): Int
+    internal external fun nativeFacePose(session: Long, matrixBuffer: ByteBuffer): Int
     internal external fun nativeTrackFrame(
         session: Long,
         yBuffer: ByteBuffer,
@@ -362,6 +363,19 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
         val status = Gosslens.nativePoseResult(handle, result.buffer)
         if (status != 0) return false
         result.parse()
+        return true
+    }
+
+    private val facePoseBuffer: ByteBuffer =
+        ByteBuffer.allocateDirect(16 * 4).order(java.nio.ByteOrder.nativeOrder())
+
+    /** Fills [matrix] with the column-major head transform - canonical
+     * metric space into frame pixels; false until a face is tracked. */
+    fun facePose(matrix: FloatArray): Boolean {
+        require(matrix.size >= 16)
+        if (Gosslens.nativeFacePose(handle, facePoseBuffer) != 0) return false
+        facePoseBuffer.rewind()
+        facePoseBuffer.asFloatBuffer().get(matrix, 0, 16)
         return true
     }
 

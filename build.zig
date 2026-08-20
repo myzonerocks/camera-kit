@@ -183,6 +183,7 @@ pub fn build(b: *std.Build) void {
     const hand_core_module = tracking_cores.hand;
     const pose_core_module = tracking_cores.pose;
     const face_mesh_topology_module = tracking_cores.face_mesh_topology;
+    const face_geometry_core_module = tracking_cores.face_geometry;
     const tracker_module = tracking_cores.tracker;
     const face106_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/face106.zig"),
@@ -198,6 +199,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("face", face_module);
     abi_module.addImport("hand", hand_core_module);
     abi_module.addImport("pose", pose_core_module);
+    abi_module.addImport("face_geometry", face_geometry_core_module);
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -293,11 +295,14 @@ pub fn build(b: *std.Build) void {
     const face_tests = b.addTest(.{ .root_module = face_module });
     const pose_tests = b.addTest(.{ .root_module = pose_core_module });
     const face_mesh_topology_tests = b.addTest(.{ .root_module = face_mesh_topology_module });
+    const face_geometry_tests = b.addTest(.{ .root_module = face_geometry_core_module });
     const tracker_tests = b.addTest(.{ .root_module = tracker_module });
     const face106_tests = b.addTest(.{ .root_module = face106_module });
     const segment_tests = b.addTest(.{ .root_module = segment_module });
     const blob_tests = b.addTest(.{ .root_module = blob_module });
     const math_tests = b.addTest(.{ .root_module = math_module });
+    const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
+    const fit_tests = b.addTest(.{ .root_module = fit_module });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
@@ -316,11 +321,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(face_tests).step);
     test_step.dependOn(&b.addRunArtifact(pose_tests).step);
     test_step.dependOn(&b.addRunArtifact(face_mesh_topology_tests).step);
+    test_step.dependOn(&b.addRunArtifact(face_geometry_tests).step);
     test_step.dependOn(&b.addRunArtifact(tracker_tests).step);
     test_step.dependOn(&b.addRunArtifact(face106_tests).step);
     test_step.dependOn(&b.addRunArtifact(segment_tests).step);
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
+    test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
@@ -550,6 +557,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "face", .module = face_module },
                 .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "pose", .module = pose_core_module },
+                .{ .name = "face_geometry", .module = face_geometry_core_module },
                 .{ .name = "tracker", .module = tracker_module },
                 .{ .name = "graph", .module = graph_module },
                 .{ .name = "math", .module = math_module },
@@ -586,6 +594,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "face", .module = face_module },
                 .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "pose", .module = pose_core_module },
+                .{ .name = "face_geometry", .module = face_geometry_core_module },
                 .{ .name = "tracking", .module = tracking_real_module },
                 .{ .name = "segmentation", .module = segmentation_module },
                 .{ .name = "manifest", .module = lens_manifest_module },
@@ -615,6 +624,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "face", .module = face_module },
                 .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "pose", .module = pose_core_module },
+                .{ .name = "face_geometry", .module = face_geometry_core_module },
                 .{ .name = "tracker", .module = tracker_module },
                 .{ .name = "math", .module = math_module },
                 .{ .name = "abi", .module = abi_tracking_module },
@@ -760,6 +770,7 @@ pub fn build(b: *std.Build) void {
         abi_wasm.addImport("face", tracking_cores_wasm.face);
     abi_wasm.addImport("hand", tracking_cores_wasm.hand);
     abi_wasm.addImport("pose", tracking_cores_wasm.pose);
+    abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -913,6 +924,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "face", .module = face_module },
                 .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "pose", .module = pose_core_module },
+                .{ .name = "face_geometry", .module = face_geometry_core_module },
                 .{ .name = "manifest", .module = lens_manifest_module },
                 .{ .name = "trigger", .module = lens_trigger_module },
                 .{ .name = "runtime", .module = lens_runtime_module },
@@ -962,6 +974,7 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "face", .module = face_module },
                     .{ .name = "hand", .module = hand_core_module },
                 .{ .name = "pose", .module = pose_core_module },
+                .{ .name = "face_geometry", .module = face_geometry_core_module },
                     .{ .name = "tracker", .module = tracker_module },
                     .{ .name = "graph", .module = graph_module },
                     .{ .name = "math", .module = math_module },
@@ -1128,6 +1141,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("face", tracking_cores_android.face);
     abi_android.addImport("hand", tracking_cores_android.hand);
     abi_android.addImport("pose", tracking_cores_android.pose);
+    abi_android.addImport("face_geometry", tracking_cores_android.face_geometry);
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = android_target,
@@ -1312,6 +1326,7 @@ const TrackingCoreModules = struct {
     hand: *std.Build.Module,
     pose: *std.Build.Module,
     face_mesh_topology: *std.Build.Module,
+    face_geometry: *std.Build.Module,
     tracker: *std.Build.Module,
 };
 
@@ -1366,6 +1381,12 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .target = target,
         .optimize = optimize,
     });
+    const face_geometry_module = b.createModule(.{
+        .root_source_file = b.path("core/tracking/face_geometry.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "math", .module = math_module }},
+    });
     const tracker_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/tracker.zig"),
         .target = target,
@@ -1383,6 +1404,7 @@ fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize
         .hand = hand_module,
         .pose = pose_module,
         .face_mesh_topology = face_mesh_topology_module,
+        .face_geometry = face_geometry_module,
         .tracker = tracker_module,
     };
 }
@@ -2805,6 +2827,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("face", tracking_cores_ios.face);
     abi_ios.addImport("hand", tracking_cores_ios.hand);
     abi_ios.addImport("pose", tracking_cores_ios.pose);
+    abi_ios.addImport("face_geometry", tracking_cores_ios.face_geometry);
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = ios_target,
@@ -3328,6 +3351,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("face", tracking_cores_em.face);
     abi_em.addImport("hand", tracking_cores_em.hand);
     abi_em.addImport("pose", tracking_cores_em.pose);
+    abi_em.addImport("face_geometry", tracking_cores_em.face_geometry);
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));

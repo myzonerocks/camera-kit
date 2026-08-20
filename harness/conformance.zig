@@ -24,7 +24,7 @@ extern fn glfwGetCocoaWindow(window: ?*c.GLFWwindow) ?*anyopaque;
 
 const width: u32 = 400;
 const height: u32 = 300;
-const reference_lenses = [_][]const u8{ "shader-tint", "beauty-baseline", "background-swap", "trigger-anim", "hair-recolor", "face-paint" };
+const reference_lenses = [_][]const u8{ "shader-tint", "beauty-baseline", "background-swap", "trigger-anim", "hair-recolor", "face-paint", "face-mask" };
 const baseline_path = "lenses/conformance-baseline.txt";
 const corpus_path = ".models/corpus/face_frontal_b.jpg";
 const face_bundle_path = ".models/face_landmarker.task";

@@ -40,6 +40,7 @@ const abi_functions = [_][]const u8{
     "goss_status goss_session_enable_pose_tracking(goss_session *session, const uint8_t *task_bytes, size_t task_len, int32_t threads)",
     "void goss_session_disable_pose_tracking(goss_session *session)",
     "goss_status goss_session_pose_result(goss_session *session, goss_pose_result *out_result)",
+    "goss_status goss_session_face_pose(goss_session *session, float *out_matrix)",
     "goss_status goss_session_enable_segmentation(goss_session *session, const uint8_t *model_bytes, size_t model_len, int32_t threads)",
     "void goss_session_disable_segmentation(goss_session *session)",
     "goss_status goss_session_track_frame(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",

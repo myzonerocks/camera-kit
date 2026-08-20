@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.face-mask",
+  "version": "1.0.0",
+  "display_name": "Face Mask",
+  "engine_compat": ">=0.11",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "face_mask", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "face"}
+  ],
+  "triggers": []
+}

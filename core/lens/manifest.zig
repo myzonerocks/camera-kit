@@ -71,6 +71,8 @@ pub const Node = struct {
     params: []const NodeParam,
     /// Index into mask_channels, set only when the manifest names one.
     mask_channel: ?u8 = null,
+    /// True when a model.gltf node anchors to the tracked face.
+    face_anchor: bool = false,
 };
 
 pub const ActionKind = enum {
@@ -596,6 +598,21 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             path.pop(params_mark);
         }
 
+        var face_anchor = false;
+        if (getField(object, "anchor")) |anchor_value| {
+            const anchor_mark = path.push("anchor");
+            if (try expectString(diags, path, anchor_value)) |anchor_name| {
+                if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                    try diags.add(path.slice(), "anchor is a model.gltf field, found it on '{s}'", .{node_type});
+                } else if (std.mem.eql(u8, anchor_name, "face")) {
+                    face_anchor = true;
+                } else {
+                    try diags.add(path.slice(), "unknown anchor '{s}'", .{anchor_name});
+                }
+            }
+            path.pop(anchor_mark);
+        }
+
         var mask_channel: ?u8 = null;
         if (getField(object, "mask")) |mask_value| {
             const mask_mark = path.push("mask");
@@ -617,6 +634,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .inputs = try inputs.toOwnedSlice(arena),
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
+            .face_anchor = face_anchor,
         });
     }
     return try out.toOwnedSlice(arena);
@@ -1009,6 +1027,50 @@ test "a node input naming an unknown node id fails cross reference" {
     var found = false;
     for (result.diags.items) |d| {
         if (std.mem.indexOf(u8, d.message, "unknown node id") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a face anchor parses on a model node and only there" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": ["face"], "parameters": [], "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "face"}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expect(manifest.nodes[0].face_anchor);
+}
+
+test "an anchor on a non-model node is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "a", "type": "beauty.reshape", "inputs": {"frame": "camera"}, "params": {}, "anchor": "face"}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "anchor is a model.gltf field") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "an unknown anchor name is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "m", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "skeleton"}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "unknown anchor") != null) found = true;
     }
     try t.expect(found);
 }
