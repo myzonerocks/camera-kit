@@ -15,6 +15,8 @@ pub const Shape = enum(u32) {
 pub const Motion = enum(u32) {
     static = 0,
     dynamic = 1,
+    /// The engine drives its pose each step; chained bodies follow.
+    kinematic = 2,
 };
 
 pub const invalid_body: u32 = std.math.maxInt(u32);
@@ -24,6 +26,8 @@ extern fn goss_physics_world_destroy(handle: *anyopaque) void;
 extern fn goss_physics_body_add(handle: *anyopaque, shape: u32, px: f32, py: f32, pz: f32, sx: f32, sy: f32, sz: f32, motion: u32) u32;
 extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
+extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
+extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
 
 pub const World = struct {
     handle: *anyopaque,
@@ -47,6 +51,18 @@ pub const World = struct {
     /// contract: the same dt sequence always lands the same poses.
     pub fn step(world: World, dt_seconds: f32) void {
         goss_physics_step(world.handle, dt_seconds);
+    }
+
+    /// Links two bodies with a distance constraint between local attach
+    /// points - the chain link for content hanging off an anchor.
+    pub fn constrainDistance(world: World, a: u32, b: u32, point_a: [3]f32, point_b: [3]f32, min: f32, max: f32) !void {
+        if (goss_physics_constrain_distance(world.handle, a, b, point_a[0], point_a[1], point_a[2], point_b[0], point_b[1], point_b[2], min, max) != 0) return error.ConstraintFailed;
+    }
+
+    /// Drives a kinematic body toward a pose over dt; chained bodies
+    /// swing after it.
+    pub fn moveBody(world: World, body: u32, position: [3]f32, dt_seconds: f32) void {
+        goss_physics_body_move(world.handle, body, position[0], position[1], position[2], dt_seconds);
     }
 
     /// The body's column-major world transform.
@@ -83,4 +99,25 @@ test "two identical worlds land bit-identical poses" {
         poses[run] = try world.bodyPose(ball);
     }
     try t.expectEqualSlices(f32, &poses[0], &poses[1]);
+}
+
+test "a chained pendant follows a moved kinematic anchor" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const anchor = try world.addBody(.sphere, .{ 0, 1.0, 0 }, .{ 0.02, 0, 0 }, .kinematic);
+    const pendant = try world.addBody(.sphere, .{ 0, 0.9, 0 }, .{ 0.03, 0, 0 }, .dynamic);
+    try world.constrainDistance(anchor, pendant, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, 0.1);
+    var i: usize = 0;
+    while (i < 120) : (i += 1) {
+        const x = 0.3 * @sin(@as(f32, @floatFromInt(i)) * 0.08);
+        world.moveBody(anchor, .{ x, 1.0, 0 }, 1.0 / 60.0);
+        world.step(1.0 / 60.0);
+    }
+    const anchor_pose = try world.bodyPose(anchor);
+    const pendant_pose = try world.bodyPose(pendant);
+    // The pendant hangs below the anchor within the chain length.
+    try t.expect(pendant_pose[13] <= anchor_pose[13]);
+    const dx = pendant_pose[12] - anchor_pose[12];
+    const dy = pendant_pose[13] - anchor_pose[13];
+    try t.expect(@sqrt(dx * dx + dy * dy) <= 0.16);
 }

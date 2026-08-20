@@ -2753,11 +2753,12 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                     session.physics_last_us = 0;
                 }
                 if (session.physics_world) |world| {
+                    const motion: physics.Motion = if (body.kinematic) .kinematic else if (body.dynamic) .dynamic else .static;
                     const id = world.addBody(
                         if (body.shape == .box) .box else .sphere,
                         body.position,
                         body.size,
-                        if (body.dynamic) .dynamic else .static,
+                        motion,
                     ) catch physics.invalid_body;
                     if (id != physics.invalid_body) {
                         session.physics_bodies.put(gpa, model.graph_index, id) catch {};
@@ -2771,6 +2772,23 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         session.model_loaders.put(gpa, model.graph_index, loader) catch {
             loader.deinit();
         };
+    }
+
+    // Wire chains now that every body exists: a dynamic node chained to
+    // an anchor node hangs off it by a distance constraint. Node counts
+    // are tiny, so a direct id match beats a map.
+    if (session.physics_world) |world| {
+        for (models) |model| {
+            const body = model.physics orelse continue;
+            const chain_to = body.chain_to orelse continue;
+            const child = session.physics_bodies.get(model.graph_index) orelse continue;
+            for (models) |anchor_model| {
+                if (!std.mem.eql(u8, anchor_model.node_id, chain_to)) continue;
+                const anchor = session.physics_bodies.get(anchor_model.graph_index) orelse break;
+                world.constrainDistance(anchor, child, .{ 0, 0, 0 }, .{ 0, 0, 0 }, 0.0, body.chain_length) catch {};
+                break;
+            }
+        }
     }
 }
 

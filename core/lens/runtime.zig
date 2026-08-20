@@ -138,6 +138,9 @@ pub const BlendPassNode = struct {
 pub const ModelNode = struct {
     graph_index: graph.NodeIndex,
     model_stem: []const u8,
+    /// The lens-format node id, so cross-node references (a physics
+    /// chain naming its anchor) resolve at draw setup.
+    node_id: []const u8,
     face_anchor: bool = false,
     world_anchor: bool = false,
     physics: ?manifest.PhysicsBody = null,
@@ -281,7 +284,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .face_anchor = node.face_anchor, .world_anchor = node.world_anchor, .physics = node.physics });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .node_id = node.asset_stem.?, .face_anchor = node.face_anchor, .world_anchor = node.world_anchor, .physics = node.physics });
         }
         return out.toOwnedSlice(gpa);
     }
