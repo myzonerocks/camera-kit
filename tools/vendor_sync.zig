@@ -249,7 +249,8 @@ const Sync = struct {
             return;
         }
 
-        try s.applyPatches(name, dest);
+        const patches_dir_path = try std.fmt.allocPrint(s.arena, "third_party/{s}/patches", .{name});
+        try s.applyPatches(name, patches_dir_path, dest);
 
         const patches_digest = try s.patchesDigest(name);
         const stamp_data = try std.fmt.allocPrint(s.arena, "{s}\n{s}\n", .{ pin.commit, patches_digest });
@@ -267,19 +268,18 @@ const Sync = struct {
     /// pinned commit fails the whole sync loudly (via `try`, matching how
     /// this function's own curl/tar steps above already fail) rather than
     /// leaving a half-patched tree that looks synced.
-    fn applyPatches(s: *Sync, name: []const u8, dest: []const u8) !void {
-        const patches_dir_path = try std.fmt.allocPrint(s.arena, "third_party/{s}/patches", .{name});
+    fn applyPatches(s: *Sync, name: []const u8, patches_dir_path: []const u8, dest: []const u8) !void {
         const names = try s.sortedPatchNames(patches_dir_path);
 
         for (names) |patch_name| {
-            // patch's own -d chdirs into dest before it opens -i's file, so
-            // -i must resolve from there, not from this process's cwd - a
-            // repo-root-relative path silently fails to be found once -d
-            // has already taken effect. dest is always exactly
-            // ".vendor/<name>" (built a few lines above), two segments
-            // deep, so "../.." reliably returns to the repo root from any
-            // vendor's own dest without needing to resolve an absolute cwd.
-            const patch_path = try std.fmt.allocPrint(s.arena, "../../{s}/{s}", .{ patches_dir_path, patch_name });
+            // patch's own -d chdirs into dest before it opens -i's file,
+            // so -i must resolve from there, not from this process's cwd.
+            // Climb back out by dest's own depth, then down to the patch,
+            // which stays correct for any relative dest.
+            var climb: std.ArrayList(u8) = .empty;
+            var segments = std.mem.tokenizeScalar(u8, dest, '/');
+            while (segments.next()) |_| try climb.appendSlice(s.arena, "../");
+            const patch_path = try std.fmt.allocPrint(s.arena, "{s}{s}/{s}", .{ climb.items, patches_dir_path, patch_name });
             std.debug.print("vendor-sync: {s} applying {s}\n", .{ name, patch_name });
             try s.run(&.{ "patch", "-p1", "-d", dest, "-i", patch_path });
         }
@@ -400,21 +400,29 @@ test "host archive override is null with no platform pins set" {
 
 test "applyPatches finds, sorts, and really applies a patch onto a synced vendor tree" {
     const cwd = Io.Dir.cwd();
+    // A unique root per run: this test compiles into several parallel
+    // test binaries, and a fixed path let one instance delete the tree
+    // under another's running patch child. The tmp dir also keeps
+    // debris out of the tracked third_party tree.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
     const vendor_name = "_test_patch_vendor";
-    const patches_dir = "third_party/" ++ vendor_name ++ "/patches";
-    const dest = ".vendor/" ++ vendor_name;
-    cwd.deleteTree(t.io, "third_party/" ++ vendor_name) catch {};
-    cwd.deleteTree(t.io, dest) catch {};
-    defer cwd.deleteTree(t.io, "third_party/" ++ vendor_name) catch {};
-    defer cwd.deleteTree(t.io, dest) catch {};
+    var patches_buf: [96]u8 = undefined;
+    const patches_dir = try std.fmt.bufPrint(&patches_buf, ".zig-cache/tmp/{s}/patches", .{&tmp.sub_path});
+    var dest_buf: [96]u8 = undefined;
+    const dest = try std.fmt.bufPrint(&dest_buf, ".zig-cache/tmp/{s}/vendor", .{&tmp.sub_path});
 
     try cwd.createDirPath(t.io, patches_dir);
     try cwd.createDirPath(t.io, dest);
-    try cwd.writeFile(t.io, .{ .sub_path = dest ++ "/hello.txt", .data = "before\n" });
+    var hello_buf: [128]u8 = undefined;
+    const hello_path = try std.fmt.bufPrint(&hello_buf, "{s}/hello.txt", .{dest});
+    try cwd.writeFile(t.io, .{ .sub_path = hello_path, .data = "before\n" });
     // Two patches, named so alphabetical order matters (0002 depends on
     // 0001 having already landed) - proves real ordering, not just that
     // a single patch applies.
-    try cwd.writeFile(t.io, .{ .sub_path = patches_dir ++ "/0002-second.patch", .data =
+    var second_buf: [160]u8 = undefined;
+    const second_path = try std.fmt.bufPrint(&second_buf, "{s}/0002-second.patch", .{patches_dir});
+    try cwd.writeFile(t.io, .{ .sub_path = second_path, .data =
         \\--- a/hello.txt
         \\+++ b/hello.txt
         \\@@ -1 +1 @@
@@ -422,7 +430,9 @@ test "applyPatches finds, sorts, and really applies a patch onto a synced vendor
         \\+after
         \\
     });
-    try cwd.writeFile(t.io, .{ .sub_path = patches_dir ++ "/0001-first.patch", .data =
+    var first_buf: [160]u8 = undefined;
+    const first_path = try std.fmt.bufPrint(&first_buf, "{s}/0001-first.patch", .{patches_dir});
+    try cwd.writeFile(t.io, .{ .sub_path = first_path, .data =
         \\--- a/hello.txt
         \\+++ b/hello.txt
         \\@@ -1 +1 @@
@@ -434,9 +444,9 @@ test "applyPatches finds, sorts, and really applies a patch onto a synced vendor
     var arena_state = std.heap.ArenaAllocator.init(t.allocator);
     defer arena_state.deinit();
     var s: Sync = .{ .arena = arena_state.allocator(), .io = t.io, .check_only = false };
-    try s.applyPatches(vendor_name, dest);
+    try s.applyPatches(vendor_name, patches_dir, dest);
 
-    const result = try cwd.readFileAlloc(t.io, dest ++ "/hello.txt", t.allocator, .limited(1024));
+    const result = try cwd.readFileAlloc(t.io, hello_path, t.allocator, .limited(1024));
     defer t.allocator.free(result);
     try t.expectEqualStrings("after\n", result);
 }
