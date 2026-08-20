@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.soft-blur",
+  "version": "1.0.0",
+  "display_name": "Soft Blur",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "blur", "type": "blur.pass", "inputs": {"frame": "camera"}, "params": {}}
+  ],
+  "triggers": []
+}

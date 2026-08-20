@@ -1129,6 +1129,75 @@ fn proveParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a blur.pass post-effect: the built-in separable blur softens the
+/// frame, so a blurred capture differs from the un-blurred one and is
+/// bit-stable across runs (no asset, always ready).
+fn proveBlur(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_]?[]const u8{ null, ".lens-packages/soft-blur", ".lens-packages/soft-blur" };
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |lens_pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (lens_pkg) |pkg| {
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL blur lens activation\n", .{});
+                return false;
+            }
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL blur is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL blur.pass did not change the frame\n", .{});
+        return false;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[1], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-soft-blur.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF a blur.pass softens the frame deterministically, differing from the un-blurred capture\n", .{});
+    return true;
+}
+
 /// Proves lens strand hair: the strands hang and settle deterministically
 /// across frames (the head pose drives them live on device; here a fixed
 /// pose gives a bit-stable host proof), settled differing from initial.
@@ -1526,5 +1595,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveTiledCapture(gpa, engine)) return 1;
     if (!try proveScript(gpa, engine)) return 1;
     if (!try proveAudio(gpa, engine)) return 1;
+    if (!try proveBlur(gpa, engine)) return 1;
     return 0;
 }

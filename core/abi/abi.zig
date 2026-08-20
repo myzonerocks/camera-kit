@@ -871,6 +871,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         const ready = switch (entry.kind) {
             .shader => s.shader_programs.contains(entry.graph_index),
             .lut => s.lut_textures.contains(entry.graph_index),
+            // A blur pass needs no loaded resource - the blur program is
+            // built in - so it is always ready to draw.
+            .blur => true,
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -980,6 +983,23 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 r.tile = if (is_final) s.capture_tile else null;
                 if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
                 r.submitLutPass(view_id, input_texture, lut_texture);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .blur => {
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                const rect_w = if (is_final) output_width else width;
+                const rect_h = if (is_final) output_height else height;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, rect_w, rect_h) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const step: [2]f32 = .{ 1.5 / @as(f32, @floatFromInt(rect_w)), 1.5 / @as(f32, @floatFromInt(rect_h)) };
+                r.submitBlurPass(view_id, input_texture, step);
                 if (output) |target| {
                     input_texture = target.texture;
                     if (!is_final) next_slot += 1;

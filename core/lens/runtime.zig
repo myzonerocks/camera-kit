@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, model_gltf, mesh_face };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, blur_pass, model_gltf, mesh_face };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -47,6 +47,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "mesh.face")) return .mesh_face;
     if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
     if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
+    if (std.mem.eql(u8, type_str, "blur.pass")) return .blur_pass;
     if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
     return null;
 }
@@ -71,7 +72,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .model_gltf, .mesh_face => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .blur_pass, .model_gltf, .mesh_face => &.{},
     };
 }
 
@@ -160,7 +161,7 @@ pub const MeshFaceNode = struct {
     texture_stem: []const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, model, mesh };
+pub const PassKind = enum { shader, lut, blend, blur, model, mesh };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -330,6 +331,7 @@ pub const Lens = struct {
                 .shader_pass => .shader,
                 .lut_pass => .lut,
                 .blend_pass => .blend,
+                .blur_pass => .blur,
                 .model_gltf => .model,
                 .mesh_face => .mesh,
                 else => continue,

@@ -184,6 +184,15 @@ deterministic CPU integration - no clock, no randomness - so the same
 field and frame count produce the same picture, conformance bit-stable; it
 needs no glb asset.
 
+A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
+reaches it with the engine's built-in separable box blur and passes the
+result down the chain, the same primitive `beauty.face`'s smooth step uses,
+here exposed as its own node so a lens can blur the full frame without a
+beauty filter. It reads `shaders/*.glsl` nothing and ships no asset - the
+program is kit-authored and fixed - so it is always ready and never
+degrades. Place it anywhere in the chain; it blurs its input and hands the
+softened frame to the next node.
+
 A `"script"` node carries an inline `"source"` string of JavaScript that
 defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
