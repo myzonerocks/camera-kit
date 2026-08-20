@@ -165,6 +165,34 @@ export async function pickEngineUrl(webgpuUrl: string | URL, webgl2Url: string |
 /// the same role Kotlin's Gosslens object plays around
 /// System.loadLibrary. Module load needs a canvas here, unlike
 /// Swift/Kotlin - a real platform difference, not an inconsistency.
+
+/// The platform camera's tracking quality: 0 unavailable, 1
+/// initializing, 2 tracking, 3 limited.
+export interface WorldState {
+  trackingState: number;
+  worldFromCamera: ArrayLike<number>;
+  projection: ArrayLike<number>;
+  timestampUs: number;
+}
+
+export interface WorldPlane {
+  id: number;
+  pose: ArrayLike<number>;
+  extentX: number;
+  extentZ: number;
+  classification: number;
+}
+
+export interface WorldAnchorInput {
+  id: number;
+  pose: ArrayLike<number>;
+}
+
+export interface WorldLight {
+  ambientIntensity: number;
+  colorTemperatureKelvin: number;
+}
+
 export class Gosslens {
   private constructor(
     private readonly mod: EngineModule,
@@ -391,6 +419,8 @@ export class Engine {
 /// landmarks) rather than one shared per-engine pool - matches every
 /// other SDK's own per-session confinement.
 export class Session {
+  private worldScratchPtr = 0;
+  private worldScratchLen = 0;
   private frameWidth = 0;
   private frameHeight = 0;
   /// Some cameras (certain external/virtual devices on macOS) hand the
@@ -644,6 +674,64 @@ export class Session {
     );
   }
 
+  /// Feeds the platform's world understanding into the session: camera
+  /// pose and projection (column-major float16 arrays), tracked planes,
+  /// anchors, and the light estimate. Drives the world.tracking_state
+  /// trigger and world-anchored lens content.
+  submitWorld(state: WorldState, planes: WorldPlane[] = [], anchors: WorldAnchorInput[] = [], light?: WorldLight): void {
+    const stateBytes = 144;
+    const planeBytes = 88;
+    const anchorBytes = 72;
+    const lightBytes = 8;
+    const total = stateBytes + planes.length * planeBytes + anchors.length * anchorBytes + lightBytes;
+    this.ensureWorldScratch(total);
+    const base = this.worldScratchPtr;
+    const heap = this.mod.HEAPU8;
+    const view = new DataView(heap.buffer, base, total);
+
+    view.setUint32(0, state.trackingState, true);
+    for (let i = 0; i < 16; i++) view.setFloat32(4 + i * 4, state.worldFromCamera[i], true);
+    for (let i = 0; i < 16; i++) view.setFloat32(68 + i * 4, state.projection[i], true);
+    view.setBigInt64(136, BigInt(Math.round(state.timestampUs)), true);
+
+    let at = stateBytes;
+    const planesPtr = planes.length > 0 ? base + at : 0;
+    for (const plane of planes) {
+      view.setBigUint64(at, BigInt(plane.id), true);
+      for (let i = 0; i < 16; i++) view.setFloat32(at + 8 + i * 4, plane.pose[i], true);
+      view.setFloat32(at + 72, plane.extentX, true);
+      view.setFloat32(at + 76, plane.extentZ, true);
+      view.setUint32(at + 80, plane.classification, true);
+      at += planeBytes;
+    }
+    const anchorsPtr = anchors.length > 0 ? base + at : 0;
+    for (const anchorInput of anchors) {
+      view.setBigUint64(at, BigInt(anchorInput.id), true);
+      for (let i = 0; i < 16; i++) view.setFloat32(at + 8 + i * 4, anchorInput.pose[i], true);
+      at += anchorBytes;
+    }
+    let lightPtr = 0;
+    if (light) {
+      lightPtr = base + at;
+      view.setFloat32(at, light.ambientIntensity, true);
+      view.setFloat32(at + 4, light.colorTemperatureKelvin, true);
+    }
+
+    this.mod.ccall(
+      "goss_session_submit_world",
+      "number",
+      ["number", "number", "number", "number", "number", "number", "number"],
+      [this.handle, base, planesPtr, planes.length, anchorsPtr, anchors.length, lightPtr],
+    );
+  }
+
+  private ensureWorldScratch(byteLength: number): void {
+    if (this.worldScratchLen >= byteLength) return;
+    if (this.worldScratchPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [this.worldScratchPtr, this.worldScratchLen]);
+    this.worldScratchPtr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLength]);
+    this.worldScratchLen = byteLength;
+  }
+
   /// Reports one finished frame: measured whole-pipeline time plus
   /// thermal pressure (nominal by default - no browser API surfaces
   /// device thermal state). Returns the degradation level in effect
@@ -864,3 +952,6 @@ export class PreviewSession {
     return this.engine.readFrameSum(this.session);
   }
 }
+
+export { WebXRWorldSource } from "./world";
+export type { XRFrameLike } from "./world";

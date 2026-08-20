@@ -26,6 +26,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("com.google.ar:core:1.49.0")
 }
 
 // The face model bundle ships as an app asset, synced from the repo's
