@@ -22,6 +22,7 @@ const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const physics = @import("physics");
+const script = @import("script");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -65,7 +66,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 17;
+pub const abi_minor: u16 = 18;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -397,6 +398,11 @@ pub const Session = struct {
     lens_graph: graph.Graph,
     camera_node: graph.NodeIndex,
     active_lens: ?runtime.Lens = null,
+    /// The active lens's script driver, when it has a script node, plus the
+    /// null-terminated parameter names it exchanges each tick. Both are built
+    /// at activation and torn down at deactivation, never per frame.
+    script_engine: ?script.Script = null,
+    script_param_names: []const [:0]const u8 = &.{},
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -1270,6 +1276,7 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
 
 pub fn destroySession(session: *Session) void {
     if (session.engine.recording_session == session) _ = finishRecording(session.engine);
+    teardownScript(session);
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
     session.shader_masks.deinit(session.engine.gpa);
@@ -2749,9 +2756,75 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyMeshFaceState(session);
     destroyModelState(session);
     destroyChainOrder(session);
+    teardownScript(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
+    setupScript(session);
     applyLensEffects(session, effects);
+}
+
+const script_fuel_per_tick: u32 = 2_000_000;
+
+/// Frees the active script driver and its parameter-name table. Safe to
+/// call when there is no script; leaves the fields empty.
+fn teardownScript(s: *Session) void {
+    if (s.script_engine) |*e| e.destroy();
+    s.script_engine = null;
+    for (s.script_param_names) |n| s.engine.gpa.free(n);
+    s.engine.gpa.free(s.script_param_names);
+    s.script_param_names = &.{};
+}
+
+/// Builds the script driver for the just-activated lens, if it carries a
+/// script node. A compile or allocation failure leaves the script absent,
+/// the defined degradation: the lens keeps its default parameter values.
+fn setupScript(s: *Session) void {
+    const lens = if (s.active_lens) |*l| l else return;
+    const src = lens.scriptSource() orelse return;
+    var engine = script.Script.create(src, script_fuel_per_tick) catch return;
+    const params = lens.manifest.parameters;
+    const names = s.engine.gpa.alloc([:0]const u8, params.len) catch {
+        engine.destroy();
+        return;
+    };
+    var built: usize = 0;
+    for (params, 0..) |p, i| {
+        names[i] = s.engine.gpa.dupeZ(u8, p.name) catch {
+            for (names[0..built]) |n| s.engine.gpa.free(n);
+            s.engine.gpa.free(names);
+            engine.destroy();
+            return;
+        };
+        built += 1;
+    }
+    s.script_engine = engine;
+    s.script_param_names = names;
+}
+
+/// Runs the lens script's update(lens) once, exposing the current signals
+/// and passing the live parameters in and out. Bounded stack buffers, no
+/// per-frame allocation; a script exception or timeout just skips the write.
+fn runScript(s: *Session, signals: *const trigger.Signals) void {
+    const engine = if (s.script_engine) |*e| e else return;
+    const lens = if (s.active_lens) |*l| l else return;
+    const sig_names = [_][*:0]const u8{ "face_present", "hands_present", "audio_level", "audio_beat", "world_tracking_state", "tap" };
+    const sig_values = [_]f64{
+        if (signals.face_present) 1.0 else 0.0,
+        if (signals.hands_present) 1.0 else 0.0,
+        signals.audio_level,
+        if (signals.audio_beat) 1.0 else 0.0,
+        signals.world_tracking_state,
+        if (signals.tap) 1.0 else 0.0,
+    };
+    const n = @min(s.script_param_names.len, 256);
+    var name_ptrs: [256][*:0]const u8 = undefined;
+    var values: [256]f64 = undefined;
+    for (0..n) |i| {
+        name_ptrs[i] = s.script_param_names[i].ptr;
+        values[i] = lens.param_values[i];
+    }
+    engine.tick(&sig_names, &sig_values, name_ptrs[0..n], values[0..n]) catch return;
+    for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(values[i]));
 }
 
 pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]const u8, manifest_len: usize) Status {
@@ -3128,8 +3201,21 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyMeshFaceState(s);
     destroyModelState(s);
     destroyChainOrder(s);
+    teardownScript(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
+}
+
+/// Reads a live parameter of the active lens by name, including whatever a
+/// script node last wrote. Returns again with no lens active, and
+/// invalid_argument for an unknown name, so the two cases stay distinct.
+pub export fn goss_session_parameter_value(session: ?*Session, name: ?[*]const u8, name_len: usize, out_value: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    const out = out_value orelse return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    out.* = lens.paramValue(n[0..name_len]) orelse return .invalid_argument;
+    return .ok;
 }
 
 /// Advances the active lens by dt_us of real time and applies every
@@ -3150,6 +3236,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
     }
+    // The script drives parameters before triggers and ramps read them, so
+    // its writes flow into this tick's effects.
+    runScript(s, &live_signals);
     const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
     applyLensEffects(s, effects);
     return .ok;
@@ -3351,6 +3440,30 @@ test "ticking with no active lens reports again; ticking a firing trigger advanc
     try t.expect(session.active_lens.?.param_values[0] < 1.0);
 
     try t.expectEqual(Status.invalid_argument, goss_session_tick_lens(session, 8_333, null));
+}
+
+test "a script node drives a parameter from a signal" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "drive", "type": "script", "params": {},
+        \\   "source": "function update(lens) { lens.params.intensity = lens.signals.face_present > 0.5 ? 0.8 : 0.2; }"}],
+        \\ "triggers": []}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+
+    var present = std.mem.zeroes(LensSignals);
+    present.has_face = true;
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 16_000, &present));
+
+    var v: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_parameter_value(session, "intensity", "intensity".len, &v));
+    try t.expectApproxEqAbs(@as(f32, 0.8), v, 1e-6);
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {

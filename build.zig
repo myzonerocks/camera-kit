@@ -208,7 +208,12 @@ pub fn build(b: *std.Build) void {
         b.build_root.handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
         break :blk true;
     };
+    const have_quickjs = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
+        break :blk true;
+    };
     abi_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
+    abi_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -344,6 +349,10 @@ pub fn build(b: *std.Build) void {
     if (have_jolt) {
         const physics_tests = b.addTest(.{ .root_module = physicsModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(physics_tests).step);
+    }
+    if (have_quickjs) {
+        const script_tests = b.addTest(.{ .root_module = scriptModule(b, target, optimize, true) });
+        test_step.dependOn(&b.addRunArtifact(script_tests).step);
     }
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
@@ -627,6 +636,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_tracking_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
+        abi_tracking_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         if (target.result.os.tag == .macos) {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
@@ -802,6 +812,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
+    abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -967,6 +978,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_conformance_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
+        abi_conformance_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
@@ -1205,6 +1217,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("physics", physicsModule(b, android_target, optimize, false));
+    abi_android.addImport("script", scriptModule(b, android_target, optimize, false));
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = android_target,
@@ -1420,6 +1433,48 @@ fn physicsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-DJPH_USE_CPU_COMPUTE" },
         });
         module.linkLibrary(buildJoltLib(b, target, optimize));
+    }
+    return module;
+}
+
+// QuickJS-ng's four-file minimal embed as a static library. No I/O layer
+// (quickjs-libc.c) is compiled, so the interpreter has no way to touch the
+// filesystem or network - the sandbox is by construction.
+fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const root = ".vendor/quickjs-ng";
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.addIncludePath(b.path(root));
+    if (target.result.abi.isAndroid()) {
+        module.pic = true;
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
+    }
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    // _GNU_SOURCE exposes clock_gettime, readlink, and pthread_condattr_setclock
+    // on glibc; without it quickjs fails to compile on Linux (macOS declares
+    // them unconditionally, so the gap only shows up on the CI runners).
+    const flags = [_][]const u8{ "-std=c11", "-fno-sanitize=undefined", "-w", "-D_GNU_SOURCE" };
+    const files = [_][]const u8{ "quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c" };
+    for (files) |file| {
+        module.addCSourceFile(.{ .file = b.path(b.fmt("{s}/{s}", .{ root, file })), .flags = &flags });
+    }
+    return b.addLibrary(.{ .name = "quickjs", .linkage = .static, .root_module = module });
+}
+
+fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, real: bool) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path(if (real) "adapters/script/script.zig" else "adapters/script/script_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (real) {
+        module.link_libc = true;
+        module.addIncludePath(b.path(".vendor/quickjs-ng"));
+        module.addCSourceFile(.{
+            .file = b.path("adapters/script/qjs_shim.c"),
+            .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+        });
+        module.linkLibrary(buildQuickjsLib(b, target, optimize));
     }
     return module;
 }
@@ -3022,6 +3077,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, false));
+    abi_ios.addImport("script", scriptModule(b, ios_target, optimize, false));
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = ios_target,
@@ -3551,6 +3607,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, false));
+    abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, false));
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 17u
+#define GOSS_ABI_MINOR 18u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -537,6 +537,12 @@ void goss_session_deactivate_lens(goss_session *session);
  * effect value that changed as a result to the beauty chain, if one is
  * enabled. Reports GOSS_AGAIN with no active lens. */
 goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, const goss_lens_signals *signals);
+
+/* Graph thread. Reads a live parameter of the active lens by name,
+ * including whatever a script node last wrote, into out_value. Reports
+ * GOSS_AGAIN with no active lens and GOSS_INVALID_ARGUMENT for an unknown
+ * name. */
+goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value);
 
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(goss_frame_desc) == 32, "goss_frame_desc layout is frozen");

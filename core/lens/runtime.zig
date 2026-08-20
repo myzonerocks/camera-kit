@@ -340,6 +340,28 @@ pub const Lens = struct {
         return node.model_elapsed_us;
     }
 
+    /// The inline source of this lens's script node, or null if it has none.
+    /// The host runs it each tick to drive parameters.
+    pub fn scriptSource(self: *const Lens) ?[]const u8 {
+        for (self.manifest.nodes) |node| {
+            if (node.script) |src| return src;
+        }
+        return null;
+    }
+
+    /// Sets a live parameter by name, clamped to its declared range. Silent
+    /// no-op for an unknown name, the same tolerance a trigger action takes.
+    pub fn setParam(self: *Lens, name: []const u8, value: f32) void {
+        const i = paramIndex(self, name) orelse return;
+        self.param_values[i] = clampToParam(self.manifest.parameters[i], value);
+    }
+
+    /// Reads a live parameter by name, or null if there is no such name.
+    pub fn paramValue(self: *const Lens, name: []const u8) ?f32 {
+        const i = paramIndex(self, name) orelse return null;
+        return self.param_values[i];
+    }
+
     /// Whether this lens spliced any beauty.* node - what gates whether
     /// the live preview needs the GPU beauty compositing bridge running
     /// at all. A lens with no beauty node still lets a session enable
@@ -419,7 +441,13 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     errdefer gpa.free(trigger_was_true);
     @memset(trigger_was_true, false);
 
-    const nodes = try gpa.alloc(LensNode, lens_manifest.nodes.len);
+    // Script nodes are skipped below (they drive parameters, they do not
+    // splice), so size the node array to the composite nodes only.
+    var composite_count: usize = 0;
+    for (lens_manifest.nodes) |node| {
+        if (!std.mem.eql(u8, node.type, "script")) composite_count += 1;
+    }
+    const nodes = try gpa.alloc(LensNode, composite_count);
     errdefer gpa.free(nodes);
     var spliced_count: usize = 0;
     errdefer for (nodes[0..spliced_count]) |n| g.removeNode(n.graph_index);
@@ -428,6 +456,9 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     defer id_to_index.deinit();
 
     for (lens_manifest.nodes) |node| {
+        // A script node drives parameters each tick; it is not a composite
+        // pass, so it never enters the graph. Its source is read separately.
+        if (std.mem.eql(u8, node.type, "script")) continue;
         const node_type = parseNodeType(node.type) orelse return error.UnsupportedNodeType;
         const graph_index = try g.addNode(.{
             .role = .transform,

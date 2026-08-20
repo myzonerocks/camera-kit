@@ -1,0 +1,11 @@
+.{
+    .name = "quickjs-ng",
+    .repo = "https://github.com/quickjs-ng/quickjs",
+    .version = "v0.16.1",
+    .commit = "954dc53628e36891f93c359aa60895c2ae3dac6b",
+    .archive_url = "https://codeload.github.com/quickjs-ng/quickjs/tar.gz/954dc53628e36891f93c359aa60895c2ae3dac6b",
+    .archive_sha256 = "e8a4b0aa1de4cde65661c49192467b304c3e0db9cb0bf9f3d5a980cfe9be798f",
+    .license = "MIT",
+    .license_file = "LICENSE",
+    .license_sha256 = "96f73f9d2a16c21a36b418f06073be26e7d6d5e7c1bc99756b21a4f2c74ef171",
+}

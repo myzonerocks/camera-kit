@@ -800,6 +800,53 @@ fn proveTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a script node: the sandboxed script reads a signal and writes a
+/// lens parameter each tick, deterministically, and the host reads it back
+/// through the ABI. The scripting section's end-to-end proof.
+fn proveScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/script-param", ".lens-packages/script-param".len) != .ok) {
+        std.debug.print("conformance: FAIL script lens activation\n", .{});
+        return false;
+    }
+
+    const name = "intensity";
+    var present = std.mem.zeroes(abi.LensSignals);
+    present.has_face = true;
+    const absent = std.mem.zeroes(abi.LensSignals);
+
+    var v_present: f32 = -1;
+    var v_absent: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &present);
+    if (abi.goss_session_parameter_value(session, name.ptr, name.len, &v_present) != .ok) {
+        std.debug.print("conformance: FAIL reading the script-driven parameter\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_tick_lens(session, 16000, &absent);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_absent);
+
+    if (@abs(v_present - 0.8) > 1e-6 or @abs(v_absent - 0.2) > 1e-6) {
+        std.debug.print("conformance: FAIL script drove intensity to {d}/{d}, wanted 0.8/0.2\n", .{ v_present, v_absent });
+        return false;
+    }
+
+    // Deterministic: the same signal produces the same value, bit for bit.
+    var v_again: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &present);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_again);
+    if (v_again != v_present) {
+        std.debug.print("conformance: FAIL script is not deterministic ({d} vs {d})\n", .{ v_again, v_present });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a script node drives a lens parameter from a signal deterministically (0.8 present, 0.2 absent)\n", .{});
+    return true;
+}
+
 /// Proves physics chains: a dynamic pendant chained to a static anchor
 /// swings out under gravity to hang at the chain length, the settled
 /// frame differs from the initial frame, and two runs are identical.
@@ -1350,5 +1397,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveHairSim(gpa, engine)) return 1;
     if (!try proveHighResCapture(gpa, engine)) return 1;
     if (!try proveTiledCapture(gpa, engine)) return 1;
+    if (!try proveScript(gpa, engine)) return 1;
     return 0;
 }
