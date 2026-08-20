@@ -139,7 +139,7 @@ file must move together.
 | `goss_engine_capture_frame` | `captureFrame()`, returning pixels plus the renderer's real width and height | supported SDKs |
 | `goss_engine_capture_photo` | `capturePhoto()`, returning deterministic PNG bytes of the composited frame, sized by a probe call | supported SDKs |
 | `goss_engine_capture_photo_as` | `capturePhoto(as:quality:)`, platform photo formats (JPEG, HEIC) | Swift today; Android lands with a portable JPEG backend |
-| `goss_engine_recording_start` | `startRecording(session, path, config)`, appending one video frame per rendered frame with effects baked in | Swift today; Kotlin lands with the MediaCodec backend |
+| `goss_engine_recording_start` | `startRecording(session, path, config)`, appending one video frame per rendered frame with effects baked in | Swift and Kotlin |
 | `goss_engine_recording_stop` | `stopRecording()`, flushing in-flight frames and finalizing the file | same |
 
 ### Session lifecycle

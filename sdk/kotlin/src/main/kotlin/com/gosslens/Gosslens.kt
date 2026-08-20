@@ -19,6 +19,8 @@ object Gosslens {
     internal external fun nativeResize(engine: Long, width: Int, height: Int)
     internal external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
     internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
+    internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int): Int
+    internal external fun nativeRecordingStop(engine: Long): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
@@ -168,6 +170,21 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
 
     fun renderFrame(session: Session?): Boolean =
         Gosslens.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
+
+    /** Starts recording the session's rendered frames, effects baked
+     * in, into an MP4 at [path]. One recording per engine; every
+     * rendered frame appends until [stopRecording]. */
+    fun startRecording(session: Session, path: String, width: Int = 0, height: Int = 0, bitrate: Int = 0, hevc: Boolean = false): Boolean {
+        val bytes = path.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocateDirect(bytes.size)
+        buffer.put(bytes)
+        buffer.rewind()
+        return Gosslens.nativeRecordingStart(handle, session.handle, buffer, bytes.size, width, height, bitrate, if (hevc) 1 else 0) == 0
+    }
+
+    /** Stops the recording, flushing in-flight frames and finalizing
+     * the file. */
+    fun stopRecording(): Boolean = Gosslens.nativeRecordingStop(handle) == 0
 
     /** Renders like renderFrame and returns the composited output
      * encoded as PNG bytes, sized by a probe call first. Deterministic:
