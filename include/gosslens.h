@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 16u
+#define GOSS_ABI_MINOR 17u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -345,6 +345,21 @@ typedef struct goss_world_light {
  * estimate, once per platform frame. Drives the world.tracking_state
  * trigger signal and world-anchored lens content. */
 goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light);
+
+typedef struct goss_capture_config {
+  uint32_t width;       /* 0 = the submitted frame's own resolution */
+  uint32_t height;
+  uint32_t supersample; /* reserved; 0 or 1 is 1:1 today */
+  uint32_t format;      /* 0 = PNG, 1 = JPEG, 2 = HEIC */
+  uint32_t quality;     /* 1..100 for lossy formats, 0 = backend default */
+} goss_capture_config;
+
+/* Composites the still at the configured resolution - the submitted
+ * frame's own size when width and height are zero - independent of the
+ * preview swap chain, and encodes it. out_len always receives the
+ * encoded size. PNG has no size ceiling; JPEG/HEIC need the platform
+ * photo backend. */
+goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height);
 
 /* Graph thread. config may be null for defaults. */
 goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);
