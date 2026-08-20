@@ -17,7 +17,7 @@ CaptureOutput, Events.
 | Photo capture (deterministic PNG) | proven in the host harness | built, no hardware yet | not wired |
 | Video recording | proven in the host harness on the Apple encoder | built on MediaCodec, no hardware yet | backend not landed, reports unsupported |
 | Platform photo formats (JPEG, HEIC) | proven in the host harness | backend not landed, reports unsupported | backend not landed, reports unsupported |
-| High-resolution still capture (decoupled from preview) | proven in the host harness at full source and explicit resolutions | Swift wrapper pending | binding pending |
+| High-resolution still capture (decoupled from preview, supersampled) | proven in the host harness: full-sensor size, anti-aliased supersampling, deterministic | Swift wrapper landed | binding pending |
 | Audio triggers (level, beat) | proven in the host harness | built, no hardware yet | not wired |
 | Recording audio track + A/V sync | proven in the host harness, zero end drift | video-only until the audio encoder lands | backend not landed |
 | World tracking (pose, planes, anchors, light) | ARKit source built, no hardware yet; seam proven on the replay track in the host harness | ARCore demo feeder built, no hardware yet | WebXR source built and typechecked, no browser run yet |
