@@ -44,6 +44,22 @@ WebGPU and WebGL2 are two separate build artifacts, not a runtime
 toggle; `pickEngineUrl` picks the right one after confirming a real
 adapter.
 
+Capture reads a PNG back, and world tracking feeds WebXR frames in:
+
+```ts
+import { WebXRWorldSource } from "@gosslens/core";
+
+const png = await engine.captureFrame(session);   // data URL
+
+const world = new WebXRWorldSource(session);
+// in the XR animation loop:
+world.onFrame(xrFrame, referenceSpace, timestampUs);
+```
+
+Video recording and platform photo formats are not wired on web yet; see
+[docs/PARITY.md](../../docs/PARITY.md). The full cross-platform capability
+tour is in the [root README](../../README.md#using-gosslens).
+
 ## Demo app
 
 [`demo/`](demo/), a real web page — see [`demo/README.md`](demo/README.md).

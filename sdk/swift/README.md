@@ -50,6 +50,28 @@ try session.activateLens(manifestJson: manifestData)
 `submitFrame` wraps platform texture handles; `submitFrameCopy` is the
 CPU fallback.
 
+Capture, recording, and world tracking hang off the same engine and
+session:
+
+```swift
+let photo = try engine.capturePhoto(session: session)             // preview-res PNG
+let still = try engine.captureStill(session: session,             // full-res, supersampled
+    config: Engine.StillConfig(width: 8064, height: 6048, supersample: 2))
+let jpeg = try engine.capturePhoto(session: session, as: .jpeg, quality: 92)
+
+try engine.startRecording(session: session, path: outPath, hevc: true)
+try engine.submitAudio(session: session, samples: pcm, frameCount: n,
+                       sampleRate: 48000, channels: 1, timestampUs: ts)
+try engine.stopRecording()
+
+let world = WorldSource(session: session)   // ARKit, an ARSessionDelegate
+arSession.delegate = world
+world.start()
+```
+
+The full cross-platform capability tour is in the
+[root README](../../README.md#using-gosslens).
+
 ## Demo app
 
 [`demo/`](demo/), a real iOS app — see [`demo/README.md`](demo/README.md).
