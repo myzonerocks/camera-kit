@@ -74,6 +74,13 @@ pub const ClothField = struct {
     height: f32,
 };
 
+pub const HairField = struct {
+    /// Strand count, vertices per strand, and strand length in metres.
+    strands: u32,
+    verts: u32,
+    length: f32,
+};
+
 pub const PhysicsBody = struct {
     shape: enum { box, sphere },
     /// Box half extents; a sphere reads its radius from [0].
@@ -104,6 +111,8 @@ pub const Node = struct {
     physics: ?PhysicsBody = null,
     /// Set when the node is a simulated cloth sheet instead of a glb.
     cloth: ?ClothField = null,
+    /// Set when the node is simulated strand hair instead of a glb.
+    hair: ?HairField = null,
 };
 
 pub const ActionKind = enum {
@@ -644,6 +653,32 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var face_anchor = false;
         var world_anchor = false;
         var physics_body: ?PhysicsBody = null;
+        var hair_field: ?HairField = null;
+        if (getField(object, "hair")) |hair_value| {
+            const hair_mark = path.push("hair");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "hair is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (hair_value != .object) {
+                try diags.add(path.slice(), "hair must be an object", .{});
+            } else {
+                var field: HairField = .{ .strands = 24, .verts = 16, .length = 0.5 };
+                if (getField(hair_value.object, "strands")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= 256) field.strands = @intCast(v.integer);
+                }
+                if (getField(hair_value.object, "verts")) |v| {
+                    if (v == .integer and v.integer >= 2 and v.integer <= 64) field.verts = @intCast(v.integer);
+                }
+                if (getField(hair_value.object, "length")) |v| {
+                    switch (v) {
+                        .float => |f| field.length = @floatCast(f),
+                        .integer => |n| field.length = @floatFromInt(n),
+                        else => {},
+                    }
+                }
+                hair_field = field;
+            }
+            path.pop(hair_mark);
+        }
         var cloth_field: ?ClothField = null;
         if (getField(object, "cloth")) |cloth_value| {
             const cloth_mark = path.push("cloth");
@@ -805,6 +840,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .world_anchor = world_anchor,
             .physics = physics_body,
             .cloth = cloth_field,
+            .hair = hair_field,
         });
     }
     return try out.toOwnedSlice(arena);

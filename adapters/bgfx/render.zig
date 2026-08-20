@@ -945,6 +945,15 @@ pub const Renderer = struct {
         index_count: u32,
     };
 
+    /// Strand hair drawn as line segments: a dynamic position buffer
+    /// updated from the solver, static line indices per strand.
+    pub const HairMesh = struct {
+        position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+        index_buffer: c.bgfx_index_buffer_handle_t,
+        vertex_count: u32,
+        index_count: u32,
+    };
+
     /// Builds a static mesh from positions and indices: real gpu-side
     /// geometry, uploaded once. Vertex data is interleaved into the
     /// same POSITION+TEXCOORD0 layout every full-screen-quad pass uses
@@ -1005,6 +1014,58 @@ pub const Renderer = struct {
     pub fn destroyClothMesh(mesh: ClothMesh) void {
         c.bgfx_destroy_dynamic_vertex_buffer(mesh.position_buffer);
         c.bgfx_destroy_index_buffer(mesh.index_buffer);
+    }
+
+    /// Builds a hair mesh: strand_count strands of verts each, a dynamic
+    /// position buffer and static line indices connecting consecutive
+    /// vertices within each strand.
+    pub fn createHairMesh(r: *Renderer, strand_count: u32, verts: u32) !HairMesh {
+        const vertex_count = strand_count * verts;
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(vertex_count, &r.layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        var indices: std.ArrayList(u32) = .empty;
+        defer indices.deinit(r.gpa);
+        var s: u32 = 0;
+        while (s < strand_count) : (s += 1) {
+            var i: u32 = 0;
+            while (i < verts - 1) : (i += 1) {
+                const base = s * verts + i;
+                try indices.appendSlice(r.gpa, &.{ base, base + 1 });
+            }
+        }
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.items.ptr, @intCast(indices.items.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        return .{ .position_buffer = position_buffer, .index_buffer = index_buffer, .vertex_count = vertex_count, .index_count = @intCast(indices.items.len) };
+    }
+
+    pub fn updateHairMesh(r: *Renderer, mesh: HairMesh, positions: []const f32) void {
+        const count = @min(positions.len / 3, mesh.vertex_count);
+        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
+        defer r.gpa.free(interleaved);
+        for (0..count) |i| {
+            interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
+        }
+        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+    }
+
+    pub fn destroyHairMesh(mesh: HairMesh) void {
+        c.bgfx_destroy_dynamic_vertex_buffer(mesh.position_buffer);
+        c.bgfx_destroy_index_buffer(mesh.index_buffer);
+    }
+
+    /// Draws hair strands as lines through the model program and camera.
+    pub fn submitHair(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: HairMesh, base_color: [4]f32, aspect_ratio: f32) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one);
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        const model = math.Mat4.identity;
+        _ = c.bgfx_set_transform(&model.cols, 1);
+        c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
+        c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_PT_LINES, 0);
+        c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws a cloth mesh through the model program and camera - the

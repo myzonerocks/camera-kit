@@ -1,0 +1,25 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.hair-sim",
+  "version": "1.0.0",
+  "display_name": "Hair Sim",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {
+      "id": "hair",
+      "type": "model.gltf",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "hair": {
+        "strands": 20,
+        "verts": 16,
+        "length": 0.5
+      }
+    }
+  ],
+  "triggers": []
+}

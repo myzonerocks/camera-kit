@@ -343,6 +343,40 @@ pub const Renderer = struct {
         _ = mesh;
     }
 
+    pub const HairMesh = struct {
+        position_buffer: TextureHandle = .{},
+        index_buffer: TextureHandle = .{},
+        vertex_count: u32 = 0,
+        index_count: u32 = 0,
+    };
+
+    pub fn createHairMesh(r: *Renderer, strand_count: u32, verts: u32) !HairMesh {
+        _ = r;
+        _ = strand_count;
+        _ = verts;
+        return .{};
+    }
+
+    pub fn updateHairMesh(r: *Renderer, mesh: HairMesh, positions: []const f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+    }
+
+    pub fn destroyHairMesh(mesh: HairMesh) void {
+        _ = mesh;
+    }
+
+    pub fn submitHair(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: HairMesh, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub fn submitCloth(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ClothMesh, base_color: [4]f32, aspect_ratio: f32) void {
         _ = r;
         _ = blit_view;

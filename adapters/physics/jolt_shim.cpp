@@ -16,12 +16,19 @@
 #include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
 #include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
+#include <Jolt/Physics/Hair/Hair.h>
+#include <Jolt/Physics/Hair/HairSettings.h>
+#include <Jolt/Physics/Hair/HairShaders.h>
+#include <Jolt/Physics/Hair/RegisterHair.h>
+#include <Jolt/Compute/CPU/ComputeSystemCPU.h>
+#include <Jolt/Shaders/HairWrapper.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 namespace {
 
@@ -53,6 +60,11 @@ class ObjectPairs final : public JPH::ObjectLayerPairFilter {
   }
 };
 
+struct HairInstance {
+  JPH::Ref<JPH::HairSettings> settings;
+  JPH::Hair* hair = nullptr;
+};
+
 struct World {
   JPH::TempAllocatorImpl temp{4 * 1024 * 1024};
   JPH::JobSystemSingleThreaded jobs{JPH::cMaxPhysicsJobs};
@@ -61,6 +73,12 @@ struct World {
   ObjectPairs object_pairs;
   JPH::PhysicsSystem system;
   double accumulator = 0.0;
+  // Lazily created on the first hair; shared across a world's hairs.
+  JPH::Ref<JPH::ComputeSystemCPU> compute;
+  JPH::Ref<JPH::ComputeQueue> queue;
+  JPH::HairShaders hair_shaders;
+  bool hair_ready = false;
+  std::vector<HairInstance> hairs;
 };
 
 int world_count = 0;
@@ -230,6 +248,86 @@ extern "C" uint32_t goss_physics_cloth_read(void* handle, uint32_t body, float* 
     out[i * 3 + 0] = (float)p.GetX();
     out[i * 3 + 1] = (float)p.GetY();
     out[i * 3 + 2] = (float)p.GetZ();
+  }
+  return count;
+}
+
+namespace { bool g_hair_registered = false; }
+
+// Adds a hanging clump of `strand_count` strands, each `verts` vertices
+// long and `length` metres, rooted near the origin. Returns a hair id
+// (index) for this world, or UINT32_MAX. Simulated on the CPU compute
+// backend, deterministic.
+extern "C" uint32_t goss_physics_add_hair(void* handle, uint32_t strand_count, uint32_t verts, float length) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || strand_count < 1 || verts < 2) return UINT32_MAX;
+  if (!g_hair_registered) { JPH::RegisterHair(); g_hair_registered = true; }
+  if (!world->hair_ready) {
+    world->compute = JPH::StaticCast<JPH::ComputeSystemCPU>(JPH::CreateComputeSystemCPU().Get());
+    if (world->compute == nullptr) return UINT32_MAX;
+    JPH::HairRegisterShaders(world->compute);
+    world->queue = world->compute->CreateComputeQueue().Get();
+    world->hair_shaders.Init(world->compute);
+    world->hair_ready = true;
+  }
+  JPH::Array<JPH::HairSettings::SVertex> sverts;
+  JPH::Array<JPH::HairSettings::SStrand> sstrands;
+  for (uint32_t s = 0; s < strand_count; s++) {
+    const float sx = -0.1f + 0.2f * (float)s / (strand_count > 1 ? strand_count - 1 : 1);
+    const uint32_t start = (uint32_t)sverts.size();
+    for (uint32_t i = 0; i < verts; i++) {
+      JPH::HairSettings::SVertex v;
+      v.mPosition = JPH::Float3(sx, 0.5f - length * (float)i / (verts - 1), 0.0f);
+      v.mInvMass = (i == 0) ? 0.0f : 1.0f;  // root pinned
+      sverts.push_back(v);
+    }
+    sstrands.push_back(JPH::HairSettings::SStrand(start, start + verts, 0));
+  }
+  JPH::Ref<JPH::HairSettings> settings = new JPH::HairSettings;
+  JPH::HairSettings::Material m;
+  m.mEnableLRA = false;
+  m.mBendCompliance = 1e-8f;
+  m.mStretchCompliance = 1e-10f;
+  settings->mMaterials.push_back(m);
+  settings->mSimulationBoundsPadding = JPH::Vec3::sReplicate(1.0f);
+  settings->InitRenderAndSimulationStrands(sverts, sstrands);
+  float max_dist_sq = 0.0f;
+  settings->Init(max_dist_sq);
+  settings->InitCompute(world->compute);
+  JPH::Hair* hair = new JPH::Hair(settings, JPH::RVec3::sZero(), JPH::Quat::sIdentity(), layer_moving);
+  hair->Init(world->compute);
+  hair->Update(0.0f, JPH::Mat44::sIdentity(), nullptr, world->system, world->hair_shaders, world->compute, world->queue);
+  hair->ReadBackGPUState(world->queue);
+  const uint32_t id = (uint32_t)world->hairs.size();
+  world->hairs.push_back({ settings, hair });
+  return id;
+}
+
+// Moves the hair with the head (a translation extracted from the 4x4
+// column-major head transform) and steps it; the free tips swing.
+extern "C" void goss_physics_hair_update(void* handle, uint32_t hair_id, const float* head_transform, float dt_seconds) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || hair_id >= world->hairs.size() || dt_seconds <= 0) return;
+  JPH::Hair* hair = world->hairs[hair_id].hair;
+  if (head_transform != nullptr) {
+    hair->SetPosition(JPH::RVec3(head_transform[12], head_transform[13], head_transform[14]));
+  }
+  hair->Update(dt_seconds, JPH::Mat44::sIdentity(), nullptr, world->system, world->hair_shaders, world->compute, world->queue);
+  hair->ReadBackGPUState(world->queue);
+}
+
+// Reads simulated strand vertex positions (three floats each) into out.
+extern "C" uint32_t goss_physics_hair_read(void* handle, uint32_t hair_id, float* out, uint32_t max_vertices) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || out == nullptr || hair_id >= world->hairs.size()) return 0;
+  const JPH::Hair* hair = world->hairs[hair_id].hair;
+  const JPH::Float3* positions = hair->GetPositions();
+  if (positions == nullptr) return 0;
+  const uint32_t count = world->hairs[hair_id].settings->GetNumVerticesPadded() < max_vertices ? world->hairs[hair_id].settings->GetNumVerticesPadded() : max_vertices;
+  for (uint32_t i = 0; i < count; i++) {
+    out[i * 3 + 0] = positions[i].x;
+    out[i * 3 + 1] = positions[i].y;
+    out[i * 3 + 2] = positions[i].z;
   }
   return count;
 }

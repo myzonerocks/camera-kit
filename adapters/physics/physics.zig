@@ -30,6 +30,9 @@ extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax
 extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
 extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
 extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
+extern fn goss_physics_add_hair(handle: *anyopaque, strand_count: u32, verts: u32, length: f32) u32;
+extern fn goss_physics_hair_update(handle: *anyopaque, hair_id: u32, head_transform: [*]const f32, dt: f32) void;
+extern fn goss_physics_hair_read(handle: *anyopaque, hair_id: u32, out: [*]f32, max_vertices: u32) u32;
 
 pub const World = struct {
     handle: *anyopaque,
@@ -78,6 +81,25 @@ pub const World = struct {
     /// into out; returns the vertex count.
     pub fn clothRead(world: World, body: u32, out: []f32) u32 {
         return goss_physics_cloth_read(world.handle, body, out.ptr, @intCast(out.len / 3));
+    }
+
+    /// Adds a clump of strand_count strands, each `verts` long and
+    /// `length` metres, rooted near the head. Returns a hair id.
+    pub fn addHair(world: World, strand_count: u32, verts: u32, length: f32) !u32 {
+        const id = goss_physics_add_hair(world.handle, strand_count, verts, length);
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Moves the hair with the head (translation from the 16-float
+    /// column-major transform) and steps it; the tips swing.
+    pub fn hairUpdate(world: World, hair_id: u32, head_transform: [16]f32, dt_seconds: f32) void {
+        goss_physics_hair_update(world.handle, hair_id, &head_transform, dt_seconds);
+    }
+
+    /// Reads simulated strand vertices (3 floats each); returns count.
+    pub fn hairRead(world: World, hair_id: u32, out: []f32) u32 {
+        return goss_physics_hair_read(world.handle, hair_id, out.ptr, @intCast(out.len / 3));
     }
 
     /// The body's column-major world transform.
@@ -150,4 +172,20 @@ test "a pinned cloth grid drapes and reads back deformed vertices" {
     const top_y = verts[(30 + 3) * 3 + 1];
     const bottom_y = verts[(0 + 3) * 3 + 1];
     try t.expect(top_y - bottom_y > 0.3);
+}
+
+test "a hair clump hangs and reads back strand vertices" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const hair = try world.addHair(2, 16, 0.5);
+    var i: usize = 0;
+    const identity = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    while (i < 60) : (i += 1) world.hairUpdate(hair, identity, 1.0 / 60.0);
+    var verts: [128 * 3]f32 = undefined;
+    const n = world.hairRead(hair, &verts);
+    try t.expect(n > 0);
+    // Some tip vertex hangs below the pinned root region.
+    var min_y: f32 = 1e9;
+    for (0..n) |v| min_y = @min(min_y, verts[v * 3 + 1]);
+    try t.expect(min_y < 0.4);
 }

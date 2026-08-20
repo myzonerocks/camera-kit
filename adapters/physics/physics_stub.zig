@@ -80,6 +80,28 @@ pub const World = struct {
         return 0;
     }
 
+    pub fn addHair(world: World, strand_count: u32, verts: u32, length: f32) !u32 {
+        _ = world;
+        _ = strand_count;
+        _ = verts;
+        _ = length;
+        return error.BodyAddFailed;
+    }
+
+    pub fn hairUpdate(world: World, hair_id: u32, head_transform: [16]f32, dt_seconds: f32) void {
+        _ = world;
+        _ = hair_id;
+        _ = head_transform;
+        _ = dt_seconds;
+    }
+
+    pub fn hairRead(world: World, hair_id: u32, out: []f32) u32 {
+        _ = world;
+        _ = hair_id;
+        _ = out;
+        return 0;
+    }
+
     pub fn bodyPose(world: World, body: u32) ![16]f32 {
         _ = world;
         _ = body;

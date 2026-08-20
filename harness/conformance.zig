@@ -882,6 +882,82 @@ fn proveClothFlag(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves lens strand hair: the strands hang and settle deterministically
+/// across frames (the head pose drives them live on device; here a fixed
+/// pose gives a bit-stable host proof), settled differing from initial.
+fn proveHairSim(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/hair-sim", ".lens-packages/hair-sim".len) != .ok) {
+            std.debug.print("conformance: FAIL hair lens activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var initial_shot: []u8 = &.{};
+        defer if (initial_shot.len > 0) gpa.free(initial_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 2 or i == 85) {
+                var shot_width: u32 = 0;
+                var shot_height: u32 = 0;
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 2) initial_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, initial_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL the hair did not move\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(initial_shot);
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            var png_bytes: std.ArrayList(u8) = .empty;
+            defer png_bytes.deinit(gpa);
+            try png.encodeRgba(gpa, &png_bytes, settled_shot, 400, 300);
+            try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-hair-sim.png", .data = png_bytes.items });
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL hair is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF strand hair driven by the head pose settles deterministically, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the zero-mask degradation: hair-recolor against a model with
 /// no hair class renders exactly the frame it renders with no
 /// segmentation at all, and both differ from the real multiclass
@@ -1197,6 +1273,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try provePhysicsDrop(gpa, engine)) return 1;
     if (!try provePhysicsChain(gpa, engine)) return 1;
     if (!try proveClothFlag(gpa, engine)) return 1;
+    if (!try proveHairSim(gpa, engine)) return 1;
     if (!try proveHighResCapture(gpa, engine)) return 1;
     return 0;
 }

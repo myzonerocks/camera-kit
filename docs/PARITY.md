@@ -24,6 +24,7 @@ CaptureOutput, Events.
 | Lens physics (rigid bodies on model nodes) | proven in the host harness, deterministic settle | stub, holds initial pose | stub, holds initial pose |
 | Lens physics chains (constraints on anchors) | proven in the host harness, deterministic swing | stub, holds initial pose | stub, holds initial pose |
 | Lens cloth (soft-body sheets) | proven in the host harness, deterministic drape | stub, holds initial pose | stub, holds initial pose |
+| Lens strand hair (Jolt compute) | proven in the host harness, deterministic settle | stub, holds initial pose | stub, holds initial pose |
 
 "Demonstrated" means executed on the real target through the public
 path; "built" means the code exists and compiles but no physical device
