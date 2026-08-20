@@ -46,3 +46,21 @@ pub fn decode(data: []const u8, out_rgba: []u8, out_width: *u32, out_height: *u3
         else => error.DecodeFailed,
     };
 }
+
+extern fn goss_photo_probe_metadata(data: [*]const u8, data_len: usize, out_orientation: ?*u32, out_software: ?[*]u8, software_capacity: usize, out_software_len: ?*usize) i32;
+
+pub const Metadata = struct {
+    orientation: u32,
+    software: [32]u8,
+    software_len: usize,
+};
+
+/// Reads back an encoded photo's orientation and software tag - the
+/// harness's metadata round-trip proof, not a production surface.
+pub fn probeMetadata(data: []const u8) Error!Metadata {
+    var metadata: Metadata = .{ .orientation = 0, .software = undefined, .software_len = 0 };
+    if (goss_photo_probe_metadata(data.ptr, data.len, &metadata.orientation, &metadata.software, metadata.software.len, &metadata.software_len) != 0) {
+        return error.DecodeFailed;
+    }
+    return metadata;
+}

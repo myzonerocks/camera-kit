@@ -20,6 +20,7 @@ const face_geometry = @import("face_geometry");
 const png = @import("png");
 const media_recording = @import("media_recording");
 const photo = @import("photo");
+const audio_analysis = @import("audio_analysis");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -63,7 +64,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 14;
+pub const abi_minor: u16 = 15;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -236,6 +237,11 @@ const CurrentFrame = struct {
 };
 
 pub const Session = struct {
+    /// Engine-side audio analysis, fed by goss_session_submit_audio;
+    /// once fed, its level and beat outrank the host's tick value.
+    audio: audio_analysis.Analysis = .{},
+    audio_engine_fed: bool = false,
+
     engine: *Engine,
     controller: graph.DegradeController,
     current: ?CurrentFrame = null,
@@ -1542,12 +1548,14 @@ pub export fn goss_engine_capture_photo(engine: ?*Engine, session: ?*Session, ou
 /// Harness-facing re-exports of the recording backend's proof surface
 /// (decode-probe and frame export); never part of the C ABI.
 pub const recordingProbe = media_recording.probe;
+pub const recordingProbeAudio = media_recording.probeAudio;
 pub const recordingExportFrame = media_recording.exportFrame;
 pub const recording_supported = media_recording.supported;
 
 /// Harness-facing re-export of the photo backend's decode proof
 /// surface; never part of the C ABI.
 pub const photoDecode = photo.decode;
+pub const photoProbeMetadata = photo.probeMetadata;
 pub const photo_supported = photo.supported;
 
 /// Captures the composited frame as a platform photo (1 = JPEG,
@@ -1631,6 +1639,30 @@ pub export fn goss_engine_recording_stop(engine: ?*Engine) Status {
     const e = engine orelse return .invalid_argument;
     if (e.recording == null) return .invalid_argument;
     return if (finishRecording(e)) .ok else .invalid_argument;
+}
+
+/// Feeds interleaved f32 PCM into the session: the engine's own level
+/// and beat analysis always consumes it (driving audio.level and
+/// audio.beat triggers), and an active recording of this session muxes
+/// it as the audio track where the backend supports audio.
+pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f32, frame_count: u32, sample_rate: u32, channels: u32, timestamp_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    const data = samples orelse return .invalid_argument;
+    if (frame_count == 0 or sample_rate == 0 or channels == 0 or channels > 8) return .invalid_argument;
+    const slice = data[0 .. @as(usize, frame_count) * channels];
+    s.audio.feed(slice, channels);
+    s.audio_engine_fed = true;
+
+    const e = s.engine;
+    if (e.recording != null and e.recording_session == s) {
+        if (media_recording.audio_supported) {
+            var rec = &(e.recording.?);
+            rec.submitAudio(slice, frame_count, sample_rate, channels, timestamp_us) catch {
+                e.recording_dropped += 1;
+            };
+        }
+    }
+    return .ok;
 }
 
 pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
@@ -2591,7 +2623,12 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.active_lens == null) return .again;
     // Borrowed from the lens's own activation-sized storage, valid
     // until the next tick - nothing to free, nothing allocated.
-    const effects = runtime.tick(&s.active_lens.?, dt_us, toTriggerSignals(sig));
+    var live_signals = toTriggerSignals(sig);
+    if (s.audio_engine_fed) {
+        live_signals.audio_level = s.audio.level;
+        live_signals.audio_beat = s.audio.beat;
+    }
+    const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
     applyLensEffects(s, effects);
     return .ok;
 }

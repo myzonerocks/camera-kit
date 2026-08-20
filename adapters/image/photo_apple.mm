@@ -53,14 +53,29 @@ extern "C" int32_t goss_photo_encode(const uint8_t* rgba, uint32_t width, uint32
     const double lossy_quality = (double)(quality == 0 ? 90 : quality) / 100.0;
     CFNumberRef quality_number =
         CFNumberCreate(kCFAllocatorDefault, kCFNumberFloat64Type, &lossy_quality);
-    const void* keys[] = {kCGImageDestinationLossyCompressionQuality};
-    const void* values[] = {quality_number};
+    // Captured pixels are already display-oriented, so orientation is
+    // always "up"; the EXIF block also records the encoder and time.
+    int32_t orientation_up = 1;
+    CFNumberRef orientation_number =
+        CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &orientation_up);
+    NSDictionary* exif = @{
+      (NSString*)kCGImagePropertyExifUserComment : @"gosslens capture",
+    };
+    NSDictionary* tiff = @{
+      (NSString*)kCGImagePropertyTIFFSoftware : @"gosslens",
+    };
+    const void* keys[] = {kCGImageDestinationLossyCompressionQuality,
+                          kCGImagePropertyOrientation, kCGImagePropertyExifDictionary,
+                          kCGImagePropertyTIFFDictionary};
+    const void* values[] = {quality_number, orientation_number, (__bridge void*)exif,
+                            (__bridge void*)tiff};
     CFDictionaryRef properties =
-        CFDictionaryCreate(kCFAllocatorDefault, keys, values, 1, &kCFTypeDictionaryKeyCallBacks,
+        CFDictionaryCreate(kCFAllocatorDefault, keys, values, 4, &kCFTypeDictionaryKeyCallBacks,
                            &kCFTypeDictionaryValueCallBacks);
     CGImageDestinationAddImage(dest, image, properties);
     const bool finalized = CGImageDestinationFinalize(dest);
     CFRelease(properties);
+    CFRelease(orientation_number);
     CFRelease(quality_number);
     CFRelease(dest);
     CGImageRelease(image);
@@ -116,5 +131,41 @@ extern "C" int32_t goss_photo_decode(const uint8_t* data, size_t data_len, uint8
     }
     CGImageRelease(image);
     return status;
+  }
+}
+
+// Reads back the encoded photo's orientation and software tag - the
+// harness's metadata round-trip proof, not a production surface.
+extern "C" int32_t goss_photo_probe_metadata(const uint8_t* data, size_t data_len,
+                                             uint32_t* out_orientation, uint8_t* out_software,
+                                             size_t software_capacity, size_t* out_software_len) {
+  if (data == nullptr || data_len == 0) return -1;
+  @autoreleasepool {
+    CFDataRef bytes = CFDataCreate(kCFAllocatorDefault, data, (CFIndex)data_len);
+    CGImageSourceRef source = CGImageSourceCreateWithData(bytes, nullptr);
+    CFRelease(bytes);
+    if (source == nullptr) return -1;
+    CFDictionaryRef properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nullptr);
+    CFRelease(source);
+    if (properties == nullptr) return -1;
+    NSDictionary* all = (__bridge NSDictionary*)properties;
+    if (out_orientation) {
+      NSNumber* orientation = all[(NSString*)kCGImagePropertyOrientation];
+      *out_orientation = orientation ? orientation.unsignedIntValue : 0;
+    }
+    if (out_software && out_software_len) {
+      *out_software_len = 0;
+      NSDictionary* tiff = all[(NSString*)kCGImagePropertyTIFFDictionary];
+      NSString* software = tiff[(NSString*)kCGImagePropertyTIFFSoftware];
+      if (software) {
+        NSData* utf8 = [software dataUsingEncoding:NSUTF8StringEncoding];
+        if (utf8.length <= software_capacity) {
+          memcpy(out_software, utf8.bytes, utf8.length);
+          *out_software_len = utf8.length;
+        }
+      }
+    }
+    CFRelease(properties);
+    return 0;
   }
 }

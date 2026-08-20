@@ -203,6 +203,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("png", pngModule(b, target, optimize));
     abi_module.addImport("media_recording", recordingModule(b, target, optimize));
     abi_module.addImport("photo", photoModule(b, target, optimize));
+    abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -307,6 +308,7 @@ pub fn build(b: *std.Build) void {
     const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
     const fit_tests = b.addTest(.{ .root_module = fit_module });
     const png_tests = b.addTest(.{ .root_module = pngModule(b, target, optimize) });
+    const audio_analysis_tests = b.addTest(.{ .root_module = audioAnalysisModule(b, target, optimize) });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
@@ -333,6 +335,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
+    test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
@@ -613,6 +616,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("png", pngModule(b, target, optimize));
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
+        abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         if (target.result.os.tag == .macos) {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
@@ -786,6 +790,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("png", pngModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -949,6 +954,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("png", conformance_png_module);
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
+        abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
@@ -1166,6 +1172,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("png", pngModule(b, android_target, optimize));
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
+    abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = android_target,
@@ -1358,6 +1365,10 @@ const TrackingCoreModules = struct {
 // shared by the worker, the harness, and the export layer.
 fn pngModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/png.zig"), .target = target, .optimize = optimize });
+}
+
+fn audioAnalysisModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/audio_analysis.zig"), .target = target, .optimize = optimize });
 }
 
 // Platform photo encoding: the formats phones actually save, produced
@@ -2933,6 +2944,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("png", pngModule(b, ios_target, optimize));
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
+    abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = ios_target,
@@ -3460,6 +3472,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("png", pngModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));

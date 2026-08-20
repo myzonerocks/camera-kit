@@ -320,6 +320,12 @@ export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: job
     return @intFromEnum(abi.goss_engine_recording_start(engineFromHandle(engine), sessionFromHandle(session), @ptrCast(path), @intCast(path_len), &config));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeSubmitAudio(env: *JniEnv, cls: jobject, session: i64, samples_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32, timestamp_us: i64) i32 {
+    _ = cls;
+    const samples = getDirectBufferAddress(env, samples_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_submit_audio(sessionFromHandle(session), @ptrCast(@alignCast(samples)), @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0)), timestamp_us));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeRecordingStop(env: *JniEnv, cls: jobject, engine: i64) i32 {
     _ = env;
     _ = cls;

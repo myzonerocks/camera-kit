@@ -9,6 +9,8 @@ const std = @import("std");
 /// platform window the renderer presents into.
 pub const NativeHandleKind = enum { texture, window };
 pub const native_handle_kind: NativeHandleKind = .texture;
+/// Whether this backend muxes a submitted audio track.
+pub const audio_supported = true;
 
 /// Whether a real backend exists on this target.
 pub const supported = true;
@@ -37,6 +39,7 @@ extern fn goss_recording_begin_frame(handle: *anyopaque, out_frame: *?*anyopaque
 extern fn goss_recording_commit_frame(handle: *anyopaque, frame_token: *anyopaque, timestamp_us: i64) i32;
 extern fn goss_recording_abort_frame(handle: *anyopaque, frame_token: *anyopaque) void;
 extern fn goss_recording_finish(handle: *anyopaque) i32;
+extern fn goss_recording_submit_audio(handle: *anyopaque, samples: [*]const f32, frame_count: u32, sample_rate: u32, channels: u32, timestamp_us: i64) i32;
 extern fn goss_recording_probe(path: [*]const u8, path_len: usize, out_frames: ?*u32, out_width: ?*u32, out_height: ?*u32, out_duration_us: ?*i64) i32;
 extern fn goss_recording_export_frame(path: [*]const u8, path_len: usize, frame_index: u32, out_bgra: [*]u8, capacity: usize, out_width: ?*u32, out_height: ?*u32) i32;
 
@@ -73,6 +76,13 @@ pub const Recording = struct {
     pub fn commitFrame(recording: *Recording, frame: Frame, timestamp_us: i64) Error!void {
         if (goss_recording_commit_frame(recording.handle, frame.token, timestamp_us) != 0) return error.FrameFailed;
         recording.committed += 1;
+    }
+
+    /// Appends interleaved f32 PCM to the audio track at the same
+    /// microsecond clock the video frames ride.
+    pub fn submitAudio(recording: *Recording, samples: []const f32, frame_count: u32, sample_rate: u32, channels: u32, timestamp_us: i64) Error!void {
+        if (samples.len < @as(usize, frame_count) * channels) return error.FrameFailed;
+        if (goss_recording_submit_audio(recording.handle, samples.ptr, frame_count, sample_rate, channels, timestamp_us) != 0) return error.FrameFailed;
     }
 
     /// Releases a vended frame without appending it.
@@ -112,4 +122,14 @@ pub fn exportFrame(path: []const u8, frame_index: u32, out_bgra: []u8) Error!str
         return error.OpenFailed;
     }
     return .{ .width = width, .height = height };
+}
+
+extern fn goss_recording_probe_audio(path: [*]const u8, path_len: usize, out_duration_us: ?*i64) i32;
+
+/// Reports the finished file's audio track duration - the harness's
+/// A/V alignment proof surface.
+pub fn probeAudio(path: []const u8) Error!i64 {
+    var duration_us: i64 = 0;
+    if (goss_recording_probe_audio(path.ptr, path.len, &duration_us) != 0) return error.OpenFailed;
+    return duration_us;
 }

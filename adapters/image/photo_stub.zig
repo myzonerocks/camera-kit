@@ -37,3 +37,14 @@ pub fn decode(data: []const u8, out_rgba: []u8, out_width: *u32, out_height: *u3
     _ = out_height;
     return error.DecodeFailed;
 }
+
+pub const Metadata = struct {
+    orientation: u32,
+    software: [32]u8,
+    software_len: usize,
+};
+
+pub fn probeMetadata(data: []const u8) Error!Metadata {
+    _ = data;
+    return error.DecodeFailed;
+}

@@ -229,6 +229,12 @@ fn proveVideoRecording(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
     const total_frames = 40;
+    // Per-frame synthetic PCM: near-silence for the first half, a loud
+    // burst after - the level must rise and the beat must fire, and the
+    // muxed audio track must line up with the video track.
+    const audio_frames_per_video_frame = 1600;
+    var pcm: [audio_frames_per_video_frame * 2]f32 = undefined;
+    var beat_fired = false;
     for (0..total_frames) |i| {
         const desc: abi.FrameDesc = .{
             .width = planes.width,
@@ -242,8 +248,23 @@ fn proveVideoRecording(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
             return error.SubmitFailed;
         }
+        const amplitude: f32 = if (i < 30) 0.03 else 0.8;
+        for (0..audio_frames_per_video_frame) |at| {
+            const value = amplitude * @sin(@as(f32, @floatFromInt(i * audio_frames_per_video_frame + at)) * 0.2);
+            pcm[at * 2] = value;
+            pcm[at * 2 + 1] = value;
+        }
+        if (abi.goss_session_submit_audio(session, &pcm, audio_frames_per_video_frame, 48_000, 2, @intCast((i + 1) * 33_333)) != .ok) {
+            std.debug.print("conformance: FAIL audio submit\n", .{});
+            return false;
+        }
+        if (session.audio.beat) beat_fired = true;
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
+    }
+    if (!beat_fired or session.audio.level < 0.1) {
+        std.debug.print("conformance: FAIL audio analysis (beat {any}, level {d:.3})\n", .{ beat_fired, session.audio.level });
+        return false;
     }
     if (abi.goss_engine_recording_stop(engine) != .ok) {
         std.debug.print("conformance: FAIL recording stop\n", .{});
@@ -256,11 +277,13 @@ fn proveVideoRecording(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     };
     // Every encoder pool slot skips exactly its first frame while the
     // render-target wrap lands, and the engine counts those plus any
-    // timestamp drops - the decoded count must match that identity,
+    // timestamp drops. The decoded count must match that accounting
+    // (one extra sample of container-timing slack allowed - the video
+    // track starts after time zero once audio sets the clock base),
     // and warmups must stay a minority of the recording.
     const accounted = total_frames - engine.recording_warmups - engine.recording_dropped;
-    if (shape.frames != accounted or shape.frames < total_frames / 2 or shape.width != 400 or shape.height != 300) {
-        std.debug.print("conformance: FAIL recorded shape {d} frames ({d} warmups, {d} dropped) {d}x{d}\n", .{ shape.frames, engine.recording_warmups, engine.recording_dropped, shape.width, shape.height });
+    if (shape.frames < accounted or shape.frames > accounted + 1 or shape.frames < total_frames / 2 or shape.width != 400 or shape.height != 300) {
+        std.debug.print("conformance: FAIL recorded shape {d} frames ({d} warmups, {d} dropped) {d}x{d} video {d}us\n", .{ shape.frames, engine.recording_warmups, engine.recording_dropped, shape.width, shape.height, shape.duration_us });
         return false;
     }
 
@@ -278,7 +301,19 @@ fn proveVideoRecording(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     try png.encodeRgba(gpa, &png_bytes, bgra, exported.width, exported.height);
     try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-recording-frame.png", .data = png_bytes.items });
 
-    std.debug.print("conformance: PROOF recording is a decodable video of the composited frames ({d}/{d} frames, {d} pool warmups, {d}x{d}, {d}us)\n", .{ shape.frames, total_frames, engine.recording_warmups, shape.width, shape.height, shape.duration_us });
+    // Both tracks ride one clock, so they must END together even
+    // though video starts late by the warmup frames: the probes report
+    // track start + duration, and the ends stay within two frames.
+    const audio_end_us = abi.recordingProbeAudio(path) catch {
+        std.debug.print("conformance: FAIL the recording has no decodable audio track\n", .{});
+        return false;
+    };
+    const drift = @abs(shape.duration_us - audio_end_us);
+    if (drift > 66_666) {
+        std.debug.print("conformance: FAIL a/v end drift {d}us (video end {d}, audio end {d})\n", .{ drift, shape.duration_us, audio_end_us });
+        return false;
+    }
+    std.debug.print("conformance: PROOF recording is a decodable video with an aligned audio track ({d}/{d} frames, {d} pool warmups, {d}x{d}, video {d}us, a/v drift {d}us)\n", .{ shape.frames, total_frames, engine.recording_warmups, shape.width, shape.height, shape.duration_us, drift });
     return true;
 }
 
@@ -389,7 +424,15 @@ fn provePlatformPhotos(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
             std.debug.print("conformance: FAIL {s} mean channel error {d:.2} vs the png capture\n", .{ case.name, mean_error });
             return false;
         }
-        std.debug.print("conformance: PROOF {s} photo capture decodes back within {d:.2} mean channel error ({d} bytes)\n", .{ case.name, mean_error, encoded_len });
+        const metadata = abi.photoProbeMetadata(encoded[0..encoded_len]) catch {
+            std.debug.print("conformance: FAIL {s} metadata probe\n", .{case.name});
+            return false;
+        };
+        if (metadata.orientation != 1 or !std.mem.eql(u8, metadata.software[0..metadata.software_len], "gosslens")) {
+            std.debug.print("conformance: FAIL {s} metadata (orientation {d})\n", .{ case.name, metadata.orientation });
+            return false;
+        }
+        std.debug.print("conformance: PROOF {s} photo capture decodes back within {d:.2} mean channel error, exif intact ({d} bytes)\n", .{ case.name, mean_error, encoded_len });
     }
     return true;
 }

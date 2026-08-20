@@ -21,6 +21,7 @@ object Gosslens {
     internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
+    internal external fun nativeSubmitAudio(session: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long
     internal external fun nativeSessionDestroy(session: Long)
@@ -185,6 +186,13 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
     /** Stops the recording, flushing in-flight frames and finalizing
      * the file. */
     fun stopRecording(): Boolean = Gosslens.nativeRecordingStop(handle) == 0
+
+    /** Feeds interleaved f32 PCM into the session: the engine's level
+     * and beat analysis drives audio triggers, and an active recording
+     * muxes it where the backend supports audio. [samples] is a direct
+     * float buffer. */
+    fun submitAudio(session: Session, samples: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Boolean =
+        Gosslens.nativeSubmitAudio(session.handle, samples, frameCount, sampleRate, channels, timestampUs) == 0
 
     /** Renders like renderFrame and returns the composited output
      * encoded as PNG bytes, sized by a probe call first. Deterministic:

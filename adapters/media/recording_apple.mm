@@ -17,6 +17,10 @@ struct Recording {
   AVAssetWriter* writer = nil;
   AVAssetWriterInput* input = nil;
   AVAssetWriterInputPixelBufferAdaptor* adaptor = nil;
+  AVAssetWriterInput* audio_input = nil;
+  CMAudioFormatDescriptionRef audio_format = nullptr;
+  uint32_t sample_rate = 0;
+  uint32_t channels = 0;
   id<MTLDevice> device = nil;
   CVMetalTextureCacheRef metal_cache = nullptr;
   uint32_t width = 0;
@@ -86,6 +90,30 @@ extern "C" void* goss_recording_open(const uint8_t* path, size_t path_len,
         initWithAssetWriterInput:input
      sourcePixelBufferAttributes:pool_attributes];
 
+    // The audio track appends only once goss_recording_submit_audio
+    // configures it; adding the input up front keeps the writer's
+    // session shape fixed.
+    AVAssetWriterInput* audio_input = nil;
+    {
+      AudioChannelLayout layout = {};
+      layout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo;
+      NSDictionary* audio_settings = @{
+        AVFormatIDKey : @(kAudioFormatMPEG4AAC),
+        AVSampleRateKey : @48000,
+        AVNumberOfChannelsKey : @2,
+        AVEncoderBitRateKey : @128000,
+        AVChannelLayoutKey : [NSData dataWithBytes:&layout length:sizeof(layout)],
+      };
+      audio_input = [[AVAssetWriterInput alloc] initWithMediaType:AVMediaTypeAudio
+                                                   outputSettings:audio_settings];
+      audio_input.expectsMediaDataInRealTime = YES;
+      if ([writer canAddInput:audio_input]) {
+        [writer addInput:audio_input];
+      } else {
+        audio_input = nil;
+      }
+    }
+
     if (![writer startWriting]) return nullptr;
     [writer startSessionAtSourceTime:kCMTimeZero];
 
@@ -94,6 +122,7 @@ extern "C" void* goss_recording_open(const uint8_t* path, size_t path_len,
     recording->input = input;
     recording->adaptor = adaptor;
     recording->device = MTLCreateSystemDefaultDevice();
+    recording->audio_input = audio_input;
     recording->width = width;
     recording->height = height;
     return recording;
@@ -173,6 +202,68 @@ extern "C" void goss_recording_abort_frame(void* handle, void* frame_token) {
   if (frame) releaseFrame(frame);
 }
 
+// Appends interleaved f32 PCM to the recording's audio track at the
+// same microsecond clock the video frames ride, so the muxer keeps the
+// two streams aligned.
+extern "C" int32_t goss_recording_submit_audio(void* handle, const float* samples,
+                                               uint32_t frame_count, uint32_t sample_rate,
+                                               uint32_t channels, int64_t timestamp_us) {
+  auto* r = static_cast<Recording*>(handle);
+  if (r == nullptr || samples == nullptr || frame_count == 0 || channels == 0 || r->failed) return -1;
+  if (r->audio_input == nil) return -1;
+  @autoreleasepool {
+    if (r->audio_format == nullptr || r->sample_rate != sample_rate || r->channels != channels) {
+      if (r->audio_format) CFRelease(r->audio_format);
+      AudioStreamBasicDescription asbd = {};
+      asbd.mSampleRate = sample_rate;
+      asbd.mFormatID = kAudioFormatLinearPCM;
+      asbd.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+      asbd.mChannelsPerFrame = channels;
+      asbd.mBitsPerChannel = 32;
+      asbd.mBytesPerFrame = 4 * channels;
+      asbd.mFramesPerPacket = 1;
+      asbd.mBytesPerPacket = 4 * channels;
+      if (CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd, 0, nullptr, 0, nullptr,
+                                         nullptr, &r->audio_format) != noErr) {
+        return -1;
+      }
+      r->sample_rate = sample_rate;
+      r->channels = channels;
+    }
+    if (r->first_timestamp_us < 0) r->first_timestamp_us = timestamp_us;
+    CMTime time = CMTimeMake(timestamp_us - r->first_timestamp_us, 1'000'000);
+
+    const size_t byte_count = (size_t)frame_count * channels * 4;
+    CMBlockBufferRef block = nullptr;
+    if (CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, nullptr, byte_count,
+                                           kCFAllocatorDefault, nullptr, 0, byte_count, 0,
+                                           &block) != noErr) {
+      return -1;
+    }
+    if (CMBlockBufferReplaceDataBytes(samples, block, 0, byte_count) != noErr) {
+      CFRelease(block);
+      return -1;
+    }
+    CMSampleBufferRef sample = nullptr;
+    const OSStatus created = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+        kCFAllocatorDefault, block, r->audio_format, frame_count, time, nullptr, &sample);
+    CFRelease(block);
+    if (created != noErr || sample == nullptr) return -1;
+
+    int spins = 0;
+    while (!r->audio_input.readyForMoreMediaData) {
+      if (++spins > 10'000) {
+        CFRelease(sample);
+        return -1;
+      }
+      [NSThread sleepForTimeInterval:0.001];
+    }
+    const BOOL appended = [r->audio_input appendSampleBuffer:sample];
+    CFRelease(sample);
+    return appended ? 0 : -1;
+  }
+}
+
 extern "C" int32_t goss_recording_finish(void* handle) {
   auto* r = static_cast<Recording*>(handle);
   if (r == nullptr) return -1;
@@ -183,6 +274,7 @@ extern "C" int32_t goss_recording_finish(void* handle) {
       status = -1;
     } else {
       [r->input markAsFinished];
+      if (r->audio_input) [r->audio_input markAsFinished];
       dispatch_semaphore_t done = dispatch_semaphore_create(0);
       [r->writer finishWritingWithCompletionHandler:^{
         dispatch_semaphore_signal(done);
@@ -191,6 +283,7 @@ extern "C" int32_t goss_recording_finish(void* handle) {
       if (r->writer.status != AVAssetWriterStatusCompleted) status = -1;
     }
     if (r->metal_cache) CFRelease(r->metal_cache);
+    if (r->audio_format) CFRelease(r->audio_format);
   }
   delete r;
   return status;
@@ -310,7 +403,38 @@ extern "C" int32_t goss_recording_probe(const uint8_t* path, size_t path_len,
     if (out_frames) *out_frames = frames;
     if (out_width) *out_width = (uint32_t)track.naturalSize.width;
     if (out_height) *out_height = (uint32_t)track.naturalSize.height;
-    if (out_duration_us) *out_duration_us = (int64_t)(CMTimeGetSeconds(asset.duration) * 1'000'000.0);
+    if (out_duration_us) {
+      const CMTimeRange range = track.timeRange;
+      *out_duration_us = (int64_t)((CMTimeGetSeconds(range.start) + CMTimeGetSeconds(range.duration)) * 1'000'000.0);
+    }
+    return 0;
+  }
+}
+
+// Reports the audio track's duration, the harness's A/V alignment
+// proof surface.
+extern "C" int32_t goss_recording_probe_audio(const uint8_t* path, size_t path_len,
+                                              int64_t* out_duration_us) {
+  if (path == nullptr || path_len == 0) return -1;
+  @autoreleasepool {
+    NSString* ns_path = [[NSString alloc] initWithBytes:path
+                                                 length:path_len
+                                               encoding:NSUTF8StringEncoding];
+    if (ns_path == nil) return -1;
+    AVURLAsset* asset = [AVURLAsset URLAssetWithURL:[NSURL fileURLWithPath:ns_path] options:nil];
+    __block NSArray<AVAssetTrack*>* tracks = nil;
+    dispatch_semaphore_t loaded = dispatch_semaphore_create(0);
+    [asset loadTracksWithMediaType:AVMediaTypeAudio
+                 completionHandler:^(NSArray<AVAssetTrack*>* result, NSError* load_error) {
+                   tracks = load_error == nil ? result : nil;
+                   dispatch_semaphore_signal(loaded);
+                 }];
+    dispatch_semaphore_wait(loaded, DISPATCH_TIME_FOREVER);
+    if (tracks.count == 0) return -1;
+    if (out_duration_us) {
+      const CMTimeRange range = tracks.firstObject.timeRange;
+      *out_duration_us = (int64_t)((CMTimeGetSeconds(range.start) + CMTimeGetSeconds(range.duration)) * 1'000'000.0);
+    }
     return 0;
   }
 }
