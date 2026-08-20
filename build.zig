@@ -1115,8 +1115,19 @@ pub fn build(b: *std.Build) void {
 // sources; zig is the C++ and Objective-C++ compiler for every target,
 // device targets included. Debug config follows the zig optimize mode.
 fn ndkSysroot(b: *std.Build) ?[]const u8 {
+    const prebuilt = if (@import("builtin").os.tag == .macos) "darwin-x86_64" else "linux-x86_64";
+    // CI runners and other machines name the NDK through the standard
+    // environment variables; the lab machine's fixed install is the
+    // fallback.
+    for ([_][]const u8{ "ANDROID_NDK_ROOT", "ANDROID_NDK_HOME", "ANDROID_NDK_LATEST_HOME" }) |name| {
+        if (b.graph.environ_map.get(name)) |root| {
+            const sysroot = b.pathJoin(&.{ root, "toolchains", "llvm", "prebuilt", prebuilt, "sysroot" });
+            b.build_root.handle.access(b.graph.io, sysroot, .{}) catch continue;
+            return sysroot;
+        }
+    }
     const home = b.graph.environ_map.get("HOME") orelse return null;
-    const sysroot = b.pathJoin(&.{ home, "Library", "Android", "sdk", "ndk", "29.0.14206865", "toolchains", "llvm", "prebuilt", "darwin-x86_64", "sysroot" });
+    const sysroot = b.pathJoin(&.{ home, "Library", "Android", "sdk", "ndk", "29.0.14206865", "toolchains", "llvm", "prebuilt", prebuilt, "sysroot" });
     b.build_root.handle.access(b.graph.io, sysroot, .{}) catch return null;
     return sysroot;
 }
