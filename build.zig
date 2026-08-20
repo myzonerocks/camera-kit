@@ -363,13 +363,16 @@ pub fn build(b: *std.Build) void {
     // lodepng lives inside bimg's vendored tree (bgfx's own image
     // dependency); a lens asset decoder wants only this one file out of
     // it, not the rest of the render stack, so it gets its own probe
-    // rather than riding on have_render_stack below.
-    const have_lodepng = blk: {
+    // rather than riding on have_render_stack below. libyuv rides the
+    // same probe because the image module is also the CPU conversion
+    // authority.
+    const have_image_stack = blk: {
         b.build_root.handle.access(b.graph.io, ".vendor/bimg/3rdparty/lodepng/lodepng.cpp", .{}) catch break :blk false;
+        b.build_root.handle.access(b.graph.io, ".vendor/libyuv/include/libyuv.h", .{}) catch break :blk false;
         break :blk true;
     };
-    const host_asset: ?AssetModules = if (have_lodepng) realAssetModules(b, target, optimize, gltf_module) else blk: {
-        const missing = b.addFail("gosslens: .vendor/bimg missing, run zig build vendor-sync");
+    const host_asset: ?AssetModules = if (have_image_stack) realAssetModules(b, target, optimize, gltf_module) else blk: {
+        const missing = b.addFail("gosslens: .vendor/bimg or .vendor/libyuv missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
         break :blk null;
     };
@@ -636,6 +639,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "segmentation", .module = segmentation_module },
             },
         });
+        if (host_asset) |am| tracking_module.addImport("image", am.image);
         if (target.result.os.tag == .macos) {
             tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
             tracking_module.linkFramework("AppKit", .{});
@@ -1024,6 +1028,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
             },
         });
+        if (host_asset) |am| conformance_module.addImport("image", am.image);
         conformance_module.addIncludePath(b.path(".vendor/glfw/include"));
         // Declarations only - the gpupixel archive already carries a
         // compiled stb_image implementation on this macOS-only target,
@@ -1459,11 +1464,13 @@ fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .optimize = optimize,
     });
     image_module.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
+    image_module.addIncludePath(b.path(".vendor/libyuv/include"));
     image_module.addCSourceFile(.{
         .file = b.path("harness/lodepng_impl.c"),
         .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
     });
     image_module.link_libc = true;
+    image_module.linkLibrary(buildLibyuvLib(b, target, optimize, null));
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, image_module);
     const asset_module = b.createModule(.{
         .root_source_file = b.path("adapters/asset/asset.zig"),
@@ -1851,7 +1858,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         ".vendor/gpupixel/include",
         ".vendor/gpupixel/src",
         ".vendor/gpupixel/third_party/ghc",
-        ".vendor/gpupixel/third_party/libyuv/include",
+        ".vendor/libyuv/include",
         ".vendor/gpupixel/third_party/stb/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
@@ -1996,6 +2003,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // module compiles with those features available; the scalable extensions
 // stay out entirely.
 fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
+    const root = ".vendor/libyuv";
     const yuv_target = if (target.result.cpu.arch == .aarch64) blk: {
         var query = target.query;
         query.cpu_model = .baseline;
@@ -2007,9 +2015,9 @@ fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     module.link_libcpp = true;
     if (target.result.abi.isAndroid()) module.pic = true;
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
-    module.addIncludePath(b.path(".vendor/gpupixel/third_party/libyuv/include"));
+    module.addIncludePath(b.path(b.fmt("{s}/include", .{root})));
     var yuv_sources: std.ArrayList([]const u8) = .empty;
-    listFilesRecursive(b, ".vendor/gpupixel/third_party/libyuv/source", ".cc", &.{
+    listFilesRecursive(b, b.fmt("{s}/source", .{root}), ".cc", &.{
         "_test", "_unittest", "mjpeg",
     }, &yuv_sources);
     std.mem.sort([]const u8, yuv_sources.items, {}, struct {

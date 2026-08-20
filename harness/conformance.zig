@@ -12,6 +12,7 @@
 const std = @import("std");
 const abi = @import("abi");
 const sampler = @import("sampler");
+const image_adapter = @import("image");
 const math = @import("math");
 
 const c = @cImport({
@@ -70,11 +71,8 @@ const Nv12Copy = struct {
 
 /// Converts a decoded RGBA frame to NV12 exactly the way a camera would
 /// deliver it: full range, the classic standard, chroma averaged 2x2 -
-/// mirrors harness/tracking.zig's own conversion, the same real path a
-/// device feeds this ABI through.
+/// through the image adapter, the kit's one CPU conversion authority.
 fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
-    const bytes = frame.pixels.rgba8;
-    const conversion = math.color.rgbToYuv(.bt601, .full);
     const w = frame.width;
     const h = frame.height;
     const half_width = (w + 1) / 2;
@@ -83,44 +81,7 @@ fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
     errdefer gpa.free(y_plane);
     const uv_plane = try gpa.alloc(u8, @as(usize, half_width) * half_height * 2);
     errdefer gpa.free(uv_plane);
-
-    for (0..h) |row| {
-        for (0..w) |column| {
-            const at = (row * w + column) * 4;
-            const yuv = conversion.apply(.{
-                @as(f32, @floatFromInt(bytes[at])) / 255.0,
-                @as(f32, @floatFromInt(bytes[at + 1])) / 255.0,
-                @as(f32, @floatFromInt(bytes[at + 2])) / 255.0,
-            });
-            y_plane[row * w + column] = @intFromFloat(std.math.clamp(yuv[0], 0.0, 1.0) * 255.0);
-        }
-    }
-    for (0..half_height) |row| {
-        for (0..half_width) |column| {
-            var cb: f32 = 0;
-            var cr: f32 = 0;
-            var samples: f32 = 0;
-            for (0..2) |dy| {
-                for (0..2) |dx| {
-                    const source_y = row * 2 + dy;
-                    const source_x = column * 2 + dx;
-                    if (source_y >= h or source_x >= w) continue;
-                    const at = (source_y * w + source_x) * 4;
-                    const yuv = conversion.apply(.{
-                        @as(f32, @floatFromInt(bytes[at])) / 255.0,
-                        @as(f32, @floatFromInt(bytes[at + 1])) / 255.0,
-                        @as(f32, @floatFromInt(bytes[at + 2])) / 255.0,
-                    });
-                    cb += yuv[1];
-                    cr += yuv[2];
-                    samples += 1;
-                }
-            }
-            const at = (row * half_width + column) * 2;
-            uv_plane[at] = @intFromFloat(std.math.clamp(cb / samples, 0.0, 1.0) * 255.0);
-            uv_plane[at + 1] = @intFromFloat(std.math.clamp(cr / samples, 0.0, 1.0) * 255.0);
-        }
-    }
+    try image_adapter.rgbaToNv12(gpa, frame.pixels.rgba8, w, h, y_plane, uv_plane);
     return .{ .y = y_plane, .uv = uv_plane, .width = w, .height = h };
 }
 

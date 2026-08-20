@@ -26,6 +26,7 @@ Third-party source currently present under `third_party/` includes:
 - gemmlowp
 - GLFW
 - GPUPixel
+- libyuv
 - LiteRT
 - ml_dtypes
 - neon2sse
@@ -45,7 +46,8 @@ in the same sense as the list above:
 - Inside bimg (built into the renderer's image path): astc-encoder
   (Apache-2.0), iqa (BSD), lodepng (Zlib), tinyexr (BSD-3)
 - Inside GPUPixel (built into the effects library): ghc filesystem (MIT),
-  libyuv (BSD-3), stb (public domain / MIT)
+  stb (public domain / MIT); GPUPixel's color conversion links the
+  repository's own pinned libyuv rather than the copy bundled in its tree
 - Inside TensorFlow (built into the inference runtime): XLA (Apache-2.0)
 
 Model and test assets fetched by `zig build fetch-models` are third-party
