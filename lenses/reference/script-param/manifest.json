@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.script-param",
+  "version": "1.0.0",
+  "display_name": "Script Param",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [
+    {"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}
+  ],
+  "nodes": [
+    {"id": "drive", "type": "script", "params": {},
+     "source": "function update(lens) { lens.params.intensity = lens.signals.face_present > 0.5 ? 0.8 : 0.2; }"}
+  ],
+  "triggers": []
+}

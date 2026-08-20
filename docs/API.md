@@ -222,6 +222,7 @@ complete parameter list.**
 | `goss_session_activate_lens_from_directory` | `activateLensFromDirectory(bundlePath)` | native SDKs |
 | `goss_session_deactivate_lens` | `deactivateLens()` | all SDKs |
 | `goss_session_tick_lens` | `tickLens(dtUs, signals)` | all SDKs |
+| `goss_session_parameter_value` | `parameterValue(name)`, reads a live lens parameter by name, including whatever a script node last wrote | native SDKs |
 
 ## Web tracking module
 

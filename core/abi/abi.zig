@@ -66,7 +66,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 17;
+pub const abi_minor: u16 = 18;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -3206,6 +3206,18 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     s.active_lens = null;
 }
 
+/// Reads a live parameter of the active lens by name, including whatever a
+/// script node last wrote. Returns again with no lens active, and
+/// invalid_argument for an unknown name, so the two cases stay distinct.
+pub export fn goss_session_parameter_value(session: ?*Session, name: ?[*]const u8, name_len: usize, out_value: ?*f32) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    const out = out_value orelse return .invalid_argument;
+    const lens = if (s.active_lens) |*l| l else return .again;
+    out.* = lens.paramValue(n[0..name_len]) orelse return .invalid_argument;
+    return .ok;
+}
+
 /// Advances the active lens by dt_us of real time and applies every
 /// effect value its triggers/ramps changed to the beauty chain, if one
 /// is enabled. Reports GOSS_AGAIN with no active lens, matching the
@@ -3428,6 +3440,30 @@ test "ticking with no active lens reports again; ticking a firing trigger advanc
     try t.expect(session.active_lens.?.param_values[0] < 1.0);
 
     try t.expectEqual(Status.invalid_argument, goss_session_tick_lens(session, 8_333, null));
+}
+
+test "a script node drives a parameter from a signal" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+
+    const manifest_json =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}],
+        \\ "nodes": [{"id": "drive", "type": "script", "params": {},
+        \\   "source": "function update(lens) { lens.params.intensity = lens.signals.face_present > 0.5 ? 0.8 : 0.2; }"}],
+        \\ "triggers": []}
+    ;
+    try t.expectEqual(Status.ok, goss_session_activate_lens(session, manifest_json.ptr, manifest_json.len));
+
+    var present = std.mem.zeroes(LensSignals);
+    present.has_face = true;
+    try t.expectEqual(Status.ok, goss_session_tick_lens(session, 16_000, &present));
+
+    var v: f32 = -1;
+    try t.expectEqual(Status.ok, goss_session_parameter_value(session, "intensity", "intensity".len, &v));
+    try t.expectApproxEqAbs(@as(f32, 0.8), v, 1e-6);
 }
 
 test "activating a lens from a real bundle directory splices it, and a build without a renderer creates no shader programs" {

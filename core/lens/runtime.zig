@@ -441,7 +441,13 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     errdefer gpa.free(trigger_was_true);
     @memset(trigger_was_true, false);
 
-    const nodes = try gpa.alloc(LensNode, lens_manifest.nodes.len);
+    // Script nodes are skipped below (they drive parameters, they do not
+    // splice), so size the node array to the composite nodes only.
+    var composite_count: usize = 0;
+    for (lens_manifest.nodes) |node| {
+        if (!std.mem.eql(u8, node.type, "script")) composite_count += 1;
+    }
+    const nodes = try gpa.alloc(LensNode, composite_count);
     errdefer gpa.free(nodes);
     var spliced_count: usize = 0;
     errdefer for (nodes[0..spliced_count]) |n| g.removeNode(n.graph_index);

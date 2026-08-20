@@ -112,13 +112,12 @@ drive:
 }
 ```
 
-Parameters are the *only* way a lens's numeric state changes at runtime.
-There is no scripting surface — a parameter's value flows into node inputs
-and shader uniforms by name binding declared in the node's `params` map
-(section 5), and nowhere else. Out-of-range values from a trigger ramp or a
-host app write are clamped, never rejected at runtime (rejection is a
-load-time validation concern; a running lens never errors on a parameter
-write, it clamps and continues).
+A parameter changes at runtime three ways: a trigger ramp or set, a host
+app write, or a script node (section 5). A parameter's value flows into node
+inputs and shader uniforms by name binding declared in the node's `params`
+map (section 5). Out-of-range values from any of them are clamped, never
+rejected at runtime (rejection is a load-time validation concern; a running
+lens never errors on a parameter write, it clamps and continues).
 
 ## 5. Node subgraph
 
@@ -174,6 +173,18 @@ the vertices along each, and `length` is how far they hang in meters;
 all are optional with engine defaults. Like cloth it needs no glb
 asset, and without a tracked head the strands hang from their initial
 pose, the standard capability degradation.
+
+A `"script"` node carries an inline `"source"` string of JavaScript that
+defines a global `update(lens)` function. It draws nothing and never joins
+the composite chain; instead the host runs it once per tick, before triggers
+and ramps, exposing the current signals as `lens.signals.<name>` (read) and
+the lens parameters as `lens.params.<name>` (read and write). Whatever it
+writes to a parameter flows into that tick like any other parameter change.
+The runtime is sandboxed and deterministic: no filesystem, network, wall
+clock, or randomness is in scope (`Date` and `Math.random` are removed), and
+each tick is bounded by a fuel limit, so a script can neither reach outside
+the lens nor hang the frame. The same inputs always produce the same writes,
+which is what lets a scripted lens be conformance bit-stable.
 
 The set of known `type` values is closed and versioned with the *engine*, not
 the format — GLF 1.0 does not let a lens introduce a new node type, only

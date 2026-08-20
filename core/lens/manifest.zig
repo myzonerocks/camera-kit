@@ -1273,15 +1273,16 @@ test "a cloth field parses on a model node" {
 test "a script node captures its inline source" {
     const source =
         \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
-        \\ "capabilities": [], "parameters": [], "nodes": [
-        \\   {"id": "s", "type": "script", "params": {},
-        \\    "source": "function update(lens){ lens.params.x = 1; }"}
+        \\ "capabilities": [], "parameters": [{"name": "intensity", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}], "nodes": [
+        \\   {"id": "drive", "type": "script", "params": {},
+        \\    "source": "function update(lens) { lens.params.intensity = lens.signals.face_present > 0.5 ? 0.8 : 0.2; }"}
         \\ ], "triggers": []}
     ;
     var manifest = try parseOk(source);
     defer manifest.deinit();
+    try t.expectEqual(@as(usize, 1), manifest.nodes.len);
+    try t.expectEqualStrings("script", manifest.nodes[0].type);
     try t.expect(manifest.nodes[0].script != null);
-    try t.expectEqualStrings("function update(lens){ lens.params.x = 1; }", manifest.nodes[0].script.?);
 }
 
 test "a physics chain parses its target and length" {

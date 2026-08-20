@@ -49,8 +49,15 @@ GossScript *goss_script_new(const char *source, size_t source_len, long fuel_per
     JSValue h = JS_Eval(s->ctx, harden, strlen(harden), "<harden>", JS_EVAL_TYPE_GLOBAL);
     JS_FreeValue(s->ctx, h);
 
+    // JS_Eval needs a null-terminated buffer even with an explicit length,
+    // and the source slice from the lens is not, so copy it terminated.
+    char *buf = (char *)malloc(source_len + 1);
+    if (!buf) { goss_script_free(s); return NULL; }
+    memcpy(buf, source, source_len);
+    buf[source_len] = '\0';
     s->budget = s->fuel_per_tick;
-    JSValue v = JS_Eval(s->ctx, source, source_len, "<lens>", JS_EVAL_TYPE_GLOBAL);
+    JSValue v = JS_Eval(s->ctx, buf, source_len, "<lens>", JS_EVAL_TYPE_GLOBAL);
+    free(buf);
     int failed = JS_IsException(v);
     JS_FreeValue(s->ctx, v);
     if (failed) { goss_script_free(s); return NULL; }
