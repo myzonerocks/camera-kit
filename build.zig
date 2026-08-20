@@ -336,6 +336,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
+    const have_jolt = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
+        break :blk true;
+    };
+    if (have_jolt) {
+        const physics_tests = b.addTest(.{ .root_module = physicsModule(b, target, optimize, true) });
+        test_step.dependOn(&b.addRunArtifact(physics_tests).step);
+    }
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
@@ -1379,6 +1387,27 @@ fn audioAnalysisModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     return b.createModule(.{ .root_source_file = b.path("core/media/audio_analysis.zig"), .target = target, .optimize = optimize });
 }
 
+// The rigid-body world: Jolt and its shim on targets we build it for,
+// the honest stub elsewhere. Host-only until the lens physics nodes
+// bring the device targets with them.
+fn physicsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, real: bool) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path(if (real) "adapters/physics/physics.zig" else "adapters/physics/physics_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (real) {
+        module.link_libcpp = true;
+        module.addIncludePath(b.path(".vendor/jolt"));
+        module.addCSourceFile(.{
+            .file = b.path("adapters/physics/jolt_shim.cpp"),
+            .flags = &.{ "-std=c++17", "-fno-sanitize=undefined" },
+        });
+        module.linkLibrary(buildJoltLib(b, target, optimize));
+    }
+    return module;
+}
+
 // Platform photo encoding: the formats phones actually save, produced
 // by the platform's own encoders; targets without a landed backend get
 // the stub, which reports the capability honestly absent.
@@ -2098,6 +2127,29 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // vector instructions with runtime dispatch deciding what executes, so the
 // module compiles with those features available; the scalable extensions
 // stay out entirely.
+// Jolt compiles from source under the one build orchestration - the
+// samples and their proprietary Assets/ never enter the build (see the
+// decisions record). Single-threaded determinism is the harness's own
+// job-system choice at runtime, not a compile flag.
+fn buildJoltLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.link_libcpp = true;
+    module.addIncludePath(b.path(".vendor/jolt"));
+    var sources: std.ArrayList([]const u8) = .empty;
+    listFilesRecursive(b, ".vendor/jolt/Jolt", ".cpp", &.{}, &sources);
+    std.mem.sort([]const u8, sources.items, {}, struct {
+        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lessThan);
+    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    for (sources.items) |file| {
+        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+    }
+    return b.addLibrary(.{ .name = "jolt", .linkage = .static, .root_module = module });
+}
+
 fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
     const root = ".vendor/libyuv";
     const yuv_target = if (target.result.cpu.arch == .aarch64) blk: {

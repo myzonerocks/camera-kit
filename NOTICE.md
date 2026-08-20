@@ -26,6 +26,7 @@ Third-party source currently present under `third_party/` includes:
 - gemmlowp
 - GLFW
 - GPUPixel
+- Jolt Physics
 - libyuv
 - LiteRT
 - ml_dtypes
@@ -49,6 +50,10 @@ in the same sense as the list above:
   stb (public domain / MIT); GPUPixel's color conversion links the
   repository's own pinned libyuv rather than the copy bundled in its tree
 - Inside TensorFlow (built into the inference runtime): XLA (Apache-2.0)
+- Inside the Jolt Physics repository: sample assets under Assets/ carry
+  their own proprietary licenses and are never built into or
+  distributed with Gosslens artifacts; only the MIT-licensed Jolt/
+  sources compile
 
 Model and test assets fetched by `zig build fetch-models` are third-party
 material as well, recorded with their licenses in `third_party/models.lock`:
