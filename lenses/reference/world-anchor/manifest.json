@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.world-anchor",
+  "version": "1.0.0",
+  "display_name": "World Anchor",
+  "engine_compat": ">=0.16",
+  "capabilities": ["world"],
+  "parameters": [],
+  "nodes": [
+    {"id": "world_marker", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {}, "anchor": "world"}
+  ],
+  "triggers": []
+}

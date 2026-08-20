@@ -141,8 +141,12 @@ the live landmarks and poses the model with that transform, so model
 space is the canonical face's centimeter space (origin between the eyes,
 x toward the subject's left, y up, z out of the face). Without a tracked
 face the node draws nothing, the standard capability degradation.
-`anchor` is rejected on every other node type, and `"face"` is the only
-anchor GLF 1.0 defines.
+`"anchor": "world"` pins the model to the tracked world instead: model
+space is world meters at the first submitted world anchor (or the world
+origin without one), drawn from the platform camera's own pose and
+projection; while tracking is anything but full, the node draws
+nothing. `anchor` is rejected on every other node type, and `"face"`
+and `"world"` are the only anchors GLF 1.0 defines.
 
 The set of known `type` values is closed and versioned with the *engine*, not
 the format — GLF 1.0 does not let a lens introduce a new node type, only
@@ -292,8 +296,9 @@ type), background-swap (capabilities: segmentation), trigger-anim
 (capabilities: none required; a timer-driven trigger playing a glTF
 animation clip, proving 6.2/6.3 without needing a live face), face-mask
 (capabilities: face; a glTF model pinned to the head through
-`"anchor": "face"`). Planned to complete the set: world-anchor
-(capabilities: world, blocked on the world-tracking seam). Each reference lens runs through the conformance
+`"anchor": "face"`), and world-anchor (capabilities: world; a glTF
+model pinned to the tracked world, proven on the deterministic replay
+camera track). The reference set is complete. Each reference lens runs through the conformance
 harness on all three platforms and is asserted bit-stable per platform
 (pixel output) and value-stable across platforms for anything
 resolution-independent (trigger fire timing, parameter curve values at

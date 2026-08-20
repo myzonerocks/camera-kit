@@ -1045,6 +1045,14 @@ pub fn build(b: *std.Build) void {
         });
         if (host_asset) |am| conformance_module.addImport("image", am.image);
         conformance_module.addImport("png", conformance_png_module);
+        const world_replay_module = b.createModule(.{
+            .root_source_file = b.path("harness/world_replay.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "math", .module = math_module }},
+        });
+        conformance_module.addImport("world_replay", world_replay_module);
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = world_replay_module })).step);
         conformance_module.addIncludePath(b.path(".vendor/glfw/include"));
         // Declarations only - the gpupixel archive already carries a
         // compiled stb_image implementation on this macOS-only target,

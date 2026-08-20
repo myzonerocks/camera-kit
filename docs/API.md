@@ -142,6 +142,7 @@ file must move together.
 | `goss_engine_recording_start` | `startRecording(session, path, config)`, appending one video frame per rendered frame with effects baked in | Swift and Kotlin |
 | `goss_engine_recording_stop` | `stopRecording()`, flushing in-flight frames and finalizing the file | same |
 | `goss_session_submit_audio` | `submitAudio(session, samples, frameCount, sampleRate, channels, timestampUs)`, feeding level and beat triggers always and the recording's audio track where the backend muxes audio | Swift and Kotlin |
+| `goss_session_submit_world` | `submitWorld(session, state, planes, anchors, light)`, feeding the tracking-state trigger and world-anchored content | Swift WorldSource on ARKit; Kotlin binding ready, ARCore feed lands with the demo; web WebXR next |
 
 ### Session lifecycle
 

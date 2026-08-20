@@ -73,6 +73,8 @@ pub const Node = struct {
     mask_channel: ?u8 = null,
     /// True when a model.gltf node anchors to the tracked face.
     face_anchor: bool = false,
+    /// True when a model.gltf node anchors to the tracked world.
+    world_anchor: bool = false,
 };
 
 pub const ActionKind = enum {
@@ -599,6 +601,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         }
 
         var face_anchor = false;
+        var world_anchor = false;
         if (getField(object, "anchor")) |anchor_value| {
             const anchor_mark = path.push("anchor");
             if (try expectString(diags, path, anchor_value)) |anchor_name| {
@@ -606,6 +609,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                     try diags.add(path.slice(), "anchor is a model.gltf field, found it on '{s}'", .{node_type});
                 } else if (std.mem.eql(u8, anchor_name, "face")) {
                     face_anchor = true;
+                } else if (std.mem.eql(u8, anchor_name, "world")) {
+                    world_anchor = true;
                 } else {
                     try diags.add(path.slice(), "unknown anchor '{s}'", .{anchor_name});
                 }
@@ -635,6 +640,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .params = try params.toOwnedSlice(arena),
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
+            .world_anchor = world_anchor,
         });
     }
     return try out.toOwnedSlice(arena);
