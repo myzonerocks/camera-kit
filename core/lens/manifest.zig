@@ -113,6 +113,9 @@ pub const Node = struct {
     cloth: ?ClothField = null,
     /// Set when the node is simulated strand hair instead of a glb.
     hair: ?HairField = null,
+    /// The inline script source, set only for a "script" node. It runs each
+    /// tick to drive parameters and never joins the composite chain.
+    script: ?[]const u8 = null,
 };
 
 pub const ActionKind = enum {
@@ -830,6 +833,19 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             path.pop(mask_mark);
         }
 
+        var script_source: ?[]const u8 = null;
+        if (std.mem.eql(u8, node_type, "script")) {
+            const src_mark = path.push("source");
+            if (getField(object, "source")) |src_value| {
+                if (try expectString(diags, path, src_value)) |src| {
+                    script_source = try arena.dupe(u8, src);
+                }
+            } else {
+                try diags.add(path.slice(), "a script node needs a source", .{});
+            }
+            path.pop(src_mark);
+        }
+
         try out.append(arena, .{
             .id = try arena.dupe(u8, id),
             .type = try arena.dupe(u8, node_type),
@@ -841,6 +857,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .physics = physics_body,
             .cloth = cloth_field,
             .hair = hair_field,
+            .script = script_source,
         });
     }
     return try out.toOwnedSlice(arena);
@@ -1251,6 +1268,20 @@ test "a cloth field parses on a model node" {
     try t.expectEqual(@as(u32, 10), cloth.cols);
     try t.expectEqual(@as(u32, 6), cloth.rows);
     try t.expectEqual(@as(f32, 1.5), cloth.width);
+}
+
+test "a script node captures its inline source" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "s", "type": "script", "params": {},
+        \\    "source": "function update(lens){ lens.params.x = 1; }"}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    try t.expect(manifest.nodes[0].script != null);
+    try t.expectEqualStrings("function update(lens){ lens.params.x = 1; }", manifest.nodes[0].script.?);
 }
 
 test "a physics chain parses its target and length" {
