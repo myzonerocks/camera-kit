@@ -213,7 +213,11 @@ A `"script"` node carries an inline `"source"` string of JavaScript that
 defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
 and ramps, exposing the current signals as `lens.signals.<name>` (read) and
-the lens parameters as `lens.params.<name>` (read and write). Whatever it
+the lens parameters as `lens.params.<name>` (read and write). The signal
+surface is the six live signals (`face_present`, `hands_present`,
+`audio_level`, `audio_beat`, `world_tracking_state`, `tap`) plus every ARKit
+blendshape by name (`lens.signals.jawOpen`, `mouthSmileLeft`, and the rest),
+so a script reacts to an expression the way a trigger reads `jawOpen.blendshape`. Whatever it
 writes to a parameter flows into that tick like any other parameter change.
 The runtime is sandboxed and deterministic: no filesystem, network, wall
 clock, or randomness is in scope (`Date` and `Math.random` are removed), and

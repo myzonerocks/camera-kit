@@ -1408,6 +1408,57 @@ fn proveStackedPostEffects(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a script reads a facial blendshape: the script-expression lens maps
+/// lens.signals.jawOpen straight to a parameter, so a wide-open jaw drives it
+/// near 1 and a nearly-closed jaw near 0, deterministically - the expression
+/// surface a trigger already reaches through jawOpen.blendshape.
+fn proveExpressionScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/script-expression", ".lens-packages/script-expression".len) != .ok) {
+        std.debug.print("conformance: FAIL script-expression lens activation\n", .{});
+        return false;
+    }
+
+    const name = "open_amount";
+    // blendshape_names[25] is jawOpen, pinned by a face module test.
+    const jaw_open = 25;
+    var open = std.mem.zeroes(abi.LensSignals);
+    open.has_face = true;
+    open.blendshapes[jaw_open] = 0.9;
+    var closed = std.mem.zeroes(abi.LensSignals);
+    closed.has_face = true;
+    closed.blendshapes[jaw_open] = 0.1;
+
+    var v_open: f32 = -1;
+    var v_closed: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &open);
+    if (abi.goss_session_parameter_value(session, name.ptr, name.len, &v_open) != .ok) {
+        std.debug.print("conformance: FAIL reading the expression-driven parameter\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_tick_lens(session, 16000, &closed);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_closed);
+    if (@abs(v_open - 0.9) > 1e-6 or @abs(v_closed - 0.1) > 1e-6) {
+        std.debug.print("conformance: FAIL script read jawOpen as {d}/{d}, wanted 0.9/0.1\n", .{ v_open, v_closed });
+        return false;
+    }
+
+    var v_again: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &open);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_again);
+    if (v_again != v_open) {
+        std.debug.print("conformance: FAIL expression script is not deterministic ({d} vs {d})\n", .{ v_again, v_open });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a script reads a facial blendshape (jawOpen) and drives a parameter from it deterministically (0.9 open, 0.1 closed)\n", .{});
+    return true;
+}
+
 /// Proves the session lifecycle leaks no memory: many activate/tick/destroy
 /// cycles of the adapter-heavy lenses (blur, grade, bloom, audio, script) run
 /// on a headless engine under a leak-checking allocator, which reports no leak
@@ -1850,6 +1901,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;
     if (!try proveStackedPostEffects(gpa, engine)) return 1;
+    if (!try proveExpressionScript(gpa, engine)) return 1;
     if (!try proveNoLeaks(gpa)) return 1;
     return 0;
 }

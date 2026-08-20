@@ -2967,18 +2967,31 @@ fn setupScript(s: *Session) void {
 /// Runs the lens script's update(lens) once, exposing the current signals
 /// and passing the live parameters in and out. Bounded stack buffers, no
 /// per-frame allocation; a script exception or timeout just skips the write.
+// The signal names a script reads as lens.signals.<name>: the six live
+// signals, then the full ARKit blendshape set by name so a script can react
+// to an expression (lens.signals.jawOpen) the way a trigger reads
+// jawOpen.blendshape. Built once - every name is a static string.
+const base_signal_names = [_][*:0]const u8{ "face_present", "hands_present", "audio_level", "audio_beat", "world_tracking_state", "tap" };
+const script_signal_names = blk: {
+    var arr: [base_signal_names.len + face.blendshape_count][*:0]const u8 = undefined;
+    for (base_signal_names, 0..) |name, i| arr[i] = name;
+    for (face.blendshape_names, 0..) |name, i| arr[base_signal_names.len + i] = @ptrCast(name.ptr);
+    break :blk arr;
+};
+
 fn runScript(s: *Session, signals: *const trigger.Signals) void {
     const engine = if (s.script_engine) |*e| e else return;
     const lens = if (s.active_lens) |*l| l else return;
-    const sig_names = [_][*:0]const u8{ "face_present", "hands_present", "audio_level", "audio_beat", "world_tracking_state", "tap" };
-    const sig_values = [_]f64{
-        if (signals.face_present) 1.0 else 0.0,
-        if (signals.hands_present) 1.0 else 0.0,
-        signals.audio_level,
-        if (signals.audio_beat) 1.0 else 0.0,
-        signals.world_tracking_state,
-        if (signals.tap) 1.0 else 0.0,
-    };
+    var sig_values: [script_signal_names.len]f64 = undefined;
+    sig_values[0] = if (signals.face_present) 1.0 else 0.0;
+    sig_values[1] = if (signals.hands_present) 1.0 else 0.0;
+    sig_values[2] = signals.audio_level;
+    sig_values[3] = if (signals.audio_beat) 1.0 else 0.0;
+    sig_values[4] = signals.world_tracking_state;
+    sig_values[5] = if (signals.tap) 1.0 else 0.0;
+    for (0..face.blendshape_count) |i| {
+        sig_values[base_signal_names.len + i] = if (signals.blendshapes) |bs| bs[i] else 0.0;
+    }
     const n = @min(s.script_param_names.len, 256);
     var name_ptrs: [256][*:0]const u8 = undefined;
     var values: [256]f64 = undefined;
@@ -2986,7 +2999,7 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
         name_ptrs[i] = s.script_param_names[i].ptr;
         values[i] = lens.param_values[i];
     }
-    engine.tick(&sig_names, &sig_values, name_ptrs[0..n], values[0..n]) catch return;
+    engine.tick(&script_signal_names, &sig_values, name_ptrs[0..n], values[0..n]) catch return;
     for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(values[i]));
 }
 
