@@ -318,6 +318,20 @@ pub const Renderer = struct {
         return 0;
     }
 
+    pub fn createReadbackTexture(width: u16, height: u16) !TextureHandle {
+        _ = width;
+        _ = height;
+        return .{};
+    }
+
+    pub fn blitTexture(view_id: u8, dst: TextureHandle, src: TextureHandle, width: u16, height: u16) void {
+        _ = view_id;
+        _ = dst;
+        _ = src;
+        _ = width;
+        _ = height;
+    }
+
     pub fn currentShaderProfileTag() ![]const u8 {
         return error.RendererUnavailable;
     }

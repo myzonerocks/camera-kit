@@ -8,6 +8,7 @@ const std = @import("std");
 
 const c = @cImport({
     @cInclude("lodepng.h");
+    @cInclude("libyuv.h");
 });
 
 pub const Image = struct {
@@ -33,6 +34,32 @@ pub fn decode(gpa: std.mem.Allocator, png_bytes: []const u8) DecodeError!Image {
     const owned = try gpa.alloc(u8, byte_count);
     @memcpy(owned, decoded[0..byte_count]);
     return .{ .width = width, .height = height, .rgba = owned };
+}
+
+pub const ConvertError = error{ OutOfMemory, ConversionFailed };
+
+/// Converts tightly packed RGBA8 (libyuv's ABGR word order) to
+/// full-range BT.601 NV12 through libyuv, the kit's one CPU
+/// conversion authority. y_out holds width * height bytes, uv_out the
+/// interleaved half-rounded-up chroma plane.
+pub fn rgbaToNv12(gpa: std.mem.Allocator, rgba: []const u8, width: u32, height: u32, y_out: []u8, uv_out: []u8) ConvertError!void {
+    const w: usize = width;
+    const h: usize = height;
+    const half_w = (w + 1) / 2;
+    const half_h = (h + 1) / 2;
+    if (rgba.len < w * h * 4 or y_out.len < w * h or uv_out.len < half_w * 2 * half_h) return error.ConversionFailed;
+
+    const u_plane = try gpa.alloc(u8, half_w * half_h);
+    defer gpa.free(u_plane);
+    const v_plane = try gpa.alloc(u8, half_w * half_h);
+    defer gpa.free(v_plane);
+
+    if (c.ABGRToJ420(rgba.ptr, @intCast(w * 4), y_out.ptr, @intCast(w), u_plane.ptr, @intCast(half_w), v_plane.ptr, @intCast(half_w), @intCast(width), @intCast(height)) != 0) {
+        return error.ConversionFailed;
+    }
+    if (c.I420ToNV12(y_out.ptr, @intCast(w), u_plane.ptr, @intCast(half_w), v_plane.ptr, @intCast(half_w), y_out.ptr, @intCast(w), uv_out.ptr, @intCast(half_w * 2), @intCast(width), @intCast(height)) != 0) {
+        return error.ConversionFailed;
+    }
 }
 
 const t = std.testing;
@@ -72,4 +99,24 @@ test "decodes a real PNG to the expected dimensions and its two solid colors" {
 
 test "rejects bytes that are not a valid PNG" {
     try t.expectError(error.InvalidPng, decode(t.allocator, "not a png"));
+}
+
+test "a solid color survives the round trip to NV12" {
+    // Pure white, full range: Y saturates at 255 and both chroma
+    // channels sit at the 128 midpoint.
+    const w = 4;
+    const h = 4;
+    var rgba: [w * h * 4]u8 = @splat(255);
+    var y_plane: [w * h]u8 = undefined;
+    var uv_plane: [(w / 2) * 2 * (h / 2)]u8 = undefined;
+    try rgbaToNv12(t.allocator, &rgba, w, h, &y_plane, &uv_plane);
+    for (y_plane) |value| try t.expectEqual(@as(u8, 255), value);
+    for (uv_plane) |value| try t.expectEqual(@as(u8, 128), value);
+}
+
+test "undersized planes refuse" {
+    var rgba: [16]u8 = @splat(0);
+    var y_plane: [1]u8 = undefined;
+    var uv_plane: [2]u8 = undefined;
+    try t.expectError(error.ConversionFailed, rgbaToNv12(t.allocator, &rgba, 2, 2, &y_plane, &uv_plane));
 }

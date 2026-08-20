@@ -137,6 +137,7 @@ file must move together.
 |---|---|---|
 | `goss_engine_request_screenshot` | `requestScreenshot(path)` | debug/test where supported |
 | `goss_engine_capture_frame` | `captureFrame()`, returning pixels plus the renderer's real width and height | supported SDKs |
+| `goss_engine_capture_photo` | `capturePhoto()`, returning deterministic PNG bytes of the composited frame, sized by a probe call | supported SDKs |
 
 ### Session lifecycle
 

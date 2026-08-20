@@ -25,4 +25,28 @@ extension Engine {
         }
         return (data, outWidth, outHeight)
     }
+
+    /// Renders like captureFrame and returns the composited output
+    /// encoded as PNG bytes, sized by a probe call first. Deterministic:
+    /// the same composited pixels, the same bytes.
+    public func capturePhoto(session: Session?) throws -> (png: [UInt8], width: UInt32, height: UInt32) {
+        var needed = 0
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        var probe: UInt8 = 0
+        let status = goss_engine_capture_photo(handle, session?.handle, &probe, 0, &needed, &outWidth, &outHeight)
+        if status == GOSS_OK && needed == 0 {
+            return ([], outWidth, outHeight)
+        }
+        guard status == GOSS_ERROR_INVALID_ARGUMENT, needed > 0 else {
+            try checked(status)
+            return ([], outWidth, outHeight)
+        }
+        var data = [UInt8](repeating: 0, count: needed)
+        var encoded = 0
+        try data.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_engine_capture_photo(handle, session?.handle, buffer.baseAddress, buffer.count, &encoded, &outWidth, &outHeight))
+        }
+        return (Array(data[0..<encoded]), outWidth, outHeight)
+    }
 }

@@ -12,6 +12,7 @@
 const std = @import("std");
 const abi = @import("abi");
 const sampler = @import("sampler");
+const image_adapter = @import("image");
 const math = @import("math");
 
 const c = @cImport({
@@ -70,11 +71,8 @@ const Nv12Copy = struct {
 
 /// Converts a decoded RGBA frame to NV12 exactly the way a camera would
 /// deliver it: full range, the classic standard, chroma averaged 2x2 -
-/// mirrors harness/tracking.zig's own conversion, the same real path a
-/// device feeds this ABI through.
+/// through the image adapter, the kit's one CPU conversion authority.
 fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
-    const bytes = frame.pixels.rgba8;
-    const conversion = math.color.rgbToYuv(.bt601, .full);
     const w = frame.width;
     const h = frame.height;
     const half_width = (w + 1) / 2;
@@ -83,44 +81,7 @@ fn rgbaToNv12(gpa: std.mem.Allocator, frame: sampler.Frame) !Nv12Copy {
     errdefer gpa.free(y_plane);
     const uv_plane = try gpa.alloc(u8, @as(usize, half_width) * half_height * 2);
     errdefer gpa.free(uv_plane);
-
-    for (0..h) |row| {
-        for (0..w) |column| {
-            const at = (row * w + column) * 4;
-            const yuv = conversion.apply(.{
-                @as(f32, @floatFromInt(bytes[at])) / 255.0,
-                @as(f32, @floatFromInt(bytes[at + 1])) / 255.0,
-                @as(f32, @floatFromInt(bytes[at + 2])) / 255.0,
-            });
-            y_plane[row * w + column] = @intFromFloat(std.math.clamp(yuv[0], 0.0, 1.0) * 255.0);
-        }
-    }
-    for (0..half_height) |row| {
-        for (0..half_width) |column| {
-            var cb: f32 = 0;
-            var cr: f32 = 0;
-            var samples: f32 = 0;
-            for (0..2) |dy| {
-                for (0..2) |dx| {
-                    const source_y = row * 2 + dy;
-                    const source_x = column * 2 + dx;
-                    if (source_y >= h or source_x >= w) continue;
-                    const at = (source_y * w + source_x) * 4;
-                    const yuv = conversion.apply(.{
-                        @as(f32, @floatFromInt(bytes[at])) / 255.0,
-                        @as(f32, @floatFromInt(bytes[at + 1])) / 255.0,
-                        @as(f32, @floatFromInt(bytes[at + 2])) / 255.0,
-                    });
-                    cb += yuv[1];
-                    cr += yuv[2];
-                    samples += 1;
-                }
-            }
-            const at = (row * half_width + column) * 2;
-            uv_plane[at] = @intFromFloat(std.math.clamp(cb / samples, 0.0, 1.0) * 255.0);
-            uv_plane[at + 1] = @intFromFloat(std.math.clamp(cr / samples, 0.0, 1.0) * 255.0);
-        }
-    }
+    try image_adapter.rgbaToNv12(gpa, frame.pixels.rgba8, w, h, y_plane, uv_plane);
     return .{ .y = y_plane, .uv = uv_plane, .width = w, .height = h };
 }
 
@@ -207,6 +168,85 @@ fn renderOnce(gpa: std.mem.Allocator, engine: *abi.Engine, bundle_path: []const 
         _ = abi.goss_engine_render_frame(engine, session);
         c.glfwPollEvents();
     }
+}
+
+/// Proves goss_engine_capture_photo end to end: the size probe
+/// reports the exact needed size, a capture into an exactly-sized
+/// buffer yields well-formed PNG bytes, and two captures of the same
+/// composited frame are byte-identical.
+fn provePhotoCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    const activated = abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len);
+    if (activated != .ok) {
+        std.debug.print("conformance: FAIL photo lens activation: {t}\n", .{activated});
+        return false;
+    }
+
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    var needed: usize = 0;
+    var photo_width: u32 = 0;
+    var photo_height: u32 = 0;
+    const probe = abi.goss_engine_capture_photo(engine, session, @ptrCast(&needed), 0, &needed, &photo_width, &photo_height);
+    if (probe != .invalid_argument or needed == 0) {
+        std.debug.print("conformance: FAIL photo size probe: {t}, needed {d}\n", .{ probe, needed });
+        return false;
+    }
+
+    const first = try gpa.alloc(u8, needed);
+    defer gpa.free(first);
+    var first_len: usize = 0;
+    if (abi.goss_engine_capture_photo(engine, session, first.ptr, first.len, &first_len, &photo_width, &photo_height) != .ok or first_len != needed) {
+        std.debug.print("conformance: FAIL photo capture into an exactly-sized buffer\n", .{});
+        return false;
+    }
+    const png_signature = [8]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n' };
+    if (!std.mem.eql(u8, first[0..8], &png_signature) or !std.mem.eql(u8, first[12..16], "IHDR")) {
+        std.debug.print("conformance: FAIL photo bytes are not a PNG\n", .{});
+        return false;
+    }
+    if (std.mem.readInt(u32, first[16..20], .big) != photo_width or std.mem.readInt(u32, first[20..24], .big) != photo_height) {
+        std.debug.print("conformance: FAIL photo IHDR does not match the reported size\n", .{});
+        return false;
+    }
+
+    const second = try gpa.alloc(u8, needed);
+    defer gpa.free(second);
+    var second_len: usize = 0;
+    if (abi.goss_engine_capture_photo(engine, session, second.ptr, second.len, &second_len, &photo_width, &photo_height) != .ok) {
+        std.debug.print("conformance: FAIL second photo capture\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, first[0..first_len], second[0..second_len])) {
+        std.debug.print("conformance: FAIL photo capture produced different bytes across two runs\n", .{});
+        return false;
+    }
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-photo.png", .data = first[0..first_len] });
+    std.debug.print("conformance: PROOF photo capture is a deterministic PNG of the composited frame ({d}x{d}, {d} bytes, sha256 {s})\n", .{ photo_width, photo_height, first_len, sha256Hex(first[0..first_len]) });
+    return true;
 }
 
 /// Pumps a few frames with no active session, purely so bgfx has enough
@@ -409,5 +449,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     std.debug.print("conformance: PROOF all reference lenses match the pinned baseline\n", .{});
 
     if (!try proveTriggerAnimFires(gpa, engine)) return 1;
+    if (!try provePhotoCapture(gpa, engine)) return 1;
     return 0;
 }

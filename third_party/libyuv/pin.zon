@@ -1,0 +1,11 @@
+.{
+    .name = "libyuv",
+    .repo = "https://github.com/lemenkov/libyuv",
+    .version = "main 2026-08 (LIBYUV_VERSION 1960, mirror of chromium.googlesource.com/libyuv/libyuv)",
+    .commit = "fd64b1b5aba54d18356d1801010e5d3d0a754ff3",
+    .archive_url = "https://codeload.github.com/lemenkov/libyuv/tar.gz/fd64b1b5aba54d18356d1801010e5d3d0a754ff3",
+    .archive_sha256 = "4208b5bcb570c706e5b0cfd4807d4444d82e656de756f4024ebea21b824a44ae",
+    .license = "BSD-3-Clause",
+    .license_file = "LICENSE",
+    .license_sha256 = "2b2cc1180c7e6988328ad2033b04b80117419db9c4c584918bbb3cfec7e9364f",
+}

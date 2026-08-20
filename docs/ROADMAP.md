@@ -24,7 +24,7 @@ completeness and merges as a single squash PR.
 - [x] Head pose: weighted similarity fit of the canonical face's metric geometry to the live landmarks (deterministic, allocation-free), goss_session_face_pose with Swift/Kotlin wrappers, the model.gltf face-anchor node posing glTF content in canonical centimeter space, and the face-mask reference lens proven bit-stable on the pinned portrait corpus; skeleton anchors ride the same anchor field later
 - [x] Face-mesh effects: the canonical 468-point topology over the tracked landmarks as the mesh.face lens node, with the face-paint reference lens proven bit-stable in conformance with real tracking; makeup and mask variants ride the same node with their own textures
 - [ ] World tracking: the goss_world_source seam, ARKit/ARCore/WebXR backends, and the world-anchor reference lens
-- [ ] Media: GossMedia contracts in core/media, libyuv behind adapters/image, portable codecs behind adapters/media, photo and video capture output with A/V sync
+- [ ] Media: deterministic PNG photo capture shipped (goss_engine_capture_photo, conformance-proved, Swift/Kotlin wrappers) with libyuv pinned behind adapters/image as the one CPU conversion authority; video recording with A/V sync and portable codecs behind adapters/media remain
 - [ ] Physics: a rigid-body world for lens content, cloth and hair after rigid, behind an engine boundary like every other vendored component
 - [ ] Scripting: a sandboxed per-lens script node with the trigger and parameter surface as its API and a determinism contract
 - [ ] Audio: lens audio playback plus level and beat signals feeding the trigger system

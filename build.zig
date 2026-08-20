@@ -200,6 +200,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("hand", hand_core_module);
     abi_module.addImport("pose", pose_core_module);
     abi_module.addImport("face_geometry", face_geometry_core_module);
+    abi_module.addImport("png", pngModule(b, target, optimize));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -303,6 +304,7 @@ pub fn build(b: *std.Build) void {
     const math_tests = b.addTest(.{ .root_module = math_module });
     const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
     const fit_tests = b.addTest(.{ .root_module = fit_module });
+    const png_tests = b.addTest(.{ .root_module = pngModule(b, target, optimize) });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
@@ -328,6 +330,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(blob_tests).step);
     test_step.dependOn(&b.addRunArtifact(math_tests).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(png_tests).step);
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_dump_tests).step);
@@ -360,13 +363,16 @@ pub fn build(b: *std.Build) void {
     // lodepng lives inside bimg's vendored tree (bgfx's own image
     // dependency); a lens asset decoder wants only this one file out of
     // it, not the rest of the render stack, so it gets its own probe
-    // rather than riding on have_render_stack below.
-    const have_lodepng = blk: {
+    // rather than riding on have_render_stack below. libyuv rides the
+    // same probe because the image module is also the CPU conversion
+    // authority.
+    const have_image_stack = blk: {
         b.build_root.handle.access(b.graph.io, ".vendor/bimg/3rdparty/lodepng/lodepng.cpp", .{}) catch break :blk false;
+        b.build_root.handle.access(b.graph.io, ".vendor/libyuv/include/libyuv.h", .{}) catch break :blk false;
         break :blk true;
     };
-    const host_asset: ?AssetModules = if (have_lodepng) realAssetModules(b, target, optimize, gltf_module) else blk: {
-        const missing = b.addFail("gosslens: .vendor/bimg missing, run zig build vendor-sync");
+    const host_asset: ?AssetModules = if (have_image_stack) realAssetModules(b, target, optimize, gltf_module) else blk: {
+        const missing = b.addFail("gosslens: .vendor/bimg or .vendor/libyuv missing, run zig build vendor-sync");
         test_step.dependOn(&missing.step);
         break :blk null;
     };
@@ -602,6 +608,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "runtime", .module = lens_runtime_module },
             },
         });
+        abi_tracking_module.addImport("png", pngModule(b, target, optimize));
         if (target.result.os.tag == .macos) {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
@@ -632,6 +639,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "segmentation", .module = segmentation_module },
             },
         });
+        if (host_asset) |am| tracking_module.addImport("image", am.image);
         if (target.result.os.tag == .macos) {
             tracking_module.linkLibrary(buildGpupixelLib(b, target, optimize, null));
             tracking_module.linkFramework("AppKit", .{});
@@ -771,6 +779,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("hand", tracking_cores_wasm.hand);
     abi_wasm.addImport("pose", tracking_cores_wasm.pose);
     abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
+    abi_wasm.addImport("png", pngModule(b, wasm_target, .ReleaseSmall));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -930,6 +939,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "runtime", .module = lens_runtime_module },
             },
         });
+        abi_conformance_module.addImport("png", pngModule(b, target, optimize));
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
@@ -1018,6 +1028,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
             },
         });
+        if (host_asset) |am| conformance_module.addImport("image", am.image);
         conformance_module.addIncludePath(b.path(".vendor/glfw/include"));
         // Declarations only - the gpupixel archive already carries a
         // compiled stb_image implementation on this macOS-only target,
@@ -1142,6 +1153,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("hand", tracking_cores_android.hand);
     abi_android.addImport("pose", tracking_cores_android.pose);
     abi_android.addImport("face_geometry", tracking_cores_android.face_geometry);
+    abi_android.addImport("png", pngModule(b, android_target, optimize));
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = android_target,
@@ -1332,6 +1344,10 @@ const TrackingCoreModules = struct {
 
 // The pure tracking core for one target: geometry, decode, and sampling
 // shared by the worker, the harness, and the export layer.
+fn pngModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/png.zig"), .target = target, .optimize = optimize });
+}
+
 fn trackingCoreModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, math_module: *std.Build.Module) TrackingCoreModules {
     const bundle_module = b.createModule(.{
         .root_source_file = b.path("core/tracking/bundle.zig"),
@@ -1448,11 +1464,13 @@ fn realAssetModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .optimize = optimize,
     });
     image_module.addIncludePath(b.path(".vendor/bimg/3rdparty/lodepng"));
+    image_module.addIncludePath(b.path(".vendor/libyuv/include"));
     image_module.addCSourceFile(.{
         .file = b.path("harness/lodepng_impl.c"),
         .flags = &.{ "-std=c99", "-fno-sanitize=undefined" },
     });
     image_module.link_libc = true;
+    image_module.linkLibrary(buildLibyuvLib(b, target, optimize, null));
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, image_module);
     const asset_module = b.createModule(.{
         .root_source_file = b.path("adapters/asset/asset.zig"),
@@ -1840,7 +1858,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         ".vendor/gpupixel/include",
         ".vendor/gpupixel/src",
         ".vendor/gpupixel/third_party/ghc",
-        ".vendor/gpupixel/third_party/libyuv/include",
+        ".vendor/libyuv/include",
         ".vendor/gpupixel/third_party/stb/include",
     }) |dir| {
         module.addIncludePath(b.path(dir));
@@ -1985,6 +2003,7 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // module compiles with those features available; the scalable extensions
 // stay out entirely.
 fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, libc: ?std.Build.LazyPath) *std.Build.Step.Compile {
+    const root = ".vendor/libyuv";
     const yuv_target = if (target.result.cpu.arch == .aarch64) blk: {
         var query = target.query;
         query.cpu_model = .baseline;
@@ -1996,9 +2015,9 @@ fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
     module.link_libcpp = true;
     if (target.result.abi.isAndroid()) module.pic = true;
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
-    module.addIncludePath(b.path(".vendor/gpupixel/third_party/libyuv/include"));
+    module.addIncludePath(b.path(b.fmt("{s}/include", .{root})));
     var yuv_sources: std.ArrayList([]const u8) = .empty;
-    listFilesRecursive(b, ".vendor/gpupixel/third_party/libyuv/source", ".cc", &.{
+    listFilesRecursive(b, b.fmt("{s}/source", .{root}), ".cc", &.{
         "_test", "_unittest", "mjpeg",
     }, &yuv_sources);
     std.mem.sort([]const u8, yuv_sources.items, {}, struct {
@@ -2828,6 +2847,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("hand", tracking_cores_ios.hand);
     abi_ios.addImport("pose", tracking_cores_ios.pose);
     abi_ios.addImport("face_geometry", tracking_cores_ios.face_geometry);
+    abi_ios.addImport("png", pngModule(b, ios_target, optimize));
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = ios_target,
@@ -3352,6 +3372,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("hand", tracking_cores_em.hand);
     abi_em.addImport("pose", tracking_cores_em.pose);
     abi_em.addImport("face_geometry", tracking_cores_em.face_geometry);
+    abi_em.addImport("png", pngModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));

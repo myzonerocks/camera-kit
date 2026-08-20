@@ -1108,17 +1108,28 @@ pub const Renderer = struct {
         c.bgfx_request_screen_shot(.{ .idx = invalid_handle }, path);
     }
 
-    /// Reads a texture's pixels back into `data`, which must be at
-    /// least as large as the texture's own byte size (width * height *
-    /// bytes-per-pixel for a plain 2D RGBA8 texture, the only shape
-    /// this project reads back today). Only enqueues the read - per
-    /// bgfx's own documented contract, the return value is the frame
-    /// number bgfx_frame() must reach before `data` is safe to read;
-    /// the caller is responsible for calling frame() until its own
-    /// return value reaches it, not assuming any fixed number of
-    /// extra calls.
+    /// Enqueues a pixel readback into `data` (sized to the texture's
+    /// own width * height * 4); the texture must carry
+    /// BGFX_TEXTURE_READ_BACK (createReadbackTexture). Returns the
+    /// frame number the caller must reach via frame() before reading.
     pub fn readTexture(texture: TextureHandle, data: [*]u8) u32 {
         return c.bgfx_read_texture(texture, data, 0, 0);
+    }
+
+    /// A CPU-readable blit destination: render targets themselves are
+    /// not readable on every backend, so readbacks blit into one of
+    /// these first.
+    pub fn createReadbackTexture(width: u16, height: u16) !TextureHandle {
+        const handle = c.bgfx_create_texture_2d(width, height, false, 1, c.BGFX_TEXTURE_FORMAT_RGBA8, c.BGFX_TEXTURE_BLIT_DST | c.BGFX_TEXTURE_READ_BACK, null, 0);
+        if (handle.idx == invalid_handle) return error.TextureCreate;
+        return handle;
+    }
+
+    /// Enqueues a full-size copy of src into dst on view_id; blits run
+    /// in view order, so a view id past every draw pass copies the
+    /// finished frame.
+    pub fn blitTexture(view_id: u8, dst: TextureHandle, src: TextureHandle, width: u16, height: u16) void {
+        c.bgfx_blit(view_id, dst, 0, 0, 0, 0, src, 0, 0, 0, 0, width, height, 0);
     }
 };
 
