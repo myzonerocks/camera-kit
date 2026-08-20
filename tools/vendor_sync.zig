@@ -280,7 +280,11 @@ const Sync = struct {
             var segments = std.mem.tokenizeScalar(u8, dest, '/');
             while (segments.next()) |_| try climb.appendSlice(s.arena, "../");
             const patch_path = try std.fmt.allocPrint(s.arena, "{s}{s}/{s}", .{ climb.items, patches_dir_path, patch_name });
-            std.debug.print("vendor-sync: {s} applying {s}\n", .{ name, patch_name });
+            // Silent under tests: zig's build runner reroutes any test
+            // stderr through its error printer, which labels a passing
+            // step "failed command" - progress chatter is not worth
+            // that confusion.
+            if (!builtin.is_test) std.debug.print("vendor-sync: {s} applying {s}\n", .{ name, patch_name });
             try s.run(&.{ "patch", "-p1", "-d", dest, "-i", patch_path });
         }
     }
