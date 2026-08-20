@@ -160,6 +160,12 @@ kinematic anchor, a pendant off a bead. Simulation steps at a fixed
 rate from frame timestamps, so the same frames replay the same motion;
 on a session without physics support the node holds its initial pose.
 
+A model.gltf node may instead carry a `"cloth": {"cols", "rows",
+"width", "height"}` field: the node becomes a simulated cloth sheet
+(a grid of the given resolution and world size, top edge pinned)
+rather than a glb mesh, its deformed vertices drawn each frame. It
+needs no glb asset.
+
 The set of known `type` values is closed and versioned with the *engine*, not
 the format — GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader

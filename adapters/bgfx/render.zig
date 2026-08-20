@@ -935,6 +935,16 @@ pub const Renderer = struct {
         index_count: u32,
     };
 
+    /// A simulated cloth grid: positions live in a dynamic vertex
+    /// buffer updated every frame from the physics solver, the grid's
+    /// triangles in a static index buffer.
+    pub const ClothMesh = struct {
+        position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
+        index_buffer: c.bgfx_index_buffer_handle_t,
+        vertex_count: u32,
+        index_count: u32,
+    };
+
     /// Builds a static mesh from positions and indices: real gpu-side
     /// geometry, uploaded once. Vertex data is interleaved into the
     /// same POSITION+TEXCOORD0 layout every full-screen-quad pass uses
@@ -955,6 +965,65 @@ pub const Renderer = struct {
     pub fn destroyModelMesh(mesh: ModelMesh) void {
         c.bgfx_destroy_vertex_buffer(mesh.vertex_buffer);
         c.bgfx_destroy_index_buffer(mesh.index_buffer);
+    }
+
+    /// Builds a cols x rows cloth mesh: a dynamic position buffer (in
+    /// the shared POSITION+TEXCOORD0 layout, texcoord zero) and a
+    /// static index buffer of the grid's two-triangles-per-cell.
+    pub fn createClothMesh(r: *Renderer, cols: u32, rows: u32) !ClothMesh {
+        const vertex_count = cols * rows;
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(vertex_count, &r.layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+        var indices: std.ArrayList(u32) = .empty;
+        defer indices.deinit(r.gpa);
+        var y: u32 = 0;
+        while (y < rows - 1) : (y += 1) {
+            var x: u32 = 0;
+            while (x < cols - 1) : (x += 1) {
+                const a = y * cols + x;
+                const b = y * cols + x + 1;
+                const cc = (y + 1) * cols + x;
+                const d = (y + 1) * cols + x + 1;
+                try indices.appendSlice(r.gpa, &.{ a, cc, b, b, cc, d });
+            }
+        }
+        const index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(indices.items.ptr, @intCast(indices.items.len * @sizeOf(u32))), c.BGFX_BUFFER_INDEX32);
+        return .{ .position_buffer = position_buffer, .index_buffer = index_buffer, .vertex_count = vertex_count, .index_count = @intCast(indices.items.len) };
+    }
+
+    /// Uploads the solver's world-space vertices (three floats each)
+    /// into the cloth's dynamic buffer, padding the texcoord to zero.
+    pub fn updateClothMesh(r: *Renderer, mesh: ClothMesh, positions: []const f32) void {
+        const count = @min(positions.len / 3, mesh.vertex_count);
+        const interleaved = r.gpa.alloc(f32, count * 5) catch return;
+        defer r.gpa.free(interleaved);
+        for (0..count) |i| {
+            interleaved[i * 5 ..][0..5].* = .{ positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2], 0.0, 0.0 };
+        }
+        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
+    }
+
+    pub fn destroyClothMesh(mesh: ClothMesh) void {
+        c.bgfx_destroy_dynamic_vertex_buffer(mesh.position_buffer);
+        c.bgfx_destroy_index_buffer(mesh.index_buffer);
+    }
+
+    /// Draws a cloth mesh through the model program and camera - the
+    /// dynamic-buffer sibling of submitModel; vertices are already in
+    /// world space so the model matrix is identity.
+    pub fn submitCloth(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ClothMesh, base_color: [4]f32, aspect_ratio: f32) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+
+        const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
+        const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
+        const proj = math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one);
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
+        const model = math.Mat4.identity;
+        _ = c.bgfx_set_transform(&model.cols, 1);
+        c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
+        c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
     }
 
     /// Draws one model.gltf node: blit_view first blits the current

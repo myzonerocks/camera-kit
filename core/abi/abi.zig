@@ -264,6 +264,11 @@ pub const Session = struct {
     /// model node declares a body; poses drive those model matrices.
     physics_world: ?physics.World = null,
     physics_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    /// Cloth nodes: the solver body and the dynamic render mesh, by
+    /// graph index. Cloth replaces the glb mesh with a simulated grid.
+    cloth_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    cloth_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ClothMesh) = .empty,
+    cloth_cols: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     physics_last_us: i64 = 0,
 
     engine: *Engine,
@@ -843,7 +848,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
-            .model => s.model_meshes.contains(entry.graph_index),
+            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index),
         };
         if (ready) ready_count += 1;
     }
@@ -981,6 +986,43 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .model => {
+                if (s.cloth_meshes.get(entry.graph_index)) |cloth_mesh| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    if (s.cloth_bodies.get(entry.graph_index)) |body| {
+                        if (s.physics_world) |world| {
+                            const vcount = s.cloth_cols.get(entry.graph_index) orelse 0;
+                            if (vcount > 0) {
+                                if (s.engine.gpa.alloc(f32, vcount * 3)) |positions| {
+                                    defer s.engine.gpa.free(positions);
+                                    _ = world.clothRead(body, positions);
+                                    r.updateClothMesh(cloth_mesh, positions);
+                                } else |_| {}
+                            }
+                        }
+                    }
+                    const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
+                    r.submitCloth(blit_view, mesh_view, input_texture, cloth_mesh, .{ 0.4, 0.55, 0.85, 1.0 }, aspect_ratio);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 const loaded = s.model_meshes.get(entry.graph_index) orelse continue;
                 drawn += 1;
                 // Two views, not one: the blit needs the flat ortho
@@ -1169,6 +1211,9 @@ pub fn destroySession(session: *Session) void {
     session.model_world_anchors.deinit(session.engine.gpa);
     if (session.physics_world) |world| world.destroy();
     session.physics_bodies.deinit(session.engine.gpa);
+    session.cloth_bodies.deinit(session.engine.gpa);
+    session.cloth_meshes.deinit(session.engine.gpa);
+    session.cloth_cols.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -2493,6 +2538,14 @@ fn destroyBlendState(session: *Session) void {
 fn destroyMeshFaceState(session: *Session) void {
     session.model_face_anchors.clearRetainingCapacity();
     session.model_world_anchors.clearRetainingCapacity();
+    if (session.engine.renderer) |*r| {
+        _ = r;
+        var cm_it = session.cloth_meshes.valueIterator();
+        while (cm_it.next()) |mesh| render.Renderer.destroyClothMesh(mesh.*);
+    }
+    session.cloth_meshes.clearRetainingCapacity();
+    session.cloth_bodies.clearRetainingCapacity();
+    session.cloth_cols.clearRetainingCapacity();
     if (session.physics_world) |world| world.destroy();
     session.physics_world = null;
     session.physics_bodies.clearRetainingCapacity();
@@ -2745,6 +2798,28 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.world_anchor) {
             session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
+        if (model.cloth) |cloth| {
+            if (physics.supported) {
+                if (session.physics_world == null) {
+                    session.physics_world = physics.World.create(-9.81) catch null;
+                    session.physics_last_us = 0;
+                }
+                if (session.physics_world) |world| {
+                    const body = world.addCloth(cloth.cols, cloth.rows, cloth.width, cloth.height, .{ 0, 0.4, 0 }) catch physics.invalid_body;
+                    if (body != physics.invalid_body) {
+                        if (session.engine.renderer) |*r| {
+                            if (r.createClothMesh(cloth.cols, cloth.rows)) |mesh| {
+                                session.cloth_bodies.put(gpa, model.graph_index, body) catch {};
+                                session.cloth_meshes.put(gpa, model.graph_index, mesh) catch {};
+                                session.cloth_cols.put(gpa, model.graph_index, cloth.cols * cloth.rows) catch {};
+                            } else |_| {}
+                        }
+                    }
+                }
+            }
+            // Cloth generates its own mesh; no glb load.
+            continue;
         }
         if (model.physics) |body| {
             if (physics.supported) {

@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.cloth-flag",
+  "version": "1.0.0",
+  "display_name": "Cloth Flag",
+  "engine_compat": ">=0.16",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "flag", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "cloth": {"cols": 12, "rows": 8, "width": 1.2, "height": 0.9}}
+  ],
+  "triggers": []
+}
