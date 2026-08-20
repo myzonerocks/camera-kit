@@ -1177,6 +1177,21 @@ fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8) vo
     module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "lib", "aarch64-linux-android", "29" }) });
 }
 
+/// Gives a module that compiles vendored C its target's sysroot include
+/// paths - android's NDK, ios's Apple SDK, or emscripten's vendored sysroot -
+/// so quickjs and miniaudio build on device and web like the render adapter's
+/// own C already does. A no-op on host, which finds libc via the toolchain.
+fn addCTargetSysroot(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
+    if (target.result.abi.isAndroid()) {
+        module.pic = true;
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
+    } else if (target.result.os.tag == .ios) {
+        addAppleSdkPaths(b, module);
+    } else if (target.result.os.tag == .emscripten) {
+        module.addSystemIncludePath(b.path(".vendor/emscripten/emscripten/cache/sysroot/include"));
+    }
+}
+
 fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
     const android_step = b.step("android", "Build libgosslens.so for android arm64-v8a");
     const shaderc_tool = shaderc_exe orelse {
@@ -1240,8 +1255,8 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("physics", physicsModule(b, android_target, optimize, false));
-    abi_android.addImport("script", scriptModule(b, android_target, optimize, false));
-    abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, false));
+    abi_android.addImport("script", scriptModule(b, android_target, optimize, true));
+    abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, true));
     abi_android.addImport("particles", particlesModule(b, android_target, optimize));
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
@@ -1470,11 +1485,7 @@ fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libc = true;
     module.addIncludePath(b.path(root));
-    if (target.result.abi.isAndroid()) {
-        module.pic = true;
-        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
-    }
-    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    addCTargetSysroot(b, module, target);
     // _GNU_SOURCE exposes clock_gettime, readlink, and pthread_condattr_setclock
     // on glibc; without it quickjs fails to compile on Linux (macOS declares
     // them unconditionally, so the gap only shows up on the CI runners).
@@ -1495,6 +1506,7 @@ fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     if (real) {
         module.link_libc = true;
         module.addIncludePath(b.path(".vendor/quickjs-ng"));
+        addCTargetSysroot(b, module, target);
         module.addCSourceFile(.{
             .file = b.path("adapters/script/qjs_shim.c"),
             .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
@@ -1517,6 +1529,7 @@ fn audioPlaybackModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
     if (real) {
         module.link_libc = true;
         module.addIncludePath(b.path(".vendor/miniaudio"));
+        addCTargetSysroot(b, module, target);
         module.addCSourceFile(.{
             .file = b.path("adapters/audio/ma_shim.c"),
             .flags = &.{ "-std=c11", "-fno-sanitize=undefined", "-w", "-DMA_NO_DEVICE_IO", "-D_GNU_SOURCE" },
@@ -3132,8 +3145,8 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, false));
-    abi_ios.addImport("script", scriptModule(b, ios_target, optimize, false));
-    abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, false));
+    abi_ios.addImport("script", scriptModule(b, ios_target, optimize, true));
+    abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, true));
     abi_ios.addImport("particles", particlesModule(b, ios_target, optimize));
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
@@ -3664,8 +3677,8 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, false));
-    abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, false));
-    abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, false));
+    abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
+    abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("particles", particlesModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));

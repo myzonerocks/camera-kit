@@ -840,7 +840,7 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
         const blit_view = next_view_id.*;
         next_view_id.* += 1;
         render.Renderer.setViewTarget(blit_view, s.web_beauty_makeup_targets[0].?, width, height);
-        r.submitShaderPass(blit_view, r.passthroughProgram(), current);
+        r.submitShaderPass(blit_view, r.passthroughProgram(), current, r.default_mask_texture);
         var slot: usize = 0;
 
         if (lipstick_ready) {
