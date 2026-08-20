@@ -613,6 +613,81 @@ fn provePhysicsDrop(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves high-resolution capture: a still captured at a resolution
+/// larger than the 400x300 preview swap chain comes back at that
+/// resolution, not clamped to preview, and decodes; a still at the
+/// submitted frame's own resolution comes back at the frame size.
+fn proveHighResCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL still capture lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // An explicit capture resolution well past the 400x300 preview.
+    const cases = [_]struct { config: abi.CaptureConfig, want_w: u32, want_h: u32 }{
+        .{ .config = .{ .width = 1200, .height = 900, .supersample = 0, .format = 0, .quality = 0 }, .want_w = 1200, .want_h = 900 },
+        // Zero width and height captures at the submitted frame's size.
+        .{ .config = .{ .width = 0, .height = 0, .supersample = 0, .format = 0, .quality = 0 }, .want_w = planes.width, .want_h = planes.height },
+    };
+    for (cases) |case| {
+        var needed: usize = 0;
+        var still_w: u32 = 0;
+        var still_h: u32 = 0;
+        var probe_byte: [1]u8 = undefined;
+        if (abi.goss_engine_capture_still(engine, session, &case.config, &probe_byte, 0, &needed, &still_w, &still_h) != .invalid_argument or needed == 0) {
+            std.debug.print("conformance: FAIL still size probe ({d}x{d})\n", .{ case.want_w, case.want_h });
+            return false;
+        }
+        if (still_w != case.want_w or still_h != case.want_h) {
+            std.debug.print("conformance: FAIL still captured at {d}x{d}, wanted {d}x{d} (preview is 400x300)\n", .{ still_w, still_h, case.want_w, case.want_h });
+            return false;
+        }
+        const encoded = try gpa.alloc(u8, needed);
+        defer gpa.free(encoded);
+        var encoded_len: usize = 0;
+        if (abi.goss_engine_capture_still(engine, session, &case.config, encoded.ptr, encoded.len, &encoded_len, &still_w, &still_h) != .ok) {
+            std.debug.print("conformance: FAIL still capture ({d}x{d})\n", .{ case.want_w, case.want_h });
+            return false;
+        }
+        const decoded = image_adapter.decode(gpa, encoded[0..encoded_len]) catch {
+            std.debug.print("conformance: FAIL still does not decode\n", .{});
+            return false;
+        };
+        defer gpa.free(decoded.rgba);
+        if (decoded.width != case.want_w or decoded.height != case.want_h) {
+            std.debug.print("conformance: FAIL still decoded at {d}x{d}\n", .{ decoded.width, decoded.height });
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF stills capture at their own resolution ({d}x{d} source and 1200x900 explicit), decoupled from the 400x300 preview\n", .{ planes.width, planes.height });
+    return true;
+}
+
 /// Proves the zero-mask degradation: hair-recolor against a model with
 /// no hair class renders exactly the frame it renders with no
 /// segmentation at all, and both differ from the real multiclass
@@ -926,5 +1001,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try provePlatformPhotos(gpa, engine)) return 1;
     if (!try proveWorldAnchor(gpa, engine)) return 1;
     if (!try provePhysicsDrop(gpa, engine)) return 1;
+    if (!try proveHighResCapture(gpa, engine)) return 1;
     return 0;
 }

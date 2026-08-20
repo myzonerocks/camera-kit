@@ -55,6 +55,48 @@ extension Engine {
         case heic = 2
     }
 
+    /// A high-resolution still capture: the composited frame at its own
+    /// resolution or a requested one, independent of the preview size.
+    public struct StillConfig {
+        public enum Format: UInt32 { case png = 0, jpeg = 1, heic = 2 }
+        /// Zero captures at the submitted frame's own resolution.
+        public var width: UInt32
+        public var height: UInt32
+        public var supersample: UInt32
+        public var format: Format
+        public var quality: UInt32
+        public init(width: UInt32 = 0, height: UInt32 = 0, supersample: UInt32 = 0, format: Format = .png, quality: UInt32 = 0) {
+            self.width = width
+            self.height = height
+            self.supersample = supersample
+            self.format = format
+            self.quality = quality
+        }
+    }
+
+    /// Captures a still at the configured resolution - the submitted
+    /// frame's own size by default - decoupled from the preview swap
+    /// chain, so a full-sensor still is not clamped to preview size.
+    public func captureStill(session: Session?, config: StillConfig = StillConfig()) throws -> (data: [UInt8], width: UInt32, height: UInt32) {
+        var raw = goss_capture_config(width: config.width, height: config.height, supersample: config.supersample, format: config.format.rawValue, quality: config.quality)
+        var needed = 0
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        var probe: UInt8 = 0
+        let status = goss_engine_capture_still(handle, session?.handle, &raw, &probe, 0, &needed, &outWidth, &outHeight)
+        if status == GOSS_OK && needed == 0 { return ([], outWidth, outHeight) }
+        guard status == GOSS_ERROR_INVALID_ARGUMENT, needed > 0 else {
+            try checked(status)
+            return ([], outWidth, outHeight)
+        }
+        var data = [UInt8](repeating: 0, count: needed)
+        var encoded = 0
+        try data.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_engine_capture_still(handle, session?.handle, &raw, buffer.baseAddress, buffer.count, &encoded, &outWidth, &outHeight))
+        }
+        return (Array(data[0..<encoded]), outWidth, outHeight)
+    }
+
     /// Captures the composited frame in a platform photo format. The
     /// PNG capturePhoto stays the deterministic surface.
     public func capturePhoto(session: Session?, as format: PhotoFormat, quality: UInt32 = 0) throws -> (data: [UInt8], width: UInt32, height: UInt32) {

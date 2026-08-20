@@ -65,7 +65,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 16;
+pub const abi_minor: u16 = 17;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -282,6 +282,11 @@ pub const Session = struct {
     /// chain directly, with an extra blit afterward so the swap chain
     /// still gets the same frame a normal render would have produced.
     capture_requested: bool = false,
+    /// Nonzero only during a still capture: the resolution the capture
+    /// target and final composite rect use instead of the preview swap
+    /// chain, so a still is not clamped to preview size.
+    capture_res_width: u16 = 0,
+    capture_res_height: u16 = 0,
     face_tracking: ?*tracking.Tracking = null,
     hand_tracking: ?*tracking.hand_worker.HandTracking = null,
     pose_tracking: ?*tracking.pose_worker.PoseTracking = null,
@@ -843,7 +848,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         if (ready) ready_count += 1;
     }
     const beauty_active = anyBeautyActive(s);
-    if (s.capture_requested) try ensureCaptureTarget(e, @intCast(r.width), @intCast(r.height));
+    const capture_out_width: u16 = if (s.capture_requested and s.capture_res_width != 0) s.capture_res_width else @intCast(r.width);
+    const capture_out_height: u16 = if (s.capture_requested and s.capture_res_height != 0) s.capture_res_height else @intCast(r.height);
+    if (s.capture_requested) try ensureCaptureTarget(e, capture_out_width, capture_out_height);
     if (ready_count == 0 and !beauty_active) {
         // view 0 may still be bound to an offscreen chain/beauty target
         // from an earlier frame that took the other branch below -
@@ -854,7 +861,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         // backbuffer, and the visible canvas simply stops updating -
         // found via a real toggle-on-then-off repro (whiten set to 1
         // then back to 0), not a static read.
-        render.Renderer.setViewTarget(0, finalTarget(e, s), @intCast(r.width), @intCast(r.height));
+        const preview_rect_w: u16 = if (s.capture_requested) capture_out_width else @intCast(r.width);
+        const preview_rect_h: u16 = if (s.capture_requested) capture_out_height else @intCast(r.height);
+        render.Renderer.setViewTarget(0, finalTarget(e, s), preview_rect_w, preview_rect_h);
         r.submitPreview(0, current.preview, rotation * 90, mirror);
         if (s.capture_requested) blitCaptureToSwapChain(e, r, 1);
         blitRecordingToSwapChain(e, r, 1);
@@ -876,8 +885,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     // - found via a real corpus frame (2400x3000) rendered into a
     // 400x300 swap chain, the mesh landing entirely outside the
     // visible viewport.
-    const output_width: u16 = @intCast(r.width);
-    const output_height: u16 = @intCast(r.height);
+    const output_width: u16 = if (s.capture_requested) capture_out_width else @intCast(r.width);
+    const output_height: u16 = if (s.capture_requested) capture_out_height else @intCast(r.height);
     try ensureChainTargets(e, width, height);
     const targets = [2]render.Renderer.OffscreenTarget{ e.chain_targets[0].?, e.chain_targets[1].? };
 
@@ -1782,6 +1791,74 @@ pub export fn goss_session_submit_audio(session: ?*Session, samples: ?[*]const f
             };
         }
     }
+    return .ok;
+}
+
+pub const CaptureConfig = extern struct {
+    /// Zero captures at the submitted frame's own resolution, so the
+    /// still is not clamped to the preview swap chain.
+    width: u32,
+    height: u32,
+    /// Reserved for the supersample factor; 0 or 1 means 1:1 today.
+    supersample: u32,
+    /// 0 = PNG, 1 = JPEG, 2 = HEIC (the photo format enum).
+    format: u32,
+    /// 1..100 for the lossy formats; 0 = the backend default.
+    quality: u32,
+};
+
+/// Composites the still at the configured resolution (the submitted
+/// frame's own size when width and height are zero), independent of
+/// the preview swap chain, and encodes it. PNG has no size ceiling;
+/// JPEG and HEIC need the platform photo backend.
+pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, config: ?*const CaptureConfig, out_data: ?[*]u8, out_capacity: usize, out_len: ?*usize, out_width: ?*u32, out_height: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const s = session orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    const data = out_data orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const w = out_width orelse return .invalid_argument;
+    const h = out_height orelse return .invalid_argument;
+    const cfg: CaptureConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .supersample = 0, .format = 0, .quality = 0 };
+    len_out.* = 0;
+    if (cfg.format > 2) return .invalid_argument;
+    if (cfg.format != 0 and !photo.supported) return .unsupported;
+
+    const current = s.current orelse return .again;
+    const still_w: u16 = if (cfg.width != 0) @intCast(@min(cfg.width, 65535)) else @intCast(current.desc.width);
+    const still_h: u16 = if (cfg.height != 0) @intCast(@min(cfg.height, 65535)) else @intCast(current.desc.height);
+    if (still_w == 0 or still_h == 0) return .invalid_argument;
+
+    s.capture_res_width = still_w;
+    s.capture_res_height = still_h;
+    defer {
+        s.capture_res_width = 0;
+        s.capture_res_height = 0;
+    }
+    const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
+    w.* = e.capture_width;
+    h.* = e.capture_height;
+    const full_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
+    if (full_size == 0) return .ok;
+
+    const gpa = e.gpa;
+    const pixels = gpa.alloc(u8, full_size) catch return .out_of_memory;
+    defer gpa.free(pixels);
+    const staging = e.capture_staging orelse return .renderer_unavailable;
+    render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+    const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
+    while (r.frame() < ready_frame) {}
+
+    if (cfg.format == 0) {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(gpa);
+        png.encodeRgba(gpa, &encoded, pixels, e.capture_width, e.capture_height) catch return .out_of_memory;
+        len_out.* = encoded.items.len;
+        if (out_capacity < encoded.items.len) return .invalid_argument;
+        @memcpy(data[0..encoded.items.len], encoded.items);
+        return .ok;
+    }
+    photo.encode(pixels, e.capture_width, e.capture_height, @enumFromInt(cfg.format), cfg.quality, data[0..out_capacity], len_out) catch return .invalid_argument;
     return .ok;
 }
 
