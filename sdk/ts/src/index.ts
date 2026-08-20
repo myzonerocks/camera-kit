@@ -77,6 +77,17 @@ export interface SessionConfig {
   frameBudgetUs?: number;
 }
 
+/// A high-resolution still capture, decoupled from the preview size. width
+/// and height 0 capture at the submitted frame's own resolution; format is
+/// PNG (0), JPEG (1) or HEIC (2); quality is 1..100 for the lossy formats.
+export interface StillConfig {
+  width?: number;
+  height?: number;
+  supersample?: number;
+  format?: number;
+  quality?: number;
+}
+
 const FRAME_FLAG_MIRROR = 0x1;
 const FRAME_ROTATION_SHIFT = 8;
 const LENS_SIGNALS_BYTES = 232;
@@ -95,6 +106,7 @@ export interface SessionEvents {
 /// the source of truth for what's actually present at runtime.
 interface EngineModule {
   HEAPU8: Uint8Array;
+  HEAP16: Int16Array;
   HEAPF32: Float32Array;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[], opts: { async: true }): Promise<number>;
@@ -390,6 +402,58 @@ export class Engine {
     }
     ctx.putImageData(imageData, 0, 0);
     return out.toDataURL("image/png");
+  }
+
+  /// A high-resolution still of the composited frame at its own resolution
+  /// (width and height 0) or a requested one, decoupled from the preview
+  /// size, returned as the encoded image bytes. Wasm core only: the pure
+  /// WebGL path renders in JS and has no core encoder to reach.
+  async captureStill(session: Session | null, config: StillConfig = {}): Promise<Uint8Array> {
+    if (this.gl) throw new Error("captureStill needs the wasm renderer");
+    const cfgPtr = this.mod.ccall("goss_alloc", "number", ["number"], [20]);
+    this.mod.setValue(cfgPtr, config.width ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 4, config.height ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 8, config.supersample ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 12, config.format ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 16, config.quality ?? 0, "i32");
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const widthPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const heightPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    let dataPtr = 0;
+    let capacity = 0;
+    this.captureInFlight = true;
+    try {
+      // Probe for the encoded size, then capture into a buffer of that size.
+      const probeArgs = ["number", "number", "number", "number", "number", "number", "number", "number"];
+      const probeStatus = await this.mod.ccall(
+        "goss_engine_capture_still",
+        "number",
+        probeArgs,
+        [this.handle, session?.handle ?? 0, cfgPtr, 0, 0, lenPtr, widthPtr, heightPtr],
+        { async: true },
+      );
+      capacity = this.mod.getValue(lenPtr, "i32");
+      if (probeStatus === GOSS_OK && capacity === 0) return new Uint8Array(0);
+      if (capacity <= 0) throw new Error(`goss_engine_capture_still probe failed: status ${probeStatus}`);
+      dataPtr = this.mod.ccall("goss_alloc", "number", ["number"], [capacity]);
+      const status = await this.mod.ccall(
+        "goss_engine_capture_still",
+        "number",
+        probeArgs,
+        [this.handle, session?.handle ?? 0, cfgPtr, dataPtr, capacity, lenPtr, widthPtr, heightPtr],
+        { async: true },
+      );
+      if (status !== GOSS_OK) throw new Error(`goss_engine_capture_still failed: status ${status}`);
+      const encoded = this.mod.getValue(lenPtr, "i32");
+      return this.mod.HEAPU8.slice(dataPtr, dataPtr + encoded);
+    } finally {
+      this.captureInFlight = false;
+      this.mod.ccall("goss_free", null, ["number", "number"], [cfgPtr, 20]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [widthPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [heightPtr, 4]);
+      if (dataPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [dataPtr, capacity]);
+    }
   }
 
   async readCenterPixel(session: Session | null): Promise<Uint8Array> {

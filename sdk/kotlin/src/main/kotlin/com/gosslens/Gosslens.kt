@@ -19,6 +19,7 @@ object Gosslens {
     internal external fun nativeResize(engine: Long, width: Int, height: Int)
     internal external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
     internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
+    internal external fun nativeCaptureStill(engine: Long, session: Long, width: Int, height: Int, supersample: Int, format: Int, quality: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
     internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
@@ -210,6 +211,24 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
         if (needed <= 0L) return null
         val data = ByteBuffer.allocateDirect(needed.toInt())
         if (Gosslens.nativeCapturePhoto(handle, session?.handle ?: 0L, data, needed, info) != 0) return null
+        val encoded = ByteArray(info.getLong(0).toInt())
+        data.get(encoded)
+        return encoded
+    }
+
+    /** A high-resolution still: the composited frame at its own resolution
+     * (width and height 0) or a requested one, decoupled from the preview
+     * swap chain, encoded as PNG (format 0), JPEG (1) or HEIC (2). Sized by
+     * a probe call first. Null when the renderer or photo backend is away. */
+    fun captureStill(session: Session?, width: Int = 0, height: Int = 0, supersample: Int = 0, format: Int = 0, quality: Int = 0): ByteArray? {
+        val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        val probeStatus = Gosslens.nativeCaptureStill(handle, session?.handle ?: 0L, width, height, supersample, format, quality, probe, 0L, info)
+        val needed = info.getLong(0)
+        if (probeStatus == 0 && needed == 0L) return ByteArray(0)
+        if (needed <= 0L) return null
+        val data = ByteBuffer.allocateDirect(needed.toInt())
+        if (Gosslens.nativeCaptureStill(handle, session?.handle ?: 0L, width, height, supersample, format, quality, data, needed, info) != 0) return null
         val encoded = ByteArray(info.getLong(0).toInt())
         data.get(encoded)
         return encoded
