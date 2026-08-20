@@ -69,6 +69,8 @@ object Gosslens {
     internal external fun nativeActivateLens(session: Long, manifestBuffer: ByteBuffer, manifestLen: Int): Int
     internal external fun nativeDeactivateLens(session: Long)
     internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
+    internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -510,6 +512,21 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
      * chain, if one is enabled. False with no active lens. */
     fun tickLens(dtUs: Int, signals: LensSignals): Boolean =
         Gosslens.nativeTickLens(handle, dtUs, signals.buffer) == 0
+
+    /** Reads a live parameter of the active lens by name, including whatever
+     * a script node last wrote. Null with no active lens or no such name. */
+    fun parameterValue(name: String): Float? {
+        val nameBytes = name.toByteArray(Charsets.UTF_8)
+        val nameBuf = ByteBuffer.allocateDirect(nameBytes.size).apply { put(nameBytes); rewind() }
+        val outBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        return if (Gosslens.nativeParameterValue(handle, nameBuf, nameBytes.size, outBuf) == 0) outBuf.getFloat(0) else null
+    }
+
+    /** Pulls the next block of mixed lens audio into a direct [out] buffer
+     * (frames interleaved s16) that play_sound triggers produced, for the app
+     * to route to platform audio out. */
+    fun pullAudio(out: ByteBuffer, frames: Int): Boolean =
+        Gosslens.nativePullAudio(handle, out, frames) == 0
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,

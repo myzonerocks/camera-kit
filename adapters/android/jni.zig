@@ -402,6 +402,21 @@ export fn Java_com_gosslens_Gosslens_nativeTickLens(env: *JniEnv, cls: jobject, 
     return @intFromEnum(abi.goss_session_tick_lens(sessionFromHandle(session), @intCast(dt_us), signals));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeParameterValue(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, out_buffer: jobject) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: *f32 = @ptrCast(@alignCast(out_bytes));
+    return @intFromEnum(abi.goss_session_parameter_value(sessionFromHandle(session), name, @intCast(name_len), out));
+}
+
+export fn Java_com_gosslens_Gosslens_nativePullAudio(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, frames: i32) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: [*]i16 = @ptrCast(@alignCast(out_bytes));
+    return @intFromEnum(abi.goss_session_pull_audio(sessionFromHandle(session), out, @intCast(frames)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;

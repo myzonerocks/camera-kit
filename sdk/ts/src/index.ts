@@ -537,6 +537,31 @@ export class Session {
     this.mod.ccall("goss_session_tick_lens", "number", ["number", "number", "number"], [this.handle, dtUs, ptr]);
   }
 
+  /// Reads a live parameter of the active lens by name, including whatever a
+  /// script node last wrote. Null with no active lens or no such parameter.
+  parameterValue(name: string): number | null {
+    const bytes = new TextEncoder().encode(name);
+    const namePtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]);
+    this.mod.HEAPU8.set(bytes, namePtr);
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const status = this.mod.ccall("goss_session_parameter_value", "number", ["number", "number", "number", "number"], [this.handle, namePtr, bytes.length, outPtr]);
+    const value = status === 0 ? this.mod.getValue(outPtr, "float") : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [namePtr, bytes.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 4]);
+    return value;
+  }
+
+  /// Pulls the next block of mixed lens audio (frames interleaved s16) that
+  /// play_sound triggers produced, for the page to feed into WebAudio.
+  pullAudio(frames: number): Int16Array {
+    const byteLen = frames * 2;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLen]);
+    this.mod.ccall("goss_session_pull_audio", "number", ["number", "number", "number"], [this.handle, ptr, frames]);
+    const out = new Int16Array(this.mod.HEAP16.buffer, ptr, frames).slice();
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, byteLen]);
+    return out;
+  }
+
   setVideoFlip(enabled: boolean): void {
     this.videoFlipped = enabled;
   }

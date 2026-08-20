@@ -74,4 +74,23 @@ extension Session {
             try checked(goss_session_tick_lens(handle, dtUs, &raw))
         }
     }
+
+    /// Reads a live parameter of the active lens by name, including whatever
+    /// a script node last wrote. Throws .again with no active lens.
+    public func parameterValue(_ name: String) throws -> Float {
+        var value: Float = 0
+        let bytes = Array(name.utf8)
+        try bytes.withUnsafeBufferPointer { buffer in
+            try checked(goss_session_parameter_value(handle, buffer.baseAddress, buffer.count, &value))
+        }
+        return value
+    }
+
+    /// Pulls the next block of mixed lens audio (frames interleaved s16) that
+    /// play_sound triggers produced, for the app to route to platform audio.
+    public func pullAudio(into out: inout [Int16], frames: UInt32) throws {
+        try out.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_session_pull_audio(handle, buffer.baseAddress, frames))
+        }
+    }
 }
