@@ -1,6 +1,6 @@
 All rights reserved.
 
-Copyright (c) 2026 MyZoneRocks.
+Copyright (c) 2026 Webster Avosa, MyZoneRocks.
 
 No license, express or implied, is granted to any person to use, copy, modify,
 merge, publish, distribute, sublicense, or sell copies of this software or its
