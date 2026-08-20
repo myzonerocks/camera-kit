@@ -209,12 +209,20 @@ pub const Engine = struct {
     recording_last_timestamp: i64 = std.math.minInt(i64),
     recording_warmups: u32 = 0,
     recording_dropped: u32 = 0,
+    /// Window-binding backends only: the encoder surface the composite
+    /// re-presents into, separate from the sampleable frame target.
+    recording_window_target: ?render.Renderer.OffscreenTarget = null,
 };
 
 const RecordingSlot = struct {
     persistent: render.Renderer.PersistentTexture = .{},
     target: ?render.Renderer.OffscreenTarget = null,
 };
+
+/// Whether this target's recording backend vends sampleable textures
+/// (Apple) or a platform window the composite renders straight into
+/// (Android's encoder input surface).
+const recording_binds_window = media_recording.native_handle_kind == .window;
 
 const PendingRecordingFrame = struct {
     frame: media_recording.Frame,
@@ -1043,6 +1051,13 @@ fn blitRecordingToSwapChain(e: *Engine, r: *render.Renderer, view_id: u8) void {
     const target = e.recording_frame_target orelse return;
     render.Renderer.setViewTarget(view_id, null, @intCast(r.width), @intCast(r.height));
     r.submitShaderPass(view_id, r.passthroughProgram(), target.texture, r.default_mask_texture);
+    if (recording_binds_window) {
+        if (e.recording_window_target) |window| {
+            const rec = &(e.recording.?);
+            render.Renderer.setViewTarget(view_id + 1, window, @intCast(rec.config.width), @intCast(rec.config.height));
+            r.submitShaderPass(view_id + 1, r.passthroughProgram(), target.texture, r.default_mask_texture);
+        }
+    }
 }
 
 pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!*Session {
@@ -1263,6 +1278,31 @@ fn prepareRecordingFrame(e: *Engine, r: *render.Renderer) ?media_recording.Frame
     const width: u16 = @intCast(rec.config.width);
     const height: u16 = @intCast(rec.config.height);
     const key = @intFromPtr(frame.native_texture);
+    if (recording_binds_window) {
+        // The window is not sampleable, so the composite lands in the
+        // capture target (sampleable) and re-presents into both the
+        // swap chain and the encoder window each frame.
+        const slot = e.recording_slots.getOrPut(e.gpa, key) catch {
+            rec.abortFrame(frame);
+            return null;
+        };
+        if (!slot.found_existing) slot.value_ptr.* = .{};
+        if (slot.value_ptr.target == null) {
+            slot.value_ptr.target = render.Renderer.createWindowTarget(frame.native_texture, width, height) catch {
+                e.recording_warmups += 1;
+                rec.abortFrame(frame);
+                return null;
+            };
+        }
+        ensureCaptureTarget(e, @intCast(r.width), @intCast(r.height)) catch {
+            e.recording_warmups += 1;
+            rec.abortFrame(frame);
+            return null;
+        };
+        e.recording_window_target = slot.value_ptr.target;
+        e.recording_frame_target = e.capture_target;
+        return frame;
+    }
     const slot = e.recording_slots.getOrPut(e.gpa, key) catch {
         rec.abortFrame(frame);
         return null;
@@ -1334,6 +1374,7 @@ fn finishRecording(e: *Engine) bool {
     e.recording = null;
     e.recording_session = null;
     e.recording_frame_target = null;
+    e.recording_window_target = null;
     e.recording_pending = .{ null, null };
     e.recording_pending_at = 0;
     e.recording_last_timestamp = std.math.minInt(i64);
