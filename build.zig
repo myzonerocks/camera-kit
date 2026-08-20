@@ -1417,7 +1417,7 @@ fn physicsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         module.addIncludePath(b.path(".vendor/jolt"));
         module.addCSourceFile(.{
             .file = b.path("adapters/physics/jolt_shim.cpp"),
-            .flags = &.{ "-std=c++17", "-fno-sanitize=undefined" },
+            .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-DJPH_USE_CPU_COMPUTE" },
         });
         module.linkLibrary(buildJoltLib(b, target, optimize));
     }
@@ -2159,7 +2159,7 @@ fn buildJoltLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
             return std.mem.lessThan(u8, x, y);
         }
     }.lessThan);
-    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w" };
+    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" };
     for (sources.items) |file| {
         module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
     }
