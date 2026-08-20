@@ -269,6 +269,11 @@ pub const Session = struct {
     cloth_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     cloth_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ClothMesh) = .empty,
     cloth_cols: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    /// Hair nodes: the solver hair id and its strand render mesh, by
+    /// graph index. Hair is driven by the tracked head pose.
+    hair_ids: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    hair_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.HairMesh) = .empty,
+    hair_vcount: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     physics_last_us: i64 = 0,
 
     engine: *Engine,
@@ -848,7 +853,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // Like blend's mask: the face is a capability input whose
             // absence degrades (no draw), never blocks the chain.
             .mesh => s.mesh_face_textures.contains(entry.graph_index),
-            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index),
+            .model => s.model_meshes.contains(entry.graph_index) or s.cloth_meshes.contains(entry.graph_index) or s.hair_meshes.contains(entry.graph_index),
         };
         if (ready) ready_count += 1;
     }
@@ -986,6 +991,57 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 }
             },
             .model => {
+                if (s.hair_meshes.get(entry.graph_index)) |hair_mesh| {
+                    drawn += 1;
+                    const blit_view = next_view_id;
+                    next_view_id += 1;
+                    const mesh_view = next_view_id;
+                    next_view_id += 1;
+                    const is_final = drawn == ready_count;
+                    const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                    const rect_w = if (output != null and !is_final) width else output_width;
+                    const rect_h = if (output != null and !is_final) height else output_height;
+                    if (output) |target| {
+                        render.Renderer.setViewTarget(blit_view, target, rect_w, rect_h);
+                        render.Renderer.setViewTarget(mesh_view, target, rect_w, rect_h);
+                    } else {
+                        render.Renderer.setViewTarget(blit_view, null, output_width, output_height);
+                        render.Renderer.setViewTarget(mesh_view, null, output_width, output_height);
+                    }
+                    if (s.hair_ids.get(entry.graph_index)) |hid| {
+                        if (s.physics_world) |world| {
+                            // Drive the hair with the tracked head pose;
+                            // identity (hair just hangs) without a face.
+                            var head = math.Mat4.identity;
+                            if (s.face_tracking) |worker| {
+                                var tracked: face.Result = undefined;
+                                if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                                    if (face_geometry.estimateHeadPose(&tracked.landmarks)) |h| head = h;
+                                }
+                            }
+                            const dt = if (s.physics_last_us != 0 and s.current != null and s.current.?.desc.timestamp_us > s.physics_last_us)
+                                @min(@as(f32, @floatFromInt(s.current.?.desc.timestamp_us - s.physics_last_us)) / 1_000_000.0, 0.25)
+                            else
+                                1.0 / 60.0;
+                            world.hairUpdate(hid, @bitCast(head.cols), dt);
+                            const vcount = s.hair_vcount.get(entry.graph_index) orelse 0;
+                            if (vcount > 0) {
+                                if (s.engine.gpa.alloc(f32, vcount * 3)) |positions| {
+                                    defer s.engine.gpa.free(positions);
+                                    _ = world.hairRead(hid, positions);
+                                    r.updateHairMesh(hair_mesh, positions);
+                                } else |_| {}
+                            }
+                        }
+                    }
+                    const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
+                    r.submitHair(blit_view, mesh_view, input_texture, hair_mesh, .{ 0.15, 0.1, 0.08, 1.0 }, aspect_ratio);
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 if (s.cloth_meshes.get(entry.graph_index)) |cloth_mesh| {
                     drawn += 1;
                     const blit_view = next_view_id;
@@ -1214,6 +1270,9 @@ pub fn destroySession(session: *Session) void {
     session.cloth_bodies.deinit(session.engine.gpa);
     session.cloth_meshes.deinit(session.engine.gpa);
     session.cloth_cols.deinit(session.engine.gpa);
+    session.hair_ids.deinit(session.engine.gpa);
+    session.hair_meshes.deinit(session.engine.gpa);
+    session.hair_vcount.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -2543,6 +2602,14 @@ fn destroyMeshFaceState(session: *Session) void {
         var cm_it = session.cloth_meshes.valueIterator();
         while (cm_it.next()) |mesh| render.Renderer.destroyClothMesh(mesh.*);
     }
+    if (session.engine.renderer) |*r| {
+        _ = r;
+        var hm_it = session.hair_meshes.valueIterator();
+        while (hm_it.next()) |mesh| render.Renderer.destroyHairMesh(mesh.*);
+    }
+    session.hair_meshes.clearRetainingCapacity();
+    session.hair_ids.clearRetainingCapacity();
+    session.hair_vcount.clearRetainingCapacity();
     session.cloth_meshes.clearRetainingCapacity();
     session.cloth_bodies.clearRetainingCapacity();
     session.cloth_cols.clearRetainingCapacity();
@@ -2798,6 +2865,27 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.world_anchor) {
             session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
+        if (model.hair) |hair| {
+            if (physics.supported) {
+                if (session.physics_world == null) {
+                    session.physics_world = physics.World.create(-9.81) catch null;
+                    session.physics_last_us = 0;
+                }
+                if (session.physics_world) |world| {
+                    const hid = world.addHair(hair.strands, hair.verts, hair.length) catch physics.invalid_body;
+                    if (hid != physics.invalid_body) {
+                        if (session.engine.renderer) |*r| {
+                            if (r.createHairMesh(hair.strands, hair.verts)) |mesh| {
+                                session.hair_ids.put(gpa, model.graph_index, hid) catch {};
+                                session.hair_meshes.put(gpa, model.graph_index, mesh) catch {};
+                                session.hair_vcount.put(gpa, model.graph_index, hair.strands * hair.verts) catch {};
+                            } else |_| {}
+                        }
+                    }
+                }
+            }
+            continue;
         }
         if (model.cloth) |cloth| {
             if (physics.supported) {
