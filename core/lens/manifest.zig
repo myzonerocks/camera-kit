@@ -51,8 +51,8 @@ pub const NodeParam = struct { name: []const u8, binding: ParamBinding };
 
 /// The mask channels a shader.pass node may name: the subject-compat
 /// person mask, then the multiclass model's own label order. Frozen
-/// lens-format vocabulary; a running session without the class simply
-/// serves the default all-foreground mask.
+/// lens-format vocabulary; a running session without the class serves
+/// the zero mask, so the effect draws nothing rather than everywhere.
 pub const mask_channels = [_][]const u8{
     "person", "background", "hair", "body_skin", "face_skin", "clothes", "others",
 };
