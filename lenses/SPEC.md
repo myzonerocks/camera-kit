@@ -166,6 +166,15 @@ A model.gltf node may instead carry a `"cloth": {"cols", "rows",
 rather than a glb mesh, its deformed vertices drawn each frame. It
 needs no glb asset.
 
+A model.gltf node may instead carry a `"hair": {"strands", "verts",
+"length"}` field: the node becomes a set of simulated hair strands
+driven by the tracked head pose and drawn as lines rather than a glb
+mesh. `strands` (1 to 256) is how many strands, `verts` (2 to 64) is
+the vertices along each, and `length` is how far they hang in meters;
+all are optional with engine defaults. Like cloth it needs no glb
+asset, and without a tracked head the strands hang from their initial
+pose, the standard capability degradation.
+
 The set of known `type` values is closed and versioned with the *engine*, not
 the format — GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
