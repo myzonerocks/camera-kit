@@ -50,6 +50,22 @@ session.activateLens(manifestJson)
 `submitHardwareBuffer` is the zero-copy path for an `AHardwareBuffer`;
 any non-OK status falls back to `submitFrameCopy`.
 
+Photo capture, recording, and audio hang off the same engine and session:
+
+```kotlin
+val png: ByteArray? = engine.capturePhoto(session)
+
+engine.startRecording(session, outPath, hevc = true)
+engine.submitAudio(session, pcm, frameCount, sampleRate = 48000, channels = 1, timestampUs)
+engine.stopRecording()
+```
+
+World tracking feeds ARCore frames in through the demo's
+[`WorldFeeder`](demo/src/main/kotlin/com/gosslens/demo/WorldFeeder.kt).
+Full-resolution stills and platform photo formats are iOS-first for now;
+see [docs/PARITY.md](../../docs/PARITY.md). The full cross-platform
+capability tour is in the [root README](../../README.md#using-gosslens).
+
 ## Demo app
 
 [`demo/`](demo/), a real Android app — see [`demo/README.md`](demo/README.md).
