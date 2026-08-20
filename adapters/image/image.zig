@@ -8,8 +8,13 @@ const std = @import("std");
 
 const c = @cImport({
     @cInclude("lodepng.h");
-    @cInclude("libyuv.h");
 });
+
+// libyuv's own header drags in libc headers zig's C translator cannot
+// digest on every target sysroot; these two are plain C signatures,
+// declared directly against the linked library.
+extern fn ABGRToJ420(src_abgr: [*]const u8, src_stride_abgr: c_int, dst_y: [*]u8, dst_stride_y: c_int, dst_u: [*]u8, dst_stride_u: c_int, dst_v: [*]u8, dst_stride_v: c_int, width: c_int, height: c_int) c_int;
+extern fn I420ToNV12(src_y: [*]const u8, src_stride_y: c_int, src_u: [*]const u8, src_stride_u: c_int, src_v: [*]const u8, src_stride_v: c_int, dst_y: [*]u8, dst_stride_y: c_int, dst_uv: [*]u8, dst_stride_uv: c_int, width: c_int, height: c_int) c_int;
 
 pub const Image = struct {
     width: u32,
@@ -54,10 +59,10 @@ pub fn rgbaToNv12(gpa: std.mem.Allocator, rgba: []const u8, width: u32, height: 
     const v_plane = try gpa.alloc(u8, half_w * half_h);
     defer gpa.free(v_plane);
 
-    if (c.ABGRToJ420(rgba.ptr, @intCast(w * 4), y_out.ptr, @intCast(w), u_plane.ptr, @intCast(half_w), v_plane.ptr, @intCast(half_w), @intCast(width), @intCast(height)) != 0) {
+    if (ABGRToJ420(rgba.ptr, @intCast(w * 4), y_out.ptr, @intCast(w), u_plane.ptr, @intCast(half_w), v_plane.ptr, @intCast(half_w), @intCast(width), @intCast(height)) != 0) {
         return error.ConversionFailed;
     }
-    if (c.I420ToNV12(y_out.ptr, @intCast(w), u_plane.ptr, @intCast(half_w), v_plane.ptr, @intCast(half_w), y_out.ptr, @intCast(w), uv_out.ptr, @intCast(half_w * 2), @intCast(width), @intCast(height)) != 0) {
+    if (I420ToNV12(y_out.ptr, @intCast(w), u_plane.ptr, @intCast(half_w), v_plane.ptr, @intCast(half_w), y_out.ptr, @intCast(w), uv_out.ptr, @intCast(half_w * 2), @intCast(width), @intCast(height)) != 0) {
         return error.ConversionFailed;
     }
 }

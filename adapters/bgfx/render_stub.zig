@@ -319,6 +319,13 @@ pub const Renderer = struct {
         return 0;
     }
 
+    pub fn createWindowTarget(nwh: *anyopaque, width: u16, height: u16) !OffscreenTarget {
+        _ = nwh;
+        _ = width;
+        _ = height;
+        return error.FrameBufferCreate;
+    }
+
     pub fn createReadbackTexture(width: u16, height: u16) !TextureHandle {
         _ = width;
         _ = height;

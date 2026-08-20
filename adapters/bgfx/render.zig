@@ -602,6 +602,16 @@ pub const Renderer = struct {
         return pt.handle;
     }
 
+    /// Wraps a platform window (an encoder input surface on Android) as
+    /// a render target - the zero-copy recording path where the encoder
+    /// consumes the window's own buffers. The target has no sampleable
+    /// texture; nothing can composite FROM it.
+    pub fn createWindowTarget(nwh: *anyopaque, width: u16, height: u16) !OffscreenTarget {
+        const framebuffer = c.bgfx_create_frame_buffer_from_nwh(nwh, width, height, c.BGFX_TEXTURE_FORMAT_BGRA8, c.BGFX_TEXTURE_FORMAT_COUNT);
+        if (framebuffer.idx == invalid_handle) return error.FrameBufferCreate;
+        return .{ .framebuffer = framebuffer, .texture = .{ .idx = invalid_handle } };
+    }
+
     /// wrapExternalRenderTarget's Vulkan sibling: override is a no-op on
     /// that backend, so this creates the texture in one step via
     /// bgfx_create_texture_2d's own _external parameter instead. RGBA8,

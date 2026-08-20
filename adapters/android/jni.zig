@@ -308,6 +308,24 @@ export fn Java_com_gosslens_Gosslens_nativeCapturePhoto(env: *JniEnv, cls: jobje
     return @intFromEnum(status);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: jobject, engine: i64, session: i64, path_buffer: jobject, path_len: i32, width: i32, height: i32, bitrate: i32, codec: i32) i32 {
+    _ = cls;
+    const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const config: abi.RecordingConfig = .{
+        .width = @intCast(@max(width, 0)),
+        .height = @intCast(@max(height, 0)),
+        .bitrate_bps = @intCast(@max(bitrate, 0)),
+        .codec = @intCast(@max(codec, 0)),
+    };
+    return @intFromEnum(abi.goss_engine_recording_start(engineFromHandle(engine), sessionFromHandle(session), @ptrCast(path), @intCast(path_len), &config));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeRecordingStop(env: *JniEnv, cls: jobject, engine: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_engine_recording_stop(engineFromHandle(engine)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeEnableBeauty(env: *JniEnv, cls: jobject, session: i64, path_buffer: jobject, path_len: i32) i32 {
     _ = cls;
     _ = path_len;
