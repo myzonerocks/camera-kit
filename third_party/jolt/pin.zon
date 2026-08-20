@@ -1,0 +1,11 @@
+.{
+    .name = "jolt",
+    .repo = "https://github.com/jrouwe/JoltPhysics",
+    .version = "v5.6.0",
+    .commit = "e77f175595e64cb44218cc9d9d56fc365ad0e36a",
+    .archive_url = "https://codeload.github.com/jrouwe/JoltPhysics/tar.gz/e77f175595e64cb44218cc9d9d56fc365ad0e36a",
+    .archive_sha256 = "1f32328fb763135de10a244568d6ccb2ed9b1e6593fafe6dc6db5b2719d330bd",
+    .license = "MIT",
+    .license_file = "LICENSE",
+    .license_sha256 = "800abe35d64ad9defd636ff1ee8c961e06f0ebca3ef8d10083e8aa0e8ef86ac3",
+}
