@@ -64,6 +64,16 @@ pub fn maskChannelIndex(name: []const u8) ?u8 {
     return null;
 }
 
+/// A rigid body a model.gltf node rides: the body's pose drives the
+/// model matrix once simulation starts.
+pub const PhysicsBody = struct {
+    shape: enum { box, sphere },
+    /// Box half extents; a sphere reads its radius from [0].
+    size: [3]f32,
+    position: [3]f32,
+    dynamic: bool,
+};
+
 pub const Node = struct {
     id: []const u8,
     type: []const u8,
@@ -75,6 +85,8 @@ pub const Node = struct {
     face_anchor: bool = false,
     /// True when a model.gltf node anchors to the tracked world.
     world_anchor: bool = false,
+    /// Set when the manifest gives the node a rigid body.
+    physics: ?PhysicsBody = null,
 };
 
 pub const ActionKind = enum {
@@ -213,6 +225,18 @@ fn jsonDepth(value: std.json.Value) usize {
         },
         else => 0,
     };
+}
+
+fn readVec3(value: std.json.Value, out: *[3]f32) bool {
+    if (value != .array or value.array.items.len != 3) return false;
+    for (value.array.items, 0..) |item, i| {
+        out[i] = switch (item) {
+            .float => |f| @floatCast(f),
+            .integer => |n| @floatFromInt(n),
+            else => return false,
+        };
+    }
+    return true;
 }
 
 fn getField(object: std.json.ObjectMap, name: []const u8) ?std.json.Value {
@@ -602,6 +626,58 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
 
         var face_anchor = false;
         var world_anchor = false;
+        var physics_body: ?PhysicsBody = null;
+        if (getField(object, "physics")) |physics_value| {
+            const physics_mark = path.push("physics");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "physics is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (physics_value != .object) {
+                try diags.add(path.slice(), "physics must be an object", .{});
+            } else {
+                var body: PhysicsBody = .{ .shape = .box, .size = .{ 0.1, 0.1, 0.1 }, .position = .{ 0, 0, 0 }, .dynamic = true };
+                var shape_ok = false;
+                if (getField(physics_value.object, "body")) |body_value| {
+                    if (try expectString(diags, path, body_value)) |body_name| {
+                        if (std.mem.eql(u8, body_name, "box")) {
+                            body.shape = .box;
+                            shape_ok = true;
+                        } else if (std.mem.eql(u8, body_name, "sphere")) {
+                            body.shape = .sphere;
+                            shape_ok = true;
+                        } else {
+                            try diags.add(path.slice(), "unknown physics body '{s}'", .{body_name});
+                        }
+                    }
+                } else {
+                    try diags.add(path.slice(), "physics needs a body", .{});
+                }
+                if (getField(physics_value.object, "size")) |size_value| {
+                    if (!readVec3(size_value, &body.size)) {
+                        try diags.add(path.slice(), "physics size must be three numbers", .{});
+                        shape_ok = false;
+                    }
+                }
+                if (getField(physics_value.object, "position")) |position_value| {
+                    if (!readVec3(position_value, &body.position)) {
+                        try diags.add(path.slice(), "physics position must be three numbers", .{});
+                        shape_ok = false;
+                    }
+                }
+                if (getField(physics_value.object, "motion")) |motion_value| {
+                    if (try expectString(diags, path, motion_value)) |motion_name| {
+                        if (std.mem.eql(u8, motion_name, "static")) {
+                            body.dynamic = false;
+                        } else if (std.mem.eql(u8, motion_name, "dynamic")) {
+                            body.dynamic = true;
+                        } else {
+                            try diags.add(path.slice(), "unknown physics motion '{s}'", .{motion_name});
+                        }
+                    }
+                }
+                if (shape_ok) physics_body = body;
+            }
+            path.pop(physics_mark);
+        }
         if (getField(object, "anchor")) |anchor_value| {
             const anchor_mark = path.push("anchor");
             if (try expectString(diags, path, anchor_value)) |anchor_name| {
@@ -641,6 +717,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .mask_channel = mask_channel,
             .face_anchor = face_anchor,
             .world_anchor = world_anchor,
+            .physics = physics_body,
         });
     }
     return try out.toOwnedSlice(arena);
@@ -1033,6 +1110,39 @@ test "a node input naming an unknown node id fails cross reference" {
     var found = false;
     for (result.diags.items) |d| {
         if (std.mem.indexOf(u8, d.message, "unknown node id") != null) found = true;
+    }
+    try t.expect(found);
+}
+
+test "a physics body parses on a model node" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "m", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+        \\    "physics": {"body": "sphere", "size": [0.2, 0, 0], "position": [0, 1.5, 0], "motion": "dynamic"}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const body = manifest.nodes[0].physics.?;
+    try t.expect(body.shape == .sphere);
+    try t.expectEqual(@as(f32, 0.2), body.size[0]);
+    try t.expectEqual(@as(f32, 1.5), body.position[1]);
+    try t.expect(body.dynamic);
+}
+
+test "physics on a non-model node is rejected" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "a", "type": "shader.pass", "inputs": {"frame": "camera"}, "params": {}, "physics": {"body": "box"}}
+        \\ ], "triggers": []}
+    ;
+    var result = try parseFails(source);
+    defer result.deinit();
+    var found = false;
+    for (result.diags.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "physics is a model.gltf field") != null) found = true;
     }
     try t.expect(found);
 }
