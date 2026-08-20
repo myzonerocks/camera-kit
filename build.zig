@@ -208,6 +208,10 @@ pub fn build(b: *std.Build) void {
         b.build_root.handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
         break :blk true;
     };
+    const have_quickjs = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
+        break :blk true;
+    };
     abi_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
@@ -344,6 +348,10 @@ pub fn build(b: *std.Build) void {
     if (have_jolt) {
         const physics_tests = b.addTest(.{ .root_module = physicsModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(physics_tests).step);
+    }
+    if (have_quickjs) {
+        const script_tests = b.addTest(.{ .root_module = scriptModule(b, target, optimize, true) });
+        test_step.dependOn(&b.addRunArtifact(script_tests).step);
     }
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
@@ -1420,6 +1428,45 @@ fn physicsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
             .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-DJPH_USE_CPU_COMPUTE" },
         });
         module.linkLibrary(buildJoltLib(b, target, optimize));
+    }
+    return module;
+}
+
+// QuickJS-ng's four-file minimal embed as a static library. No I/O layer
+// (quickjs-libc.c) is compiled, so the interpreter has no way to touch the
+// filesystem or network - the sandbox is by construction.
+fn buildQuickjsLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const root = ".vendor/quickjs-ng";
+    const module = b.createModule(.{ .target = target, .optimize = optimize });
+    module.link_libc = true;
+    module.addIncludePath(b.path(root));
+    if (target.result.abi.isAndroid()) {
+        module.pic = true;
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
+    }
+    if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
+    const flags = [_][]const u8{ "-std=c11", "-fno-sanitize=undefined", "-w" };
+    const files = [_][]const u8{ "quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c" };
+    for (files) |file| {
+        module.addCSourceFile(.{ .file = b.path(b.fmt("{s}/{s}", .{ root, file })), .flags = &flags });
+    }
+    return b.addLibrary(.{ .name = "quickjs", .linkage = .static, .root_module = module });
+}
+
+fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, real: bool) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path(if (real) "adapters/script/script.zig" else "adapters/script/script_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (real) {
+        module.link_libc = true;
+        module.addIncludePath(b.path(".vendor/quickjs-ng"));
+        module.addCSourceFile(.{
+            .file = b.path("adapters/script/qjs_shim.c"),
+            .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+        });
+        module.linkLibrary(buildQuickjsLib(b, target, optimize));
     }
     return module;
 }

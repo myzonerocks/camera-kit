@@ -32,6 +32,7 @@ Third-party source currently present under `third_party/` includes:
 - ml_dtypes
 - neon2sse
 - pthreadpool
+- QuickJS-ng
 - ruy
 - TensorFlow
 - XNNPACK
