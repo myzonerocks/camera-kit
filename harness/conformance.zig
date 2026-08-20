@@ -1628,6 +1628,74 @@ fn proveStackedPostEffects(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the post-effect chain tiles correctly under HD capture: the
+/// studio-stack lens (blur, grade, bloom) captured tile-by-tile stitches
+/// byte-identical to the single-target render, so the tile-aware post-effect
+/// path - bloom's own scratch pair included - holds across grid sizes.
+fn proveTiledPostEffect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/studio-stack", ".lens-packages/studio-stack".len) != .ok) {
+        std.debug.print("conformance: FAIL tiled post-effect lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const cfg = abi.CaptureConfig{ .width = 400, .height = 300, .supersample = 0, .format = 0, .quality = 0 };
+    const buf_cap = 400 * 300 * 4 + 4096;
+    const whole = try gpa.alloc(u8, buf_cap);
+    defer gpa.free(whole);
+    var whole_len: usize = 0;
+    var ow: u32 = 0;
+    var oh: u32 = 0;
+    session.capture_tile_cap = 0;
+    if (abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh) != .ok or ow != 400 or oh != 300) {
+        std.debug.print("conformance: FAIL single-target capture for the post-effect tiling compare\n", .{});
+        return false;
+    }
+    const caps = [_]u32{ 200, 150 };
+    for (caps) |tcap| {
+        const tiled = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(tiled);
+        var tiled_len: usize = 0;
+        session.capture_tile_cap = tcap;
+        const status = abi.goss_engine_capture_still(engine, session, &cfg, tiled.ptr, tiled.len, &tiled_len, &ow, &oh);
+        session.capture_tile_cap = 0;
+        if (status != .ok or ow != 400 or oh != 300) {
+            std.debug.print("conformance: FAIL tiled post-effect capture at cap {d}\n", .{tcap});
+            return false;
+        }
+        if (!std.mem.eql(u8, whole[0..whole_len], tiled[0..tiled_len])) {
+            std.debug.print("conformance: FAIL tiled post-effect capture at cap {d} is not byte-identical to the single target\n", .{tcap});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF the blur/grade/bloom chain tiles byte-identical to a single-target render (2x2 and 3x2 grids)\n", .{});
+    return true;
+}
+
 /// Proves a script reads a facial blendshape: the script-expression lens maps
 /// lens.signals.jawOpen straight to a parameter, so a wide-open jaw drives it
 /// near 1 and a nearly-closed jaw near 0, deterministically - the expression
@@ -2125,6 +2193,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveEmber(gpa, engine)) return 1;
     if (!try proveJsonPostEffect(gpa, engine)) return 1;
     if (!try proveFullStack(gpa, engine)) return 1;
+    if (!try proveTiledPostEffect(gpa, engine)) return 1;
     if (!try proveNoLeaks(gpa)) return 1;
     return 0;
 }
