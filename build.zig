@@ -212,8 +212,13 @@ pub fn build(b: *std.Build) void {
         b.build_root.handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
         break :blk true;
     };
+    const have_miniaudio = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/miniaudio/miniaudio.h", .{}) catch break :blk false;
+        break :blk true;
+    };
     abi_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
     abi_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
+    abi_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
     abi_module.addImport("tracking", trackingStubModule(b, target, optimize, face_module, hand_core_module, pose_core_module, math_module));
     abi_module.addImport("segmentation", segmentationStubModule(b, target, optimize, math_module));
     abi_module.addImport("beauty", beautyStubModule(b, target, optimize, face_module));
@@ -353,6 +358,10 @@ pub fn build(b: *std.Build) void {
     if (have_quickjs) {
         const script_tests = b.addTest(.{ .root_module = scriptModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(script_tests).step);
+    }
+    if (have_miniaudio) {
+        const audio_playback_tests = b.addTest(.{ .root_module = audioPlaybackModule(b, target, optimize, true) });
+        test_step.dependOn(&b.addRunArtifact(audio_playback_tests).step);
     }
     test_step.dependOn(&b.addRunArtifact(graph_tests).step);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
@@ -637,6 +646,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_tracking_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_tracking_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
+        abi_tracking_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         if (target.result.os.tag == .macos) {
             abi_tracking_module.addImport("beauty", beauty_real_module);
         } else {
@@ -813,6 +823,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
+    abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
         abi_wasm.addImport("tracking", trackingStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face, tracking_cores_wasm.hand, tracking_cores_wasm.pose, math_wasm));
         abi_wasm.addImport("segmentation", segmentationStubModule(b, wasm_target, .ReleaseSmall, math_wasm));
         abi_wasm.addImport("beauty", beautyStubModule(b, wasm_target, .ReleaseSmall, tracking_cores_wasm.face));
@@ -979,6 +990,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_conformance_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_conformance_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
+        abi_conformance_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
         if (host_asset) |am| {
             abi_conformance_module.addImport("image", am.image);
             abi_conformance_module.addImport("asset", am.asset);
@@ -1218,6 +1230,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("physics", physicsModule(b, android_target, optimize, false));
     abi_android.addImport("script", scriptModule(b, android_target, optimize, false));
+    abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, false));
     const lens_manifest_android = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = android_target,
@@ -1475,6 +1488,27 @@ fn scriptModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
             .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
         });
         module.linkLibrary(buildQuickjsLib(b, target, optimize));
+    }
+    return module;
+}
+
+// Lens audio playback: miniaudio compiled with no device backends
+// (MA_NO_DEVICE_IO) so the engine only decodes and mixes, deterministic and
+// hardware-free; the SDK pulls the mixed PCM and routes it to the platform.
+// _GNU_SOURCE for the same glibc reason quickjs needs it.
+fn audioPlaybackModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, real: bool) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = b.path(if (real) "adapters/audio/audio_playback.zig" else "adapters/audio/audio_playback_stub.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    if (real) {
+        module.link_libc = true;
+        module.addIncludePath(b.path(".vendor/miniaudio"));
+        module.addCSourceFile(.{
+            .file = b.path("adapters/audio/ma_shim.c"),
+            .flags = &.{ "-std=c11", "-fno-sanitize=undefined", "-w", "-DMA_NO_DEVICE_IO", "-D_GNU_SOURCE" },
+        });
     }
     return module;
 }
@@ -3078,6 +3112,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, false));
     abi_ios.addImport("script", scriptModule(b, ios_target, optimize, false));
+    abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, false));
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
         .target = ios_target,
@@ -3608,6 +3643,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, false));
     abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, false));
+    abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, false));
     abi_em.addImport("tracking", trackingStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face, tracking_cores_em.hand, tracking_cores_em.pose, math_em));
     abi_em.addImport("segmentation", segmentationStubModule(b, em_target, .ReleaseSmall, math_em));
     abi_em.addImport("beauty", beautyStubModule(b, em_target, .ReleaseSmall, tracking_cores_em.face));

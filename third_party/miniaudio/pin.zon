@@ -1,0 +1,11 @@
+.{
+    .name = "miniaudio",
+    .repo = "https://github.com/mackron/miniaudio",
+    .version = "0.11.25",
+    .commit = "9634bedb5b5a2ca38c1ee7108a9358a4e233f14d",
+    .archive_url = "https://codeload.github.com/mackron/miniaudio/tar.gz/9634bedb5b5a2ca38c1ee7108a9358a4e233f14d",
+    .archive_sha256 = "1a3a79b80fc6f0b0cc155e28b954a598e0ddfa2db64e2afa8466be88c476fa55",
+    .license = "MIT-0",
+    .license_file = "LICENSE",
+    .license_sha256 = "457f1b500e0adf6bc059edddfa78a2f62012e7c3bb43476c20e0bd23b25ba0eb",
+}

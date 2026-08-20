@@ -126,6 +126,8 @@ pub const ActionKind = enum {
     play_animation,
     swap_subgraph,
     reset_timer,
+    /// Plays a sound: target is the bundle-relative sound path.
+    play_sound,
 };
 
 pub const Curve = enum { linear, spring };

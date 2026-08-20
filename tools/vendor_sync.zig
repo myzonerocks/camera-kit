@@ -63,6 +63,7 @@ const license_allowlist = [_][]const u8{ "MIT", "BSD-2-Clause", "BSD-3-Clause", 
 const license_exceptions = [_]struct { name: []const u8, license: []const u8 }{
     .{ .name = "eigen", .license = "MPL-2.0" },
     .{ .name = "fft2d", .license = "Ooura" },
+    .{ .name = "miniaudio", .license = "MIT-0" },
     .{ .name = "emscripten-python", .license = "PSF-2.0" },
 };
 

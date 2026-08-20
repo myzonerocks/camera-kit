@@ -23,6 +23,7 @@ const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const physics = @import("physics");
 const script = @import("script");
+const audio_playback = @import("audio_playback");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -66,7 +67,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 18;
+pub const abi_minor: u16 = 19;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -403,6 +404,11 @@ pub const Session = struct {
     /// at activation and torn down at deactivation, never per frame.
     script_engine: ?script.Script = null,
     script_param_names: []const [:0]const u8 = &.{},
+    /// The lens's sound mixer and the mixer id each play_sound path resolves
+    /// to, built from the bundle at activation. Playback is pulled out by the
+    /// SDK; the engine only decodes and mixes.
+    audio_mixer: ?audio_playback.Mixer = null,
+    sound_ids: std.StringHashMapUnmanaged(u32) = .{},
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -1277,6 +1283,7 @@ pub fn createSession(engine: *Engine, config: SessionConfig) error{OutOfMemory}!
 pub fn destroySession(session: *Session) void {
     if (session.engine.recording_session == session) _ = finishRecording(session.engine);
     teardownScript(session);
+    destroySounds(session);
     destroyShaderPrograms(session);
     session.shader_programs.deinit(session.engine.gpa);
     session.shader_masks.deinit(session.engine.gpa);
@@ -2757,6 +2764,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyModelState(session);
     destroyChainOrder(session);
     teardownScript(session);
+    destroySounds(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
     session.active_lens = new_lens;
     setupScript(session);
@@ -2825,6 +2833,68 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
     }
     engine.tick(&sig_names, &sig_values, name_ptrs[0..n], values[0..n]) catch return;
     for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(values[i]));
+}
+
+const audio_sample_rate: u32 = 48000;
+const audio_channels: u32 = 1;
+
+/// Frees the lens mixer and its decoded sounds. Safe with no audio active.
+fn destroySounds(s: *Session) void {
+    if (s.audio_mixer) |*m| m.destroy();
+    s.audio_mixer = null;
+    var it = s.sound_ids.keyIterator();
+    while (it.next()) |k| s.engine.gpa.free(k.*);
+    s.sound_ids.deinit(s.engine.gpa);
+    s.sound_ids = .{};
+}
+
+/// Builds the lens mixer and decodes every play_sound target from the bundle.
+/// Best-effort: a missing or unreadable sound is skipped, the defined
+/// degradation, rather than failing activation.
+fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) void {
+    const lens = if (s.active_lens) |*l| l else return;
+    var has_sound = false;
+    for (lens.manifest.triggers) |trig| {
+        if (trig.action.kind == .play_sound and trig.action.target.len > 0) {
+            has_sound = true;
+            break;
+        }
+    }
+    if (!has_sound) return;
+    var mixer = audio_playback.Mixer.create(audio_sample_rate, audio_channels) catch return;
+    for (lens.manifest.triggers) |trig| {
+        if (trig.action.kind != .play_sound) continue;
+        const rel = trig.action.target;
+        if (rel.len == 0 or s.sound_ids.contains(rel)) continue;
+        const full = std.fmt.allocPrint(gpa, "{s}/{s}", .{ bundle_path, rel }) catch continue;
+        defer gpa.free(full);
+        const id = mixer.load(full) catch continue;
+        const key = s.engine.gpa.dupe(u8, rel) catch continue;
+        s.sound_ids.put(s.engine.gpa, key, id) catch {
+            s.engine.gpa.free(key);
+            continue;
+        };
+    }
+    s.audio_mixer = mixer;
+}
+
+/// Starts a voice for every sound a play_sound trigger fired this tick.
+fn playFiredSounds(s: *Session) void {
+    const mixer = if (s.audio_mixer) |*m| m else return;
+    const lens = if (s.active_lens) |*l| l else return;
+    for (lens.firedSounds()) |path| {
+        if (s.sound_ids.get(path)) |id| mixer.play(id, false, 1.0);
+    }
+}
+
+/// Pulls the next block of mixed lens audio (frames * channels, s16) for the
+/// SDK to play. Silence when no lens sound is active.
+pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const data = out orelse return .invalid_argument;
+    const buf = data[0 .. frames * audio_channels];
+    if (s.audio_mixer) |*mixer| mixer.pull(buf, frames) else @memset(buf, 0);
+    return .ok;
 }
 
 pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]const u8, manifest_len: usize) Status {
@@ -3179,6 +3249,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createModelLoaders(session, gpa, bundle_path);
     try buildChainOrder(session, gpa);
+    createSounds(session, gpa, bundle_path);
 }
 
 pub export fn goss_session_activate_lens_from_directory(session: ?*Session, bundle_path: ?[*]const u8, bundle_path_len: usize) Status {
@@ -3202,6 +3273,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyModelState(s);
     destroyChainOrder(s);
     teardownScript(s);
+    destroySounds(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
     s.active_lens = null;
 }
@@ -3241,6 +3313,7 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     runScript(s, &live_signals);
     const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
     applyLensEffects(s, effects);
+    playFiredSounds(s);
     return .ok;
 }
 

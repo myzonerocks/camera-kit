@@ -29,6 +29,7 @@ mylens.glens/
   shaders/                *.glsl source, plus *.<profile>.bin next to each
                           one once packaged (section 7) - metal/spirv/essl
   assets/                 *.gltf, *.glb, *.png, LUTs, referenced by relative path
+  sounds/                 *.wav, *.mp3, *.flac, *.ogg, played by a play_sound trigger
 ```
 
 No other file types are permitted inside a bundle. No file may reference a
@@ -239,7 +240,9 @@ deeper fails validation closed.
 
 `param_ramp` (animate a parameter to a target over a duration, one of the
 curve primitives in 6.3), `param_set` (immediate), `play_animation` (a
-named glTF animation clip), `reset_timer` (name a timer signal back to
+named glTF animation clip), `play_sound` (start a voice for the sound at
+the bundle-relative path in `target`, decoded from `sounds/` and mixed into
+the audio the host pulls out), `reset_timer` (name a timer signal back to
 zero). Reserved, accepted by the validator but not yet executed by the
 runtime: `show` / `hide` (a node by id) and `swap_subgraph` (splice a
 different set of this lens's own nodes in place of a named group —

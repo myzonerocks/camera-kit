@@ -23,11 +23,13 @@ const build_options = @import("build_options");
 const max_bundle_bytes: u64 = 64 * 1024 * 1024;
 const max_shader_bytes: u64 = 256 * 1024;
 const max_asset_bytes: u64 = 32 * 1024 * 1024;
+const max_sound_bytes: u64 = 16 * 1024 * 1024;
 const max_manifest_bytes: u64 = manifest.max_manifest_bytes;
 
-const permitted_top_level = [_][]const u8{ "shaders", "assets" };
+const permitted_top_level = [_][]const u8{ "shaders", "assets", "sounds" };
 const shader_extensions = [_][]const u8{".glsl"};
 const asset_extensions = [_][]const u8{ ".gltf", ".glb", ".png" };
+const sound_extensions = [_][]const u8{ ".wav", ".mp3", ".flac", ".ogg" };
 
 fn hasAnyExtension(name: []const u8, extensions: []const []const u8) bool {
     for (extensions) |ext| {
@@ -103,12 +105,13 @@ fn validateBundle(io: std.Io, gpa: std.mem.Allocator, diags: *manifest.Diagnosti
         }
         if (!recognized or entry.kind != .directory) {
             const path = try std.fmt.allocPrint(diags.arena, "/{s}", .{entry.name});
-            try diags.add(path, "not a permitted bundle entry (only manifest.json, shaders/, assets/)", .{});
+            try diags.add(path, "not a permitted bundle entry (only manifest.json, shaders/, assets/, sounds/)", .{});
         }
     }
 
     try walkCategory(io, gpa, diags, bundle_dir, "shaders", max_shader_bytes, &shader_extensions, &total_bytes);
     try walkCategory(io, gpa, diags, bundle_dir, "assets", max_asset_bytes, &asset_extensions, &total_bytes);
+    try walkCategory(io, gpa, diags, bundle_dir, "sounds", max_sound_bytes, &sound_extensions, &total_bytes);
 
     if (total_bytes > max_bundle_bytes) {
         try diags.add("", "bundle totals {d} bytes, exceeds the {d} byte limit", .{ total_bytes, max_bundle_bytes });

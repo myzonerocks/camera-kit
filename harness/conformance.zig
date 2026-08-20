@@ -847,6 +847,54 @@ fn proveScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves lens audio: a play_sound trigger starts a voice that the mixer
+/// pulls out as PCM, silent before the trigger, non-silent after, and
+/// bit-identical across two runs of the same sequence.
+fn proveAudio(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const block: u32 = 512;
+
+    var captured: [2][block]i16 = undefined;
+    for (0..2) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/sound-beat", ".lens-packages/sound-beat".len) != .ok) {
+            std.debug.print("conformance: FAIL sound lens activation\n", .{});
+            return false;
+        }
+
+        // Before any trigger the mixer has no voice, so the pull is silent.
+        var pre: [block]i16 = undefined;
+        _ = abi.goss_session_pull_audio(session, &pre, block);
+        var pre_energy: u64 = 0;
+        for (pre) |s| pre_energy += @abs(@as(i32, s));
+        if (pre_energy != 0) {
+            std.debug.print("conformance: FAIL audio before the trigger is not silent\n", .{});
+            return false;
+        }
+
+        // Face present fires the play_sound trigger; the next pull carries it.
+        var present = std.mem.zeroes(abi.LensSignals);
+        present.has_face = true;
+        _ = abi.goss_session_tick_lens(session, 16000, &present);
+        _ = abi.goss_session_pull_audio(session, &captured[run], block);
+    }
+    _ = gpa;
+
+    var energy: u64 = 0;
+    for (captured[0]) |s| energy += @abs(@as(i32, s));
+    if (energy == 0) {
+        std.debug.print("conformance: FAIL the sound did not play after the trigger\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(i16, &captured[0], &captured[1])) {
+        std.debug.print("conformance: FAIL lens audio is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a play_sound trigger mixes a voice the SDK pulls, silent before and bit-stable after\n", .{});
+    return true;
+}
+
 /// Proves physics chains: a dynamic pendant chained to a static anchor
 /// swings out under gravity to hang at the chain length, the settled
 /// frame differs from the initial frame, and two runs are identical.
@@ -1398,5 +1446,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveHighResCapture(gpa, engine)) return 1;
     if (!try proveTiledCapture(gpa, engine)) return 1;
     if (!try proveScript(gpa, engine)) return 1;
+    if (!try proveAudio(gpa, engine)) return 1;
     return 0;
 }
