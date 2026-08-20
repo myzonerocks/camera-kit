@@ -850,6 +850,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "math", .module = math_module },
                 .{ .name = "makeup_mesh", .module = makeup_mesh_module },
+                .{ .name = "face_mesh_topology", .module = face_mesh_topology_module },
             },
         });
         render_module.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -1091,6 +1092,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     const math_android = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = android_target, .optimize = optimize });
     const graph_android = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = android_target, .optimize = optimize });
     const makeup_mesh_android = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = android_target, .optimize = optimize });
+    const face_mesh_topology_android = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = android_target, .optimize = optimize });
     const render_android = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = android_target,
@@ -1098,6 +1100,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .imports = &.{
             .{ .name = "math", .module = math_android },
             .{ .name = "makeup_mesh", .module = makeup_mesh_android },
+            .{ .name = "face_mesh_topology", .module = face_mesh_topology_android },
         },
     });
     render_android.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -2767,6 +2770,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .target = ios_target,
         .optimize = optimize,
     });
+    const face_mesh_topology_ios = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = ios_target, .optimize = optimize });
     const render_ios = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = ios_target,
@@ -2774,6 +2778,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .imports = &.{
             .{ .name = "math", .module = math_ios },
             .{ .name = "makeup_mesh", .module = makeup_mesh_ios },
+            .{ .name = "face_mesh_topology", .module = face_mesh_topology_ios },
         },
     });
     render_ios.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -3288,6 +3293,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     const graph_em = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const shader_blobs_em = addShaderBlobs(b, shaderc_exe.?, em_target, .ReleaseSmall);
     const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const render_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = em_target,
@@ -3296,6 +3302,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
             .{ .name = "math", .module = math_em },
             .{ .name = "shader_blobs", .module = shader_blobs_em },
             .{ .name = "makeup_mesh", .module = makeup_mesh_em },
+            .{ .name = "face_mesh_topology", .module = face_mesh_topology_em },
         },
     });
     render_em.addIncludePath(b.path(".vendor/bgfx/include"));
@@ -3514,6 +3521,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
     const math_em = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const shader_blobs_em = addShaderBlobs(b, shaderc_tool, em_target, .ReleaseSmall);
     const makeup_mesh_em = b.createModule(.{ .root_source_file = b.path("core/tracking/makeup_mesh.zig"), .target = em_target, .optimize = .ReleaseSmall });
+    const face_mesh_topology_em = b.createModule(.{ .root_source_file = b.path("core/tracking/face_mesh_topology.zig"), .target = em_target, .optimize = .ReleaseSmall });
     const render_em = b.createModule(.{
         .root_source_file = b.path("adapters/bgfx/render.zig"),
         .target = em_target,
@@ -3522,6 +3530,7 @@ fn addWasmEmscriptenCoreSmokeStep(b: *std.Build, step: *std.Build.Step, shaderc_
             .{ .name = "math", .module = math_em },
             .{ .name = "shader_blobs", .module = shader_blobs_em },
             .{ .name = "makeup_mesh", .module = makeup_mesh_em },
+            .{ .name = "face_mesh_topology", .module = face_mesh_topology_em },
         },
     });
     render_em.addIncludePath(b.path(".vendor/bgfx/include"));

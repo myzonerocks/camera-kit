@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "kit.reference.face-paint",
+  "version": "1.0.0",
+  "display_name": "Face Paint",
+  "engine_compat": ">=0.10",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "face_paint", "type": "mesh.face", "inputs": {"frame": "camera"}, "params": {}}
+  ],
+  "triggers": []
+}
