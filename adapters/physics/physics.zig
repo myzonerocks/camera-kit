@@ -28,6 +28,8 @@ extern fn goss_physics_step(handle: *anyopaque, dt_seconds: f32) void;
 extern fn goss_physics_body_pose(handle: *anyopaque, body: u32, out: *[16]f32) i32;
 extern fn goss_physics_constrain_distance(handle: *anyopaque, a: u32, b: u32, ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, min: f32, max: f32) i32;
 extern fn goss_physics_body_move(handle: *anyopaque, body: u32, px: f32, py: f32, pz: f32, dt: f32) void;
+extern fn goss_physics_add_cloth(handle: *anyopaque, cols: u32, rows: u32, width: f32, height: f32, px: f32, py: f32, pz: f32) u32;
+extern fn goss_physics_cloth_read(handle: *anyopaque, body: u32, out: [*]f32, max_vertices: u32) u32;
 
 pub const World = struct {
     handle: *anyopaque,
@@ -63,6 +65,19 @@ pub const World = struct {
     /// swing after it.
     pub fn moveBody(world: World, body: u32, position: [3]f32, dt_seconds: f32) void {
         goss_physics_body_move(world.handle, body, position[0], position[1], position[2], dt_seconds);
+    }
+
+    /// Adds a pinned-top cloth grid; its deformed vertices drive a mesh.
+    pub fn addCloth(world: World, cols: u32, rows: u32, width: f32, height: f32, position: [3]f32) !u32 {
+        const id = goss_physics_add_cloth(world.handle, cols, rows, width, height, position[0], position[1], position[2]);
+        if (id == invalid_body) return error.BodyAddFailed;
+        return id;
+    }
+
+    /// Reads the cloth's deformed world-space vertices (3 floats each)
+    /// into out; returns the vertex count.
+    pub fn clothRead(world: World, body: u32, out: []f32) u32 {
+        return goss_physics_cloth_read(world.handle, body, out.ptr, @intCast(out.len / 3));
     }
 
     /// The body's column-major world transform.
@@ -120,4 +135,19 @@ test "a chained pendant follows a moved kinematic anchor" {
     const dx = pendant_pose[12] - anchor_pose[12];
     const dy = pendant_pose[13] - anchor_pose[13];
     try t.expect(@sqrt(dx * dx + dy * dy) <= 0.16);
+}
+
+test "a pinned cloth grid drapes and reads back deformed vertices" {
+    const world = try World.create(-9.81);
+    defer world.destroy();
+    const cloth = try world.addCloth(6, 6, 1.0, 1.0, .{ 0, 0, 0 });
+    var i: usize = 0;
+    while (i < 180) : (i += 1) world.step(1.0 / 60.0);
+    var verts: [36 * 3]f32 = undefined;
+    const n = world.clothRead(cloth, &verts);
+    try t.expectEqual(@as(u32, 36), n);
+    // Top-row centre stays high, bottom-row centre has draped below.
+    const top_y = verts[(30 + 3) * 3 + 1];
+    const bottom_y = verts[(0 + 3) * 3 + 1];
+    try t.expect(top_y - bottom_y > 0.3);
 }

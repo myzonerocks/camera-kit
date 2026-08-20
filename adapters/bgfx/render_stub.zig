@@ -319,6 +319,40 @@ pub const Renderer = struct {
         return 0;
     }
 
+    pub const ClothMesh = struct {
+        position_buffer: TextureHandle = .{},
+        index_buffer: TextureHandle = .{},
+        vertex_count: u32 = 0,
+        index_count: u32 = 0,
+    };
+
+    pub fn createClothMesh(r: *Renderer, cols: u32, rows: u32) !ClothMesh {
+        _ = r;
+        _ = cols;
+        _ = rows;
+        return .{};
+    }
+
+    pub fn updateClothMesh(r: *Renderer, mesh: ClothMesh, positions: []const f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+    }
+
+    pub fn destroyClothMesh(mesh: ClothMesh) void {
+        _ = mesh;
+    }
+
+    pub fn submitCloth(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ClothMesh, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub fn submitModelWithCamera(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, model_matrix: math.Mat4, view: math.Mat4, projection: math.Mat4, base_color: [4]f32) void {
         _ = r;
         _ = blit_view;

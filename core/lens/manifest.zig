@@ -66,6 +66,14 @@ pub fn maskChannelIndex(name: []const u8) ?u8 {
 
 /// A rigid body a model.gltf node rides: the body's pose drives the
 /// model matrix once simulation starts.
+pub const ClothField = struct {
+    /// Grid resolution and world-space size of the cloth sheet.
+    cols: u32,
+    rows: u32,
+    width: f32,
+    height: f32,
+};
+
 pub const PhysicsBody = struct {
     shape: enum { box, sphere },
     /// Box half extents; a sphere reads its radius from [0].
@@ -94,6 +102,8 @@ pub const Node = struct {
     world_anchor: bool = false,
     /// Set when the manifest gives the node a rigid body.
     physics: ?PhysicsBody = null,
+    /// Set when the node is a simulated cloth sheet instead of a glb.
+    cloth: ?ClothField = null,
 };
 
 pub const ActionKind = enum {
@@ -634,6 +644,52 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
         var face_anchor = false;
         var world_anchor = false;
         var physics_body: ?PhysicsBody = null;
+        var cloth_field: ?ClothField = null;
+        if (getField(object, "cloth")) |cloth_value| {
+            const cloth_mark = path.push("cloth");
+            if (!std.mem.eql(u8, node_type, "model.gltf")) {
+                try diags.add(path.slice(), "cloth is a model.gltf field, found it on '{s}'", .{node_type});
+            } else if (cloth_value != .object) {
+                try diags.add(path.slice(), "cloth must be an object", .{});
+            } else {
+                var field: ClothField = .{ .cols = 8, .rows = 8, .width = 1.0, .height = 1.0 };
+                var ok = true;
+                if (getField(cloth_value.object, "cols")) |v| {
+                    if (v == .integer and v.integer >= 2 and v.integer <= 64) field.cols = @intCast(v.integer) else {
+                        try diags.add(path.slice(), "cloth cols must be an integer 2..64", .{});
+                        ok = false;
+                    }
+                }
+                if (getField(cloth_value.object, "rows")) |v| {
+                    if (v == .integer and v.integer >= 2 and v.integer <= 64) field.rows = @intCast(v.integer) else {
+                        try diags.add(path.slice(), "cloth rows must be an integer 2..64", .{});
+                        ok = false;
+                    }
+                }
+                if (getField(cloth_value.object, "width")) |v| {
+                    switch (v) {
+                        .float => |f| field.width = @floatCast(f),
+                        .integer => |n| field.width = @floatFromInt(n),
+                        else => {
+                            try diags.add(path.slice(), "cloth width must be a number", .{});
+                            ok = false;
+                        },
+                    }
+                }
+                if (getField(cloth_value.object, "height")) |v| {
+                    switch (v) {
+                        .float => |f| field.height = @floatCast(f),
+                        .integer => |n| field.height = @floatFromInt(n),
+                        else => {
+                            try diags.add(path.slice(), "cloth height must be a number", .{});
+                            ok = false;
+                        },
+                    }
+                }
+                if (ok) cloth_field = field;
+            }
+            path.pop(cloth_mark);
+        }
         if (getField(object, "physics")) |physics_value| {
             const physics_mark = path.push("physics");
             if (!std.mem.eql(u8, node_type, "model.gltf")) {
@@ -748,6 +804,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .face_anchor = face_anchor,
             .world_anchor = world_anchor,
             .physics = physics_body,
+            .cloth = cloth_field,
         });
     }
     return try out.toOwnedSlice(arena);
@@ -1142,6 +1199,22 @@ test "a node input naming an unknown node id fails cross reference" {
         if (std.mem.indexOf(u8, d.message, "unknown node id") != null) found = true;
     }
     try t.expect(found);
+}
+
+test "a cloth field parses on a model node" {
+    const source =
+        \\{"glf": "1.0", "id": "x", "version": "1.0.0", "display_name": "x", "engine_compat": ">=0.5",
+        \\ "capabilities": [], "parameters": [], "nodes": [
+        \\   {"id": "flag", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+        \\    "cloth": {"cols": 10, "rows": 6, "width": 1.5, "height": 1.0}}
+        \\ ], "triggers": []}
+    ;
+    var manifest = try parseOk(source);
+    defer manifest.deinit();
+    const cloth = manifest.nodes[0].cloth.?;
+    try t.expectEqual(@as(u32, 10), cloth.cols);
+    try t.expectEqual(@as(u32, 6), cloth.rows);
+    try t.expectEqual(@as(f32, 1.5), cloth.width);
 }
 
 test "a physics chain parses its target and length" {

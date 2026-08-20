@@ -13,6 +13,9 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Constraints/DistanceConstraint.h>
 #include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
+#include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
+#include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
@@ -176,4 +179,57 @@ extern "C" int32_t goss_physics_body_pose(void* handle, uint32_t body, float* ou
     out[column * 4 + 3] = v.GetW();
   }
   return 0;
+}
+
+// Adds a cols x rows cloth grid spanning width x height metres at
+// (px,py,pz), top row pinned. Returns the soft body id, or UINT32_MAX.
+// Vertices are row-major (cols*rows) so the reader returns mesh order.
+extern "C" uint32_t goss_physics_add_cloth(void* handle, uint32_t cols, uint32_t rows, float width, float height, float px, float py, float pz) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || cols < 2 || rows < 2) return UINT32_MAX;
+  JPH::Ref<JPH::SoftBodySharedSettings> shared = new JPH::SoftBodySharedSettings();
+  for (uint32_t y = 0; y < rows; y++) {
+    for (uint32_t x = 0; x < cols; x++) {
+      const float fx = width * ((float)x / (cols - 1) - 0.5f);
+      const float fy = height * (float)y / (rows - 1);
+      const float inv_mass = (y == rows - 1) ? 0.0f : 1.0f;
+      shared->mVertices.push_back(JPH::SoftBodySharedSettings::Vertex(JPH::Float3(fx, fy, 0), JPH::Float3(0, 0, 0), inv_mass));
+    }
+  }
+  for (uint32_t y = 0; y < rows - 1; y++) {
+    for (uint32_t x = 0; x < cols - 1; x++) {
+      const JPH::uint32 a = y * cols + x, b = y * cols + x + 1, c = (y + 1) * cols + x, d = (y + 1) * cols + x + 1;
+      shared->AddFace(JPH::SoftBodySharedSettings::Face(a, c, b));
+      shared->AddFace(JPH::SoftBodySharedSettings::Face(b, c, d));
+    }
+  }
+  JPH::SoftBodySharedSettings::VertexAttributes attr(1.0e-4f, 1.0e-4f, 1.0e-4f);
+  shared->CreateConstraints(&attr, 1);
+  shared->Optimize();
+  JPH::SoftBodyCreationSettings settings(shared, JPH::RVec3(px, py, pz), JPH::Quat::sIdentity(), layer_moving);
+  const JPH::BodyID id = world->system.GetBodyInterface().CreateAndAddSoftBody(settings, JPH::EActivation::Activate);
+  return id.IsInvalid() ? UINT32_MAX : id.GetIndexAndSequenceNumber();
+}
+
+// Reads the cloth's deformed world-space vertices into out (three
+// floats per vertex, up to max_vertices). Returns the count.
+extern "C" uint32_t goss_physics_cloth_read(void* handle, uint32_t body, float* out, uint32_t max_vertices) {
+  auto* world = static_cast<World*>(handle);
+  if (world == nullptr || out == nullptr) return 0;
+  const JPH::BodyID id(body);
+  JPH::BodyLockRead lock(world->system.GetBodyLockInterface(), id);
+  if (!lock.Succeeded()) return 0;
+  const JPH::Body& b = lock.GetBody();
+  if (!b.IsSoftBody()) return 0;
+  const JPH::SoftBodyMotionProperties* mp = static_cast<const JPH::SoftBodyMotionProperties*>(b.GetMotionProperties());
+  const JPH::RVec3 com = b.GetCenterOfMassPosition();
+  const auto& verts = mp->GetVertices();
+  const uint32_t count = (uint32_t)verts.size() < max_vertices ? (uint32_t)verts.size() : max_vertices;
+  for (uint32_t i = 0; i < count; i++) {
+    const JPH::RVec3 p = com + verts[i].mPosition;
+    out[i * 3 + 0] = (float)p.GetX();
+    out[i * 3 + 1] = (float)p.GetY();
+    out[i * 3 + 2] = (float)p.GetZ();
+  }
+  return count;
 }
