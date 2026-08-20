@@ -344,6 +344,37 @@ pub const Renderer = struct {
         _ = mesh;
     }
 
+    pub const ParticleMesh = struct {
+        position_buffer: TextureHandle = .{},
+        vertex_count: u32 = 0,
+    };
+
+    pub fn createParticleMesh(r: *Renderer, count: u32) !ParticleMesh {
+        _ = r;
+        _ = count;
+        return .{};
+    }
+
+    pub fn updateParticleMesh(r: *Renderer, mesh: ParticleMesh, positions: []const f32) void {
+        _ = r;
+        _ = mesh;
+        _ = positions;
+    }
+
+    pub fn destroyParticleMesh(mesh: ParticleMesh) void {
+        _ = mesh;
+    }
+
+    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = base_color;
+        _ = aspect_ratio;
+    }
+
     pub const HairMesh = struct {
         position_buffer: TextureHandle = .{},
         index_buffer: TextureHandle = .{},

@@ -175,6 +175,15 @@ all are optional with engine defaults. Like cloth it needs no glb
 asset, and without a tracked head the strands hang from their initial
 pose, the standard capability degradation.
 
+A model.gltf node may instead carry a `"particles": {"count", "gravity",
+"speed", "lifetime"}` field: the node becomes a particle fountain instead
+of a glb mesh. `count` (1 to 4096) particles emit from the origin with an
+index-spread velocity, integrate under `gravity`, and respawn when their
+`lifetime` runs out, drawn as points over the frame. The sim is a
+deterministic CPU integration - no clock, no randomness - so the same
+field and frame count produce the same picture, conformance bit-stable; it
+needs no glb asset.
+
 A `"script"` node carries an inline `"source"` string of JavaScript that
 defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
