@@ -15,6 +15,7 @@ const c = @cImport({
 // declared directly against the linked library.
 extern fn ABGRToJ420(src_abgr: [*]const u8, src_stride_abgr: c_int, dst_y: [*]u8, dst_stride_y: c_int, dst_u: [*]u8, dst_stride_u: c_int, dst_v: [*]u8, dst_stride_v: c_int, width: c_int, height: c_int) c_int;
 extern fn I420ToNV12(src_y: [*]const u8, src_stride_y: c_int, src_u: [*]const u8, src_stride_u: c_int, src_v: [*]const u8, src_stride_v: c_int, dst_y: [*]u8, dst_stride_y: c_int, dst_uv: [*]u8, dst_stride_uv: c_int, width: c_int, height: c_int) c_int;
+extern fn ARGBScale(src: [*]const u8, src_stride: c_int, src_w: c_int, src_h: c_int, dst: [*]u8, dst_stride: c_int, dst_w: c_int, dst_h: c_int, filtering: c_int) c_int;
 
 pub const Image = struct {
     width: u32,
@@ -124,4 +125,16 @@ test "undersized planes refuse" {
     var y_plane: [1]u8 = undefined;
     var uv_plane: [2]u8 = undefined;
     try t.expectError(error.ConversionFailed, rgbaToNv12(t.allocator, &rgba, 2, 2, &y_plane, &uv_plane));
+}
+
+/// Box-filter downscales tightly packed RGBA8 to the output size - the
+/// anti-aliasing pass for high-quality still capture. The box filter
+/// averages each channel independently, so RGBA vs libyuv's ABGR word
+/// order is irrelevant for a downscale. Deterministic.
+pub fn downsampleBox(src: []const u8, src_width: u32, src_height: u32, dst: []u8, dst_width: u32, dst_height: u32) ConvertError!void {
+    if (src.len < @as(usize, src_width) * src_height * 4 or dst.len < @as(usize, dst_width) * dst_height * 4) return error.ConversionFailed;
+    // filtering 3 = kFilterBox (highest quality downscale).
+    if (ARGBScale(src.ptr, @intCast(src_width * 4), @intCast(src_width), @intCast(src_height), dst.ptr, @intCast(dst_width * 4), @intCast(dst_width), @intCast(dst_height), 3) != 0) {
+        return error.ConversionFailed;
+    }
 }

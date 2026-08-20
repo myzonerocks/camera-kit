@@ -684,6 +684,44 @@ fn proveHighResCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
             return false;
         }
     }
+    // Supersampling: the same output size, but the effect chain rendered
+    // larger and box-downsampled, so the pixels differ from 1x (real
+    // anti-aliasing) and two supersampled captures are byte-identical.
+    const base_cfg = abi.CaptureConfig{ .width = 300, .height = 200, .supersample = 1, .format = 0, .quality = 0 };
+    const ss_cfg = abi.CaptureConfig{ .width = 300, .height = 200, .supersample = 2, .format = 0, .quality = 0 };
+    var ss_out_w: u32 = 0;
+    var ss_out_h: u32 = 0;
+    var base_len: usize = 0;
+    var ss_len_a: usize = 0;
+    var ss_len_b: usize = 0;
+    const base_buf = try gpa.alloc(u8, 300 * 200 * 4 + 4096);
+    defer gpa.free(base_buf);
+    const ss_a = try gpa.alloc(u8, 300 * 200 * 4 + 4096);
+    defer gpa.free(ss_a);
+    const ss_b = try gpa.alloc(u8, 300 * 200 * 4 + 4096);
+    defer gpa.free(ss_b);
+    if (abi.goss_engine_capture_still(engine, session, &base_cfg, base_buf.ptr, base_buf.len, &base_len, &ss_out_w, &ss_out_h) != .ok) {
+        std.debug.print("conformance: FAIL base capture for supersample compare\n", .{});
+        return false;
+    }
+    if (abi.goss_engine_capture_still(engine, session, &ss_cfg, ss_a.ptr, ss_a.len, &ss_len_a, &ss_out_w, &ss_out_h) != .ok or ss_out_w != 300 or ss_out_h != 200) {
+        std.debug.print("conformance: FAIL supersampled capture ({d}x{d})\n", .{ ss_out_w, ss_out_h });
+        return false;
+    }
+    if (abi.goss_engine_capture_still(engine, session, &ss_cfg, ss_b.ptr, ss_b.len, &ss_len_b, &ss_out_w, &ss_out_h) != .ok) {
+        std.debug.print("conformance: FAIL second supersampled capture\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, ss_a[0..ss_len_a], ss_b[0..ss_len_b])) {
+        std.debug.print("conformance: FAIL supersampled capture is not deterministic\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, base_buf[0..base_len], ss_a[0..ss_len_a])) {
+        std.debug.print("conformance: FAIL supersampling did not change the pixels\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF supersampled capture is the same size, anti-aliased (differs from 1x), and deterministic\n", .{});
+
     std.debug.print("conformance: PROOF stills capture at their own resolution ({d}x{d} source and 1200x900 explicit), decoupled from the 400x300 preview\n", .{ planes.width, planes.height });
     return true;
 }

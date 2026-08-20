@@ -1829,36 +1829,68 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     const still_h: u16 = if (cfg.height != 0) @intCast(@min(cfg.height, 65535)) else @intCast(current.desc.height);
     if (still_w == 0 or still_h == 0) return .invalid_argument;
 
-    s.capture_res_width = still_w;
-    s.capture_res_height = still_h;
+    // Supersample: render at N times the still size then box-downsample,
+    // for photo-grade anti-aliased edges. 16384 is the conservative
+    // texture-size floor; larger renders wait on the tiling path.
+    const supersample: u16 = switch (cfg.supersample) {
+        0, 1 => 1,
+        2 => 2,
+        4 => 4,
+        else => return .invalid_argument,
+    };
+    const render_w: u32 = @as(u32, still_w) * supersample;
+    const render_h: u32 = @as(u32, still_h) * supersample;
+    if (render_w > 16384 or render_h > 16384) return .invalid_argument;
+
+    s.capture_res_width = @intCast(render_w);
+    s.capture_res_height = @intCast(render_h);
     defer {
         s.capture_res_width = 0;
         s.capture_res_height = 0;
     }
     const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
-    w.* = e.capture_width;
-    h.* = e.capture_height;
-    const full_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
-    if (full_size == 0) return .ok;
+    const render_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
+    if (render_size == 0) {
+        w.* = 0;
+        h.* = 0;
+        return .ok;
+    }
 
     const gpa = e.gpa;
-    const pixels = gpa.alloc(u8, full_size) catch return .out_of_memory;
-    defer gpa.free(pixels);
+    const rendered = gpa.alloc(u8, render_size) catch return .out_of_memory;
+    defer gpa.free(rendered);
     const staging = e.capture_staging orelse return .renderer_unavailable;
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
-    const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
+    const ready_frame = render.Renderer.readTexture(staging, rendered.ptr);
     while (r.frame() < ready_frame) {}
+
+    // The pixels to encode: the rendered buffer directly at 1x, or the
+    // box-downsampled buffer at the still size when supersampling.
+    var pixels: []u8 = rendered;
+    var out_w: u32 = e.capture_width;
+    var out_h: u32 = e.capture_height;
+    var downsampled: []u8 = &.{};
+    defer if (downsampled.len > 0) gpa.free(downsampled);
+    if (supersample > 1) {
+        downsampled = gpa.alloc(u8, @as(usize, still_w) * still_h * 4) catch return .out_of_memory;
+        image.downsampleBox(rendered, e.capture_width, e.capture_height, downsampled, still_w, still_h) catch return .unsupported;
+        pixels = downsampled;
+        out_w = still_w;
+        out_h = still_h;
+    }
+    w.* = out_w;
+    h.* = out_h;
 
     if (cfg.format == 0) {
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(gpa);
-        png.encodeRgba(gpa, &encoded, pixels, e.capture_width, e.capture_height) catch return .out_of_memory;
+        png.encodeRgba(gpa, &encoded, pixels, out_w, out_h) catch return .out_of_memory;
         len_out.* = encoded.items.len;
         if (out_capacity < encoded.items.len) return .invalid_argument;
         @memcpy(data[0..encoded.items.len], encoded.items);
         return .ok;
     }
-    photo.encode(pixels, e.capture_width, e.capture_height, @enumFromInt(cfg.format), cfg.quality, data[0..out_capacity], len_out) catch return .invalid_argument;
+    photo.encode(pixels, out_w, out_h, @enumFromInt(cfg.format), cfg.quality, data[0..out_capacity], len_out) catch return .invalid_argument;
     return .ok;
 }
 
