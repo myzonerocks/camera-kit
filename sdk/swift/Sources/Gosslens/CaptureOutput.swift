@@ -50,6 +50,32 @@ extension Engine {
         return (Array(data[0..<encoded]), outWidth, outHeight)
     }
 
+    public enum PhotoFormat: UInt32 {
+        case jpeg = 1
+        case heic = 2
+    }
+
+    /// Captures the composited frame in a platform photo format. The
+    /// PNG capturePhoto stays the deterministic surface.
+    public func capturePhoto(session: Session?, as format: PhotoFormat, quality: UInt32 = 0) throws -> (data: [UInt8], width: UInt32, height: UInt32) {
+        var needed = 0
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        var probe: UInt8 = 0
+        let status = goss_engine_capture_photo_as(handle, session?.handle, format.rawValue, quality, &probe, 0, &needed, &outWidth, &outHeight)
+        if status == GOSS_OK && needed == 0 { return ([], outWidth, outHeight) }
+        guard status == GOSS_ERROR_INVALID_ARGUMENT, needed > 0 else {
+            try checked(status)
+            return ([], outWidth, outHeight)
+        }
+        var data = [UInt8](repeating: 0, count: needed)
+        var encoded = 0
+        try data.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_engine_capture_photo_as(handle, session?.handle, format.rawValue, quality, buffer.baseAddress, buffer.count, &encoded, &outWidth, &outHeight))
+        }
+        return (Array(data[0..<encoded]), outWidth, outHeight)
+    }
+
     /// Starts recording the session's rendered frames, effects baked
     /// in, into an MP4 at path. One recording per engine; every
     /// rendered frame appends until stopRecording.
