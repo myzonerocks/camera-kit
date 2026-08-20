@@ -21,6 +21,7 @@ const png = @import("png");
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
+const physics = @import("physics");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -259,6 +260,11 @@ pub const Session = struct {
     /// outranks the host's tick value.
     world: WorldStore = .{},
     world_engine_fed: bool = false,
+    /// The lens's rigid-body world, created at activation when any
+    /// model node declares a body; poses drive those model matrices.
+    physics_world: ?physics.World = null,
+    physics_bodies: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
+    physics_last_us: i64 = 0,
 
     engine: *Engine,
     controller: graph.DegradeController,
@@ -991,6 +997,13 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const elapsed_us = if (s.active_lens) |*lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
                 const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
                 var model_matrix = if (loaded.animation) |*anim| anim.sample(elapsed_seconds) else math.Mat4.identity;
+                if (s.physics_bodies.get(entry.graph_index)) |body_id| {
+                    if (s.physics_world) |world| {
+                        if (world.bodyPose(body_id)) |body_pose| {
+                            model_matrix = .{ .cols = @bitCast(body_pose) };
+                        } else |_| {}
+                    }
+                }
                 if (s.model_world_anchors.contains(entry.graph_index)) {
                     // World-anchored content draws from the platform
                     // camera's own view and projection, at world anchor
@@ -1145,6 +1158,8 @@ pub fn destroySession(session: *Session) void {
     session.mesh_face_textures.deinit(session.engine.gpa);
     session.model_face_anchors.deinit(session.engine.gpa);
     session.model_world_anchors.deinit(session.engine.gpa);
+    if (session.physics_world) |world| world.destroy();
+    session.physics_bodies.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -1447,6 +1462,16 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
             if (s.current) |current| {
                 recording_frame = prepareRecordingFrame(e, r);
                 recording_timestamp = current.desc.timestamp_us;
+            }
+        }
+        if (s.physics_world) |world| {
+            if (s.current) |current| {
+                const now_us = current.desc.timestamp_us;
+                if (s.physics_last_us != 0 and now_us > s.physics_last_us) {
+                    const dt: f32 = @as(f32, @floatFromInt(now_us - s.physics_last_us)) / 1_000_000.0;
+                    world.step(@min(dt, 0.25));
+                }
+                s.physics_last_us = now_us;
             }
         }
         if (s.current) |current| {
@@ -2359,6 +2384,9 @@ fn destroyBlendState(session: *Session) void {
 fn destroyMeshFaceState(session: *Session) void {
     session.model_face_anchors.clearRetainingCapacity();
     session.model_world_anchors.clearRetainingCapacity();
+    if (session.physics_world) |world| world.destroy();
+    session.physics_world = null;
+    session.physics_bodies.clearRetainingCapacity();
     var loader_it = session.mesh_face_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
     session.mesh_face_loaders.clearRetainingCapacity();
@@ -2608,6 +2636,25 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.world_anchor) {
             session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
+        if (model.physics) |body| {
+            if (physics.supported) {
+                if (session.physics_world == null) {
+                    session.physics_world = physics.World.create(-9.81) catch null;
+                    session.physics_last_us = 0;
+                }
+                if (session.physics_world) |world| {
+                    const id = world.addBody(
+                        if (body.shape == .box) .box else .sphere,
+                        body.position,
+                        body.size,
+                        if (body.dynamic) .dynamic else .static,
+                    ) catch physics.invalid_body;
+                    if (id != physics.invalid_body) {
+                        session.physics_bodies.put(gpa, model.graph_index, id) catch {};
+                    }
+                }
+            }
         }
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.glb", .{ bundle_path, model.model_stem }) catch continue;
         defer gpa.free(path);

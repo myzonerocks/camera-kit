@@ -99,6 +99,7 @@ const LensNode = struct {
     /// .model_gltf only: the node anchors to the tracked face.
     face_anchor: bool = false,
     world_anchor: bool = false,
+    physics: ?manifest.PhysicsBody = null,
     /// .model_gltf only: microseconds since play_animation last fired
     /// for this node, null if it never has. Advances every tick() the
     /// same way a ramp does - once a trigger starts it, not before.
@@ -139,6 +140,7 @@ pub const ModelNode = struct {
     model_stem: []const u8,
     face_anchor: bool = false,
     world_anchor: bool = false,
+    physics: ?manifest.PhysicsBody = null,
 };
 
 /// One mesh.face node ready for the caller to load and draw - which
@@ -279,7 +281,7 @@ pub const Lens = struct {
         for (order) |graph_index| {
             const node = self.findNode(graph_index) orelse continue;
             if (node.node_type != .model_gltf) continue;
-            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .face_anchor = node.face_anchor, .world_anchor = node.world_anchor });
+            try out.append(gpa, .{ .graph_index = node.graph_index, .model_stem = node.asset_stem.?, .face_anchor = node.face_anchor, .world_anchor = node.world_anchor, .physics = node.physics });
         }
         return out.toOwnedSlice(gpa);
     }
@@ -435,6 +437,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,
             .face_anchor = node_type == .model_gltf and node.face_anchor,
             .world_anchor = node_type == .model_gltf and node.world_anchor,
+            .physics = if (node_type == .model_gltf) node.physics else null,
         };
 
         for (node.inputs) |input| {

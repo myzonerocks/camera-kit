@@ -533,6 +533,86 @@ fn proveWorldAnchor(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves lens physics end to end: a dropped marker settles onto the
+/// slab across advancing frame timestamps, the settled frame differs
+/// from the falling frame, and two runs land bit-identical.
+fn provePhysicsDrop(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/physics-drop", ".lens-packages/physics-drop".len) != .ok) {
+            std.debug.print("conformance: FAIL physics lens activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var falling_shot: []u8 = &.{};
+        defer if (falling_shot.len > 0) gpa.free(falling_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+
+            if (i == 4 or i == 85) {
+                var shot_width: u32 = 0;
+                var shot_height: u32 = 0;
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+                    std.debug.print("conformance: FAIL physics capture at frame {d}\n", .{i});
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 4) falling_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, falling_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL the settled frame must differ from the falling frame\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(falling_shot);
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            var png_bytes: std.ArrayList(u8) = .empty;
+            defer png_bytes.deinit(gpa);
+            try png.encodeRgba(gpa, &png_bytes, settled_shot, 400, 300);
+            try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-physics-drop.png", .data = png_bytes.items });
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL physics is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF lens physics settles deterministically, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves the zero-mask degradation: hair-recolor against a model with
 /// no hair class renders exactly the frame it renders with no
 /// segmentation at all, and both differ from the real multiclass
@@ -845,5 +925,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveVideoRecording(gpa, engine)) return 1;
     if (!try provePlatformPhotos(gpa, engine)) return 1;
     if (!try proveWorldAnchor(gpa, engine)) return 1;
+    if (!try provePhysicsDrop(gpa, engine)) return 1;
     return 0;
 }

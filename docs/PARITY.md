@@ -20,6 +20,7 @@ CaptureOutput, Events.
 | Audio triggers (level, beat) | proven in the host harness | built, no hardware yet | not wired |
 | Recording audio track + A/V sync | proven in the host harness, zero end drift | video-only until the audio encoder lands | backend not landed |
 | World tracking (pose, planes, anchors, light) | ARKit source built, no hardware yet; seam proven on the replay track in the host harness | ARCore demo feeder built, no hardware yet | WebXR source built and typechecked, no browser run yet |
+| Lens physics (rigid bodies on model nodes) | proven in the host harness, deterministic settle | stub, holds initial pose | stub, holds initial pose |
 
 "Demonstrated" means executed on the real target through the public
 path; "built" means the code exists and compiles but no physical device
