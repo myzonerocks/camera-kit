@@ -49,4 +49,21 @@ extension Engine {
         }
         return (Array(data[0..<encoded]), outWidth, outHeight)
     }
+
+    /// Starts recording the session's rendered frames, effects baked
+    /// in, into an MP4 at path. One recording per engine; every
+    /// rendered frame appends until stopRecording.
+    public func startRecording(session: Session, path: String, width: UInt32 = 0, height: UInt32 = 0, bitrate: UInt32 = 0, hevc: Bool = false) throws {
+        var config = goss_recording_config(width: width, height: height, bitrate_bps: bitrate, codec: hevc ? 1 : 0)
+        let bytes = Array(path.utf8)
+        try bytes.withUnsafeBufferPointer { buffer in
+            try checked(goss_engine_recording_start(handle, session.handle, buffer.baseAddress, buffer.count, &config))
+        }
+    }
+
+    /// Stops the recording, flushing in-flight frames and finalizing
+    /// the file.
+    public func stopRecording() throws {
+        try checked(goss_engine_recording_stop(handle))
+    }
 }
