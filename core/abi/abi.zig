@@ -17,6 +17,7 @@ const tracking = @import("tracking");
 const segmentation = @import("segmentation");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
+const png = @import("png");
 const hand = @import("hand");
 const pose = @import("pose");
 const beauty = @import("beauty");
@@ -60,7 +61,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 11;
+pub const abi_minor: u16 = 12;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -184,6 +185,9 @@ pub const Engine = struct {
     /// this one alone always holds the true final composited image
     /// after a capture-requested frame renders.
     capture_target: ?render.Renderer.OffscreenTarget = null,
+    /// CPU-readable blit destination paired with capture_target -
+    /// render targets are not directly readable on every backend.
+    capture_staging: ?render.TextureHandle = null,
     capture_width: u16 = 0,
     capture_height: u16 = 0,
 };
@@ -399,6 +403,9 @@ pub fn destroyEngine(engine: *Engine) void {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
     }
     if (engine.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (engine.capture_staging) |staging| {
+        if (engine.renderer) |*r| r.destroyTexture(staging);
+    }
     if (engine.renderer) |*r| r.deinit();
     engine.texture_pool.deinit();
     engine.staging_pool.deinit();
@@ -421,7 +428,11 @@ fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
 fn ensureCaptureTarget(e: *Engine, width: u16, height: u16) !void {
     if (e.capture_width == width and e.capture_height == height and e.capture_target != null) return;
     if (e.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
+    if (e.capture_staging) |staging| {
+        if (e.renderer) |*r| r.destroyTexture(staging);
+    }
     e.capture_target = try render.Renderer.createOffscreenTarget(width, height);
+    e.capture_staging = try render.Renderer.createReadbackTexture(width, height);
     e.capture_width = width;
     e.capture_height = height;
 }
@@ -1253,14 +1264,14 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
 /// buffer is safe to read, backend-dependent and not always the same
 /// small number of extra calls, so this loops on frame()'s own return
 /// value rather than assuming a fixed count.
-pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
-    const e = engine orelse return .invalid_argument;
-    const s = session orelse return .invalid_argument;
-    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
-    const data = out_data orelse return .invalid_argument;
-    const w = out_width orelse return .invalid_argument;
-    const h = out_height orelse return .invalid_argument;
+/// Past every id the composite chain can allocate, so the readback
+/// blit always runs after the last draw of the frame.
+const capture_blit_view: u8 = 255;
 
+/// Renders the session's current frame with capture enabled and
+/// returns the landed capture target. Shared by the raw-pixel and
+/// encoded-photo capture operations below.
+fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Renderer.OffscreenTarget {
     s.capture_requested = true;
     defer s.capture_requested = false;
 
@@ -1278,16 +1289,65 @@ pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, ou
         r.touch();
     }
     _ = r.frame();
+    return e.capture_target;
+}
 
-    const target = e.capture_target orelse return .renderer_unavailable;
+pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const s = session orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    const data = out_data orelse return .invalid_argument;
+    const w = out_width orelse return .invalid_argument;
+    const h = out_height orelse return .invalid_argument;
+
+    const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
     w.* = e.capture_width;
     h.* = e.capture_height;
     const full_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
     if (full_size == 0) return .ok;
     if (out_capacity < full_size) return .invalid_argument;
 
-    const ready_frame = render.Renderer.readTexture(target.texture, data);
+    const staging = e.capture_staging orelse return .renderer_unavailable;
+    render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+    const ready_frame = render.Renderer.readTexture(staging, data);
     while (r.frame() < ready_frame) {}
+    return .ok;
+}
+
+/// Captures the composited frame and encodes it as a PNG into out_data.
+/// out_len always receives the encoded size, so a too-small buffer
+/// (invalid_argument) tells the caller exactly what to retry with.
+/// Deterministic: the same composited pixels, the same bytes.
+pub export fn goss_engine_capture_photo(engine: ?*Engine, session: ?*Session, out_data: ?[*]u8, out_capacity: usize, out_len: ?*usize, out_width: ?*u32, out_height: ?*u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const s = session orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    const data = out_data orelse return .invalid_argument;
+    const len_out = out_len orelse return .invalid_argument;
+    const w = out_width orelse return .invalid_argument;
+    const h = out_height orelse return .invalid_argument;
+    len_out.* = 0;
+
+    const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
+    w.* = e.capture_width;
+    h.* = e.capture_height;
+    const full_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
+    if (full_size == 0) return .ok;
+
+    const gpa = e.gpa;
+    const pixels = gpa.alloc(u8, full_size) catch return .out_of_memory;
+    defer gpa.free(pixels);
+    const staging = e.capture_staging orelse return .renderer_unavailable;
+    render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+    const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
+    while (r.frame() < ready_frame) {}
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(gpa);
+    png.encodeRgba(gpa, &encoded, pixels, e.capture_width, e.capture_height) catch return .out_of_memory;
+    len_out.* = encoded.items.len;
+    if (out_capacity < encoded.items.len) return .invalid_argument;
+    @memcpy(data[0..encoded.items.len], encoded.items);
     return .ok;
 }
 

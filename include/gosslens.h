@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 11u
+#define GOSS_ABI_MINOR 12u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -278,6 +278,12 @@ goss_status goss_engine_request_screenshot(goss_engine *engine, const uint8_t *p
  * the wait-mode fix this also depends on) since bgfx's own read-texture
  * command only runs on the frame after the one that queues it. */
 goss_status goss_engine_capture_frame(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height);
+
+/* Captures the composited frame and encodes it as a PNG into out_data.
+ * out_len always receives the encoded size, so a too-small buffer
+ * (invalid_argument) tells the caller exactly what to retry with. The
+ * encoding is deterministic: the same pixels, the same bytes. */
+goss_status goss_engine_capture_photo(goss_engine *engine, goss_session *session, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height);
 
 /* Graph thread. config may be null for defaults. */
 goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);
