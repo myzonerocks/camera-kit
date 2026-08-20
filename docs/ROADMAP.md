@@ -22,7 +22,7 @@ completeness and merges as a single squash PR.
 - [x] Segmentation: the multiclass model on the segmentation worker with per-class masks, named mask channels for shader passes, and the hair-recolor reference lens, proven on the corpus and bit-stable in conformance; on-device visual passes still owner-gated
 - [x] Pose: the 33-point body landmark pipeline on the tracking rail with per-point visibility and presence, goss_pose_* mirroring the face surface, Swift/Kotlin wrappers and demo overlays, proven on a pinned standing-figure corpus frame through the public surface; skeleton attachment points land with the anchor-node family alongside head pose
 - [ ] Head pose: landmark-driven pose estimation, then the glTF face-anchor node and the face-mask reference lens on top of it
-- [ ] Face-mesh effects: the canonical face topology and UVs over the tracked landmarks, mesh-warp lens nodes for makeup, masks, and face paint
+- [x] Face-mesh effects: the canonical 468-point topology over the tracked landmarks as the mesh.face lens node, with the face-paint reference lens proven bit-stable in conformance with real tracking; makeup and mask variants ride the same node with their own textures
 - [ ] World tracking: the goss_world_source seam, ARKit/ARCore/WebXR backends, and the world-anchor reference lens
 - [ ] Media: GossMedia contracts in core/media, libyuv behind adapters/image, portable codecs behind adapters/media, photo and video capture output with A/V sync
 - [ ] Physics: a rigid-body world for lens content, cloth and hair after rigid, behind an engine boundary like every other vendored component

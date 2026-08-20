@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 const math = @import("math");
 const blobs = @import("shader_blobs");
 const makeup_mesh = @import("makeup_mesh");
+const face_mesh_topology = @import("face_mesh_topology");
 
 pub const android_vk = if (builtin.os.tag == .linux and builtin.abi.isAndroid())
     @import("android_vk.zig")
@@ -107,6 +108,11 @@ pub const Renderer = struct {
     /// The 176-triangle face-makeup mesh's fixed index buffer -
     /// makeup_mesh.triangle_indices, uploaded once, never changes.
     makeup_index_buffer: c.bgfx_index_buffer_handle_t,
+    /// The canonical 898-triangle face mesh: fixed indices and UVs
+    /// uploaded once, live landmark positions streamed per draw.
+    face_mesh_index_buffer: c.bgfx_index_buffer_handle_t,
+    face_mesh_uv_buffer: c.bgfx_vertex_buffer_handle_t,
+    face_mesh_position_buffer: c.bgfx_dynamic_vertex_buffer_handle_t,
     /// The live tracked 111-point contour, stream 0 of a makeup draw -
     /// dynamic (updated every frame submitMakeup runs), unlike every
     /// other buffer here.
@@ -271,6 +277,10 @@ pub const Renderer = struct {
         makeup_mesh.makeupUv(makeup_mesh.blush_bounds, &blush_uv);
         const makeup_blush_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&blush_uv, @sizeOf(@TypeOf(blush_uv))), &makeup_uv_layout, 0);
 
+        const face_mesh_index_buffer = c.bgfx_create_index_buffer(c.bgfx_copy(&face_mesh_topology.triangle_indices, @sizeOf(@TypeOf(face_mesh_topology.triangle_indices))), 0);
+        const face_mesh_uv_buffer = c.bgfx_create_vertex_buffer(c.bgfx_copy(&face_mesh_topology.vertex_uvs, @sizeOf(@TypeOf(face_mesh_topology.vertex_uvs))), &makeup_uv_layout, 0);
+        const face_mesh_position_buffer = c.bgfx_create_dynamic_vertex_buffer(face_mesh_topology.vertex_count, &makeup_position_layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+
         c.bgfx_set_view_clear(0, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
         c.bgfx_set_view_rect(0, 0, 0, @intCast(options.width), @intCast(options.height));
 
@@ -303,6 +313,9 @@ pub const Renderer = struct {
             .makeup_program = makeup_program,
             .model_program = model_program,
             .makeup_index_buffer = makeup_index_buffer,
+            .face_mesh_index_buffer = face_mesh_index_buffer,
+            .face_mesh_uv_buffer = face_mesh_uv_buffer,
+            .face_mesh_position_buffer = face_mesh_position_buffer,
             .makeup_position_buffer = makeup_position_buffer,
             .makeup_lipstick_uv_buffer = makeup_lipstick_uv_buffer,
             .makeup_blush_uv_buffer = makeup_blush_uv_buffer,
@@ -515,6 +528,9 @@ pub const Renderer = struct {
         c.bgfx_destroy_dynamic_vertex_buffer(r.makeup_position_buffer);
         c.bgfx_destroy_vertex_buffer(r.makeup_lipstick_uv_buffer);
         c.bgfx_destroy_vertex_buffer(r.makeup_blush_uv_buffer);
+        c.bgfx_destroy_index_buffer(r.face_mesh_index_buffer);
+        c.bgfx_destroy_vertex_buffer(r.face_mesh_uv_buffer);
+        c.bgfx_destroy_dynamic_vertex_buffer(r.face_mesh_position_buffer);
         c.bgfx_shutdown();
         if (is_android) {
             if (r.zero_copy) |*zc| {
@@ -858,6 +874,29 @@ pub const Renderer = struct {
         c.bgfx_set_index_buffer(r.makeup_index_buffer, 0, makeup_mesh.triangle_indices.len);
         c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
         c.bgfx_set_texture(1, r.tex_makeup, makeup_texture, std.math.maxInt(u32));
+        const params = [4]f32{ intensity, 0.0, 0.0, 0.0 };
+        c.bgfx_set_uniform(r.makeup_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.makeup_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Draws the canonical face mesh over the frame: each vertex rides
+    /// its tracked landmark (frame pixels in, zero-to-one frame UV out),
+    /// canonical texture coordinates, the same program and blend the
+    /// makeup mesh uses.
+    pub fn submitFaceMesh(r: *Renderer, view_id: c.bgfx_view_id_t, background_texture: c.bgfx_texture_handle_t, mesh_texture: c.bgfx_texture_handle_t, landmarks: []const f32, frame_width: f32, frame_height: f32, intensity: f32) void {
+        std.debug.assert(landmarks.len >= 468 * 3);
+        var positions: [face_mesh_topology.vertex_count * 2]f32 = undefined;
+        for (face_mesh_topology.vertex_landmarks, 0..) |landmark, at| {
+            positions[at * 2] = landmarks[@as(usize, landmark) * 3] / frame_width;
+            positions[at * 2 + 1] = landmarks[@as(usize, landmark) * 3 + 1] / frame_height;
+        }
+        c.bgfx_update_dynamic_vertex_buffer(r.face_mesh_position_buffer, 0, c.bgfx_copy(&positions, @sizeOf(@TypeOf(positions))));
+        c.bgfx_set_dynamic_vertex_buffer(0, r.face_mesh_position_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_vertex_buffer(1, r.face_mesh_uv_buffer, 0, face_mesh_topology.vertex_count);
+        c.bgfx_set_index_buffer(r.face_mesh_index_buffer, 0, face_mesh_topology.triangle_indices.len);
+        c.bgfx_set_texture(0, r.tex_background, background_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_makeup, mesh_texture, std.math.maxInt(u32));
         const params = [4]f32{ intensity, 0.0, 0.0, 0.0 };
         c.bgfx_set_uniform(r.makeup_params_uniform, &params, 1);
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);

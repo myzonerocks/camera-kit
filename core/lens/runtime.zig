@@ -36,7 +36,7 @@ pub const EffectSlot = enum(u3) {
     blush = 5,
 };
 
-pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, model_gltf };
+pub const NodeType = enum { beauty_face, beauty_reshape, beauty_lipstick, beauty_blusher, shader_pass, lut_pass, blend_pass, model_gltf, mesh_face };
 
 fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.face")) return .beauty_face;
@@ -44,6 +44,7 @@ fn parseNodeType(type_str: []const u8) ?NodeType {
     if (std.mem.eql(u8, type_str, "beauty.lipstick")) return .beauty_lipstick;
     if (std.mem.eql(u8, type_str, "beauty.blusher")) return .beauty_blusher;
     if (std.mem.eql(u8, type_str, "shader.pass")) return .shader_pass;
+    if (std.mem.eql(u8, type_str, "mesh.face")) return .mesh_face;
     if (std.mem.eql(u8, type_str, "lut.pass")) return .lut_pass;
     if (std.mem.eql(u8, type_str, "blend.pass")) return .blend_pass;
     if (std.mem.eql(u8, type_str, "model.gltf")) return .model_gltf;
@@ -70,7 +71,7 @@ fn paramSlotsFor(node_type: NodeType) []const ParamSlot {
         },
         .beauty_lipstick => &.{.{ .name = "blend", .effect = .lipstick }},
         .beauty_blusher => &.{.{ .name = "blend", .effect = .blush }},
-        .shader_pass, .lut_pass, .blend_pass, .model_gltf => &.{},
+        .shader_pass, .lut_pass, .blend_pass, .model_gltf, .mesh_face => &.{},
     };
 }
 
@@ -135,7 +136,15 @@ pub const ModelNode = struct {
     model_stem: []const u8,
 };
 
-pub const PassKind = enum { shader, lut, blend, model };
+/// One mesh.face node ready for the caller to load and draw - which
+/// graph node it is, and the texture (assets/<stem>.png) it warps over
+/// the tracked face.
+pub const MeshFaceNode = struct {
+    graph_index: graph.NodeIndex,
+    texture_stem: []const u8,
+};
+
+pub const PassKind = enum { shader, lut, blend, model, mesh };
 
 /// One shader.pass, lut.pass, blend.pass, or model.gltf node, tagged
 /// with which - the caller's real draw order for a chain that may mix
@@ -270,6 +279,20 @@ pub const Lens = struct {
         return out.toOwnedSlice(gpa);
     }
 
+    /// Every mesh.face node this lens spliced, in execution order -
+    /// mirrors the other per-kind accessors exactly.
+    pub fn meshFaceNodes(self: *const Lens, gpa: std.mem.Allocator, g: *graph.Graph) ![]MeshFaceNode {
+        const order = try g.executionOrder();
+        var out: std.ArrayList(MeshFaceNode) = .empty;
+        errdefer out.deinit(gpa);
+        for (order) |graph_index| {
+            const node = self.findNode(graph_index) orelse continue;
+            if (node.node_type != .mesh_face) continue;
+            try out.append(gpa, .{ .graph_index = node.graph_index, .texture_stem = node.asset_stem.? });
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// Every shader.pass, lut.pass, blend.pass, and model.gltf node
     /// this lens spliced, in one real execution-order sequence - the
     /// actual draw order for a chain that mixes any of the four kinds,
@@ -286,6 +309,7 @@ pub const Lens = struct {
                 .lut_pass => .lut,
                 .blend_pass => .blend,
                 .model_gltf => .model,
+                .mesh_face => .mesh,
                 else => continue,
             };
             try out.append(gpa, .{ .graph_index = node.graph_index, .kind = kind });
@@ -400,7 +424,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
             .graph_index = graph_index,
             .node_type = node_type,
             .asset_stem = switch (node_type) {
-                .shader_pass, .lut_pass, .blend_pass, .model_gltf => node.id,
+                .shader_pass, .lut_pass, .blend_pass, .model_gltf, .mesh_face => node.id,
                 else => null,
             },
             .mask_channel = if (node_type == .shader_pass) node.mask_channel else null,

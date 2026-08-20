@@ -135,7 +135,11 @@ other nodes in the same list by their `id`:
 The set of known `type` values is closed and versioned with the *engine*, not
 the format — GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
-passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing).
+passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing,
+and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
+textured by `assets/<id>.png` in canonical UV space with v measured from
+the bottom; without a tracked face the node draws nothing, the standard
+capability degradation).
 Splice happens once, at lens activation, not per frame; unsplice reverses
 it exactly, freeing every resource the splice allocated. Both are edit-time
 operations on the graph's edit-time API, never touching the frame-time
@@ -269,7 +273,8 @@ never through code.**
 A lens exercises exactly one distinct capability class per the reference
 set (`lenses/reference/`). Shipped today: shader-tint (no capabilities; a
 plain shader pass), hair-recolor (capabilities: segmentation; a shader
-pass reading the hair mask channel), beauty-baseline (capabilities: face; the beauty node
+pass reading the hair mask channel), face-paint (capabilities: face; a
+mesh.face node warping a texture over the tracked face), beauty-baseline (capabilities: face; the beauty node
 type), background-swap (capabilities: segmentation), trigger-anim
 (capabilities: none required; a timer-driven trigger playing a glTF
 animation clip, proving 6.2/6.3 without needing a live face). Planned to

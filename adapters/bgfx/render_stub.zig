@@ -152,6 +152,17 @@ pub const Renderer = struct {
         _ = mirror;
     }
 
+    pub fn submitFaceMesh(r: *Renderer, view_id: u16, background_texture: TextureHandle, mesh_texture: TextureHandle, landmarks: []const f32, frame_width: f32, frame_height: f32, intensity: f32) void {
+        _ = r;
+        _ = view_id;
+        _ = background_texture;
+        _ = mesh_texture;
+        _ = landmarks;
+        _ = frame_width;
+        _ = frame_height;
+        _ = intensity;
+    }
+
     pub fn submitShaderPass(r: *Renderer, view_id: u16, program: ProgramHandle, input_texture: TextureHandle, mask_texture: TextureHandle) void {
         _ = r;
         _ = view_id;

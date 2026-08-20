@@ -335,6 +335,8 @@ pub const Session = struct {
     /// One bgfx texture per blend.pass node whose background finished
     /// loading.
     blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
+    mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// One background loader per currently-spliced model.gltf node
     /// still waiting on its .glb - mirrors lut_loaders/blend_loaders,
     /// one node type over.
@@ -749,6 +751,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
             // consuming an unavailable capability's data holds its
             // default state, not blocks the chain).
             .blend => s.blend_textures.contains(entry.graph_index),
+            // Like blend's mask: the face is a capability input whose
+            // absence degrades (no draw), never blocks the chain.
+            .mesh => s.mesh_face_textures.contains(entry.graph_index),
             .model => s.model_meshes.contains(entry.graph_index),
         };
         if (ready) ready_count += 1;
@@ -855,6 +860,29 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (!is_final) next_slot += 1;
                 }
             },
+            .mesh => {
+                const mesh_texture = s.mesh_face_textures.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                // The frame passes through whole; the mesh then draws
+                // only its own triangles over it. No tracked face means
+                // no draw, the capability's defined degradation.
+                r.submitShaderPass(view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                if (s.face_tracking) |worker| {
+                    var tracked: face.Result = undefined;
+                    if (tracking.readResult(worker, &tracked) and tracked.landmark_count_out > 0 and tracked.presence >= 0.5) {
+                        r.submitFaceMesh(view_id, input_texture, mesh_texture, &tracked.landmarks, @floatFromInt(width), @floatFromInt(height), 1.0);
+                    }
+                }
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
             .model => {
                 const loaded = s.model_meshes.get(entry.graph_index) orelse continue;
                 drawn += 1;
@@ -952,8 +980,11 @@ pub fn destroySession(session: *Session) void {
     session.lut_loaders.deinit(session.engine.gpa);
     session.lut_textures.deinit(session.engine.gpa);
     destroyBlendState(session);
+    destroyMeshFaceState(session);
     session.blend_loaders.deinit(session.engine.gpa);
     session.blend_textures.deinit(session.engine.gpa);
+    session.mesh_face_loaders.deinit(session.engine.gpa);
+    session.mesh_face_textures.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -1133,6 +1164,8 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
     if (session) |s| {
         pollLutLoaders(s, r, s.engine.gpa);
         pollBlendLoaders(s, r, s.engine.gpa);
+    pollMeshFaceLoaders(s, r, s.engine.gpa);
+        pollMeshFaceLoaders(s, r, s.engine.gpa);
         pollModelLoaders(s, r, s.engine.gpa);
         pollSegmentationMask(s);
         if (s.current) |current| {
@@ -1794,6 +1827,18 @@ fn destroyBlendState(session: *Session) void {
     session.blend_textures.clearRetainingCapacity();
 }
 
+fn destroyMeshFaceState(session: *Session) void {
+    var loader_it = session.mesh_face_loaders.valueIterator();
+    while (loader_it.next()) |loader| loader.*.deinit();
+    session.mesh_face_loaders.clearRetainingCapacity();
+
+    if (session.engine.renderer) |*r| {
+        var texture_it = session.mesh_face_textures.valueIterator();
+        while (texture_it.next()) |handle| r.destroyTexture(handle.*);
+    }
+    session.mesh_face_textures.clearRetainingCapacity();
+}
+
 fn destroyModelState(session: *Session) void {
     var loader_it = session.model_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
@@ -1830,6 +1875,7 @@ fn activateLens(session: *Session, gpa: std.mem.Allocator, manifest_json: []cons
     destroyShaderPrograms(session);
     destroyLutState(session);
     destroyBlendState(session);
+    destroyMeshFaceState(session);
     destroyModelState(session);
     destroyChainOrder(session);
     if (session.active_lens) |*old| old.deinit(&session.lens_graph);
@@ -1977,6 +2023,47 @@ fn pollBlendLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocat
     }
 }
 
+/// Starts a background load for every spliced mesh.face node's texture
+/// (assets/<stem>.png) - mirrors createBlendLoaders exactly.
+fn createMeshFaceLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const meshes = try lens.meshFaceNodes(gpa, &session.lens_graph);
+    defer gpa.free(meshes);
+    for (meshes) |mesh| {
+        const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, mesh.texture_stem }) catch continue;
+        defer gpa.free(path);
+        const loader = asset.ImageLoader.start(gpa, path) catch continue;
+        session.mesh_face_loaders.put(gpa, mesh.graph_index, loader) catch {
+            loader.deinit();
+        };
+    }
+}
+
+/// Turns every finished mesh.face texture load into a real texture -
+/// mirrors pollBlendLoaders exactly.
+fn pollMeshFaceLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allocator) void {
+    var finished: std.ArrayList(graph.NodeIndex) = .empty;
+    defer finished.deinit(gpa);
+
+    var it = session.mesh_face_loaders.iterator();
+    while (it.next()) |entry| {
+        const loader = entry.value_ptr.*;
+        if (loader.take()) |decoded| {
+            const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+            gpa.free(decoded.rgba);
+            session.mesh_face_textures.put(gpa, entry.key_ptr.*, texture) catch {
+                r.destroyTexture(texture);
+            };
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        } else if (loader.hasFailed()) {
+            finished.append(gpa, entry.key_ptr.*) catch {};
+        }
+    }
+    for (finished.items) |graph_index| {
+        if (session.mesh_face_loaders.fetchRemove(graph_index)) |kv| kv.value.deinit();
+    }
+}
+
 /// Starts a background load for every spliced model.gltf node's .glb
 /// (assets/<stem>.glb) - mirrors createLutLoaders/createBlendLoaders
 /// exactly, one node type over.
@@ -2059,6 +2146,7 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createShaderPrograms(session, gpa, bundle_path);
     try createLutLoaders(session, gpa, bundle_path);
     try createBlendLoaders(session, gpa, bundle_path);
+    try createMeshFaceLoaders(session, gpa, bundle_path);
     try createModelLoaders(session, gpa, bundle_path);
     try buildChainOrder(session, gpa);
 }
@@ -2080,6 +2168,7 @@ pub export fn goss_session_deactivate_lens(session: ?*Session) void {
     destroyShaderPrograms(s);
     destroyLutState(s);
     destroyBlendState(s);
+    destroyMeshFaceState(s);
     destroyModelState(s);
     destroyChainOrder(s);
     if (s.active_lens) |*lens| lens.deinit(&s.lens_graph);
