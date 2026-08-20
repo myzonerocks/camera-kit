@@ -223,6 +223,7 @@ complete parameter list.**
 | `goss_session_deactivate_lens` | `deactivateLens()` | all SDKs |
 | `goss_session_tick_lens` | `tickLens(dtUs, signals)` | all SDKs |
 | `goss_session_parameter_value` | `parameterValue(name)`, reads a live lens parameter by name, including whatever a script node last wrote | native SDKs |
+| `goss_session_pull_audio` | `pullAudio(out, frames)`, the next block of mixed lens audio (interleaved s16) a play_sound trigger produced, for the SDK to route to platform audio out; silence when no lens sound is active | native SDKs |
 
 ## Web tracking module
 

@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 18u
+#define GOSS_ABI_MINOR 19u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -543,6 +543,11 @@ goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, const 
  * GOSS_AGAIN with no active lens and GOSS_INVALID_ARGUMENT for an unknown
  * name. */
 goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value);
+
+/* Graph thread. Pulls the next block of mixed lens audio (frames * channels
+ * interleaved s16) that play_sound triggers produced, for the SDK to hand to
+ * the platform audio output. Writes silence when no lens sound is active. */
+goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames);
 
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(goss_frame_desc) == 32, "goss_frame_desc layout is frozen");

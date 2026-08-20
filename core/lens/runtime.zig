@@ -202,6 +202,11 @@ pub const Lens = struct {
     tick_timer_values: []trigger.TimerValue,
     tick_touched: []bool,
     tick_applied: []AppliedEffect,
+    /// Bundle-relative paths of sounds a play_sound trigger fired this tick;
+    /// the host drains them each frame. Sized to the trigger count, so the
+    /// frame path never allocates.
+    tick_sounds: [][]const u8,
+    tick_sound_count: usize = 0,
 
     pub fn deinit(self: *Lens, g: *graph.Graph) void {
         for (self.nodes) |n| g.removeNode(n.graph_index);
@@ -217,6 +222,7 @@ pub const Lens = struct {
         self.gpa.free(self.tick_timer_values);
         self.gpa.free(self.tick_touched);
         self.gpa.free(self.tick_applied);
+        self.gpa.free(self.tick_sounds);
         self.manifest.deinit();
         self.* = undefined;
     }
@@ -360,6 +366,12 @@ pub const Lens = struct {
     pub fn paramValue(self: *const Lens, name: []const u8) ?f32 {
         const i = paramIndex(self, name) orelse return null;
         return self.param_values[i];
+    }
+
+    /// The bundle-relative sound paths a play_sound trigger fired on the last
+    /// tick, for the host to start on its mixer.
+    pub fn firedSounds(self: *const Lens) []const []const u8 {
+        return self.tick_sounds[0..self.tick_sound_count];
     }
 
     /// Whether this lens spliced any beauty.* node - what gates whether
@@ -533,6 +545,8 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
     }
     const tick_applied = try gpa.alloc(AppliedEffect, bound_count);
     errdefer gpa.free(tick_applied);
+    const tick_sounds = try gpa.alloc([]const u8, lens_manifest.triggers.len);
+    errdefer gpa.free(tick_sounds);
 
     return .{
         .gpa = gpa,
@@ -547,6 +561,7 @@ pub fn activate(gpa: std.mem.Allocator, g: *graph.Graph, camera_node: graph.Node
         .tick_timer_values = tick_timer_values,
         .tick_touched = tick_touched,
         .tick_applied = tick_applied,
+        .tick_sounds = tick_sounds,
     };
 }
 
@@ -613,6 +628,7 @@ pub fn tick(lens: *Lens, real_dt_us: u32, signals: trigger.Signals) []const Appl
 
     const touched_params = lens.tick_touched;
     @memset(touched_params, false);
+    lens.tick_sound_count = 0;
 
     for (lens.compiled_triggers, 0..) |*expr, i| {
         const is_true = trigger.evaluate(expr.root, live_signals);
@@ -676,6 +692,12 @@ fn applyAction(lens: *Lens, action: manifest.Action, touched_params: []bool) voi
         .reset_timer => {
             const idx = timerIndex(lens, action.target) orelse return;
             lens.timer_elapsed_us[idx] = 0;
+        },
+        .play_sound => {
+            if (lens.tick_sound_count < lens.tick_sounds.len) {
+                lens.tick_sounds[lens.tick_sound_count] = action.target;
+                lens.tick_sound_count += 1;
+            }
         },
         .show, .hide, .swap_subgraph => {},
     }

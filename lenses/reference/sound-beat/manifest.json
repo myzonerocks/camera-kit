@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.sound-beat",
+  "version": "1.0.0",
+  "display_name": "Sound Beat",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [],
+  "triggers": [
+    {"when": "face.present", "action": {"kind": "play_sound", "target": "sounds/beep.wav"}}
+  ]
+}
