@@ -319,6 +319,18 @@ pub const Renderer = struct {
         return 0;
     }
 
+    pub fn submitModelWithCamera(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ModelMesh, model_matrix: math.Mat4, view: math.Mat4, projection: math.Mat4, base_color: [4]f32) void {
+        _ = r;
+        _ = blit_view;
+        _ = mesh_view;
+        _ = input_texture;
+        _ = mesh;
+        _ = model_matrix;
+        _ = view;
+        _ = projection;
+        _ = base_color;
+    }
+
     pub fn createWindowTarget(nwh: *anyopaque, width: u16, height: u16) !OffscreenTarget {
         _ = nwh;
         _ = width;

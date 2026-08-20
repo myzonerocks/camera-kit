@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 15u
+#define GOSS_ABI_MINOR 16u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -314,6 +314,37 @@ goss_status goss_engine_recording_stop(goss_engine *engine);
  * audio.beat trigger signals), and an active recording of this session
  * muxes it as the audio track where the backend supports audio. */
 goss_status goss_session_submit_audio(goss_session *session, const float *samples, uint32_t frame_count, uint32_t sample_rate, uint32_t channels, int64_t timestamp_us);
+
+typedef struct goss_world_state {
+    uint32_t tracking_state; /* 0 unavailable, 1 initializing, 2 tracking, 3 limited */
+    float world_from_camera[16]; /* column-major camera pose in world space */
+    float projection[16];        /* the platform camera's real projection */
+    int64_t timestamp_us;
+} goss_world_state;
+
+typedef struct goss_world_plane {
+    uint64_t id;
+    float pose[16];
+    float extent_x;
+    float extent_z;
+    uint32_t classification; /* 0 other, 1 floor, 2 wall, 3 ceiling, 4 table */
+} goss_world_plane;
+
+typedef struct goss_world_anchor {
+    uint64_t id;
+    float pose[16];
+} goss_world_anchor;
+
+typedef struct goss_world_light {
+    float ambient_intensity;
+    float color_temperature_kelvin;
+} goss_world_light;
+
+/* Feeds the platform's world understanding into the session: camera
+ * pose and projection, tracked planes, anchors, and the light
+ * estimate, once per platform frame. Drives the world.tracking_state
+ * trigger signal and world-anchored lens content. */
+goss_status goss_session_submit_world(goss_session *session, const goss_world_state *state, const goss_world_plane *planes, size_t plane_count, const goss_world_anchor *anchors, size_t anchor_count, const goss_world_light *light);
 
 /* Graph thread. config may be null for defaults. */
 goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);

@@ -326,6 +326,23 @@ export fn Java_com_gosslens_Gosslens_nativeSubmitAudio(env: *JniEnv, cls: jobjec
     return @intFromEnum(abi.goss_session_submit_audio(sessionFromHandle(session), @ptrCast(@alignCast(samples)), @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0)), timestamp_us));
 }
 
+/// state_buffer packs goss_world_state; planes_buffer and
+/// anchors_buffer pack their arrays; light_buffer the light estimate.
+export fn Java_com_gosslens_Gosslens_nativeSubmitWorld(env: *JniEnv, cls: jobject, session: i64, state_buffer: jobject, planes_buffer: jobject, plane_count: i32, anchors_buffer: jobject, anchor_count: i32, light_buffer: jobject) i32 {
+    _ = cls;
+    const state = getDirectBufferAddress(env, state_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const planes: ?[*]const abi.WorldPlane = if (plane_count > 0)
+        @ptrCast(@alignCast(getDirectBufferAddress(env, planes_buffer) orelse return @intFromEnum(abi.Status.invalid_argument)))
+    else
+        null;
+    const anchors: ?[*]const abi.WorldAnchor = if (anchor_count > 0)
+        @ptrCast(@alignCast(getDirectBufferAddress(env, anchors_buffer) orelse return @intFromEnum(abi.Status.invalid_argument)))
+    else
+        null;
+    const light: ?*const abi.WorldLight = if (getDirectBufferAddress(env, light_buffer)) |raw| @ptrCast(@alignCast(raw)) else null;
+    return @intFromEnum(abi.goss_session_submit_world(sessionFromHandle(session), @ptrCast(@alignCast(state)), planes, @intCast(@max(plane_count, 0)), anchors, @intCast(@max(anchor_count, 0)), light));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeRecordingStop(env: *JniEnv, cls: jobject, engine: i64) i32 {
     _ = env;
     _ = cls;

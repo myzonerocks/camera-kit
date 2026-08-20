@@ -21,6 +21,7 @@ object Gosslens {
     internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
+    internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
     internal external fun nativeSubmitAudio(session: Long, samplesBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Int
     internal external fun nativeRenderFrame(engine: Long, session: Long): Int
     internal external fun nativeSessionCreate(engine: Long, frameBudgetUs: Int): Long

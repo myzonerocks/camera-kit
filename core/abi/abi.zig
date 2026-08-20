@@ -64,7 +64,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 15;
+pub const abi_minor: u16 = 16;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -215,6 +215,19 @@ pub const Engine = struct {
     recording_window_target: ?render.Renderer.OffscreenTarget = null,
 };
 
+const WorldStore = struct {
+    state: WorldState = .{ .tracking_state = 0, .world_from_camera = identity16, .projection = identity16, .timestamp_us = 0 },
+    planes: [max_world_planes]WorldPlane = undefined,
+    plane_count: usize = 0,
+    anchors: [max_world_anchors]WorldAnchor = undefined,
+    anchor_count: usize = 0,
+    light: WorldLight = .{ .ambient_intensity = 0, .color_temperature_kelvin = 0 },
+    dropped_planes: u32 = 0,
+    dropped_anchors: u32 = 0,
+};
+
+const identity16 = [16]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+
 const RecordingSlot = struct {
     persistent: render.Renderer.PersistentTexture = .{},
     target: ?render.Renderer.OffscreenTarget = null,
@@ -241,6 +254,11 @@ pub const Session = struct {
     /// once fed, its level and beat outrank the host's tick value.
     audio: audio_analysis.Analysis = .{},
     audio_engine_fed: bool = false,
+    /// The platform's world understanding, fed by
+    /// goss_session_submit_world; once fed, its tracking state
+    /// outranks the host's tick value.
+    world: WorldStore = .{},
+    world_engine_fed: bool = false,
 
     engine: *Engine,
     controller: graph.DegradeController,
@@ -387,6 +405,8 @@ pub const Session = struct {
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
     model_face_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
+    /// model.gltf nodes anchored to the tracked world, by graph index.
+    model_world_anchors: std.AutoHashMapUnmanaged(graph.NodeIndex, void) = .empty,
     /// One background loader per currently-spliced model.gltf node
     /// still waiting on its .glb - mirrors lut_loaders/blend_loaders,
     /// one node type over.
@@ -971,6 +991,29 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 const elapsed_us = if (s.active_lens) |*lens| lens.modelElapsedUs(entry.graph_index) orelse 0 else 0;
                 const elapsed_seconds = @as(f32, @floatFromInt(elapsed_us)) / 1_000_000.0;
                 var model_matrix = if (loaded.animation) |*anim| anim.sample(elapsed_seconds) else math.Mat4.identity;
+                if (s.model_world_anchors.contains(entry.graph_index)) {
+                    // World-anchored content draws from the platform
+                    // camera's own view and projection, at world anchor
+                    // zero when one exists, else the world origin; no
+                    // tracking means the standard nothing-drawn state.
+                    if (s.world_engine_fed and s.world.state.tracking_state == 2) {
+                        const world_from_camera: math.Mat4 = .{ .cols = @bitCast(s.world.state.world_from_camera) };
+                        const projection: math.Mat4 = .{ .cols = @bitCast(s.world.state.projection) };
+                        const view = world_from_camera.inverseRigid();
+                        const anchor_pose: math.Mat4 = if (s.world.anchor_count > 0)
+                            .{ .cols = @bitCast(s.world.anchors[0].pose) }
+                        else
+                            math.Mat4.identity;
+                        r.submitModelWithCamera(blit_view, mesh_view, input_texture, loaded.mesh, anchor_pose.mul(model_matrix), view, projection, loaded.base_color);
+                    } else {
+                        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+                    }
+                    if (output) |target| {
+                        input_texture = target.texture;
+                        if (!is_final) next_slot += 1;
+                    }
+                    continue;
+                }
                 var anchored_without_face = false;
                 if (s.model_face_anchors.contains(entry.graph_index)) {
                     anchored_without_face = true;
@@ -1101,6 +1144,7 @@ pub fn destroySession(session: *Session) void {
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
     session.model_face_anchors.deinit(session.engine.gpa);
+    session.model_world_anchors.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -1589,6 +1633,57 @@ pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session,
     while (r.frame() < ready_frame) {}
 
     photo.encode(pixels, e.capture_width, e.capture_height, @enumFromInt(format), quality, data[0..out_capacity], len_out) catch return .invalid_argument;
+    return .ok;
+}
+
+pub const WorldState = extern struct {
+    tracking_state: u32,
+    world_from_camera: [16]f32,
+    projection: [16]f32,
+    timestamp_us: i64,
+};
+
+pub const WorldPlane = extern struct {
+    id: u64,
+    pose: [16]f32,
+    extent_x: f32,
+    extent_z: f32,
+    classification: u32,
+};
+
+pub const WorldAnchor = extern struct {
+    id: u64,
+    pose: [16]f32,
+};
+
+pub const WorldLight = extern struct {
+    ambient_intensity: f32,
+    color_temperature_kelvin: f32,
+};
+
+pub const max_world_planes = 32;
+pub const max_world_anchors = 32;
+
+/// Feeds the platform's world understanding into the session: drives
+/// the world.tracking_state signal and world-anchored lens content.
+/// Planes and anchors beyond the fixed capacity are dropped oldest
+/// last (the platform lists closest-first), counted, never silent.
+pub export fn goss_session_submit_world(session: ?*Session, state: ?*const WorldState, planes: ?[*]const WorldPlane, plane_count: usize, anchors: ?[*]const WorldAnchor, anchor_count: usize, light: ?*const WorldLight) Status {
+    const s = session orelse return .invalid_argument;
+    const st = state orelse return .invalid_argument;
+    if (st.tracking_state > 3) return .invalid_argument;
+    if (plane_count > 0 and planes == null) return .invalid_argument;
+    if (anchor_count > 0 and anchors == null) return .invalid_argument;
+
+    s.world.state = st.*;
+    s.world.plane_count = @min(plane_count, max_world_planes);
+    if (planes) |p| @memcpy(s.world.planes[0..s.world.plane_count], p[0..s.world.plane_count]);
+    s.world.dropped_planes +|= @intCast(plane_count -| max_world_planes);
+    s.world.anchor_count = @min(anchor_count, max_world_anchors);
+    if (anchors) |a| @memcpy(s.world.anchors[0..s.world.anchor_count], a[0..s.world.anchor_count]);
+    s.world.dropped_anchors +|= @intCast(anchor_count -| max_world_anchors);
+    if (light) |l| s.world.light = l.*;
+    s.world_engine_fed = true;
     return .ok;
 }
 
@@ -2263,6 +2358,7 @@ fn destroyBlendState(session: *Session) void {
 
 fn destroyMeshFaceState(session: *Session) void {
     session.model_face_anchors.clearRetainingCapacity();
+    session.model_world_anchors.clearRetainingCapacity();
     var loader_it = session.mesh_face_loaders.valueIterator();
     while (loader_it.next()) |loader| loader.*.deinit();
     session.mesh_face_loaders.clearRetainingCapacity();
@@ -2510,6 +2606,9 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         if (model.face_anchor) {
             session.model_face_anchors.put(gpa, model.graph_index, {}) catch {};
         }
+        if (model.world_anchor) {
+            session.model_world_anchors.put(gpa, model.graph_index, {}) catch {};
+        }
         const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.glb", .{ bundle_path, model.model_stem }) catch continue;
         defer gpa.free(path);
         const loader = asset.ModelLoader.start(gpa, path) catch continue;
@@ -2627,6 +2726,9 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.audio_engine_fed) {
         live_signals.audio_level = s.audio.level;
         live_signals.audio_beat = s.audio.beat;
+    }
+    if (s.world_engine_fed) {
+        live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
     }
     const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
     applyLensEffects(s, effects);

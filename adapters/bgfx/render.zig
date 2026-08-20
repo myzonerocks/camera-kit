@@ -986,6 +986,21 @@ pub const Renderer = struct {
         c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// submitModel with the platform camera's own view and projection -
+    /// world-anchored content renders from where the device actually
+    /// is, not from the fixed content camera.
+    pub fn submitModelWithCamera(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, model_matrix: math.Mat4, view: math.Mat4, projection: math.Mat4, base_color: [4]f32) void {
+        r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
+
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &projection.cols);
+        _ = c.bgfx_set_transform(&model_matrix.cols, 1);
+        c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
+        c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
+        c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// The stated CPU path: copies NV12 planes into two cached updatable
     /// textures, recreated only when the size changes. The row copies go
     /// through bgfx's frame allocator, freed after submission; the cache
