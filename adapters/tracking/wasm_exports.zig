@@ -11,6 +11,7 @@ const detector = @import("detector");
 const sampler = @import("sampler");
 const face = @import("face");
 const tracker = @import("tracker");
+const segmentation_core = @import("segmentation_core");
 
 const gpa = std.heap.wasm_allocator;
 
@@ -241,4 +242,55 @@ fn publishEmpty(tracking: *Instance, timestamp_us: i64) void {
     tracking.result.frame_serial = tracking.serial;
     tracking.result.timestamp_us = timestamp_us;
     tracking.has_result = true;
+}
+
+// The selfie/hair segmenter, same shape: one Core per create, RGBA frames
+// in, a 256x256 mask out. The embedder allocates the model and the mask
+// buffer with goss_tracking_alloc/free.
+
+pub export fn goss_segmentation_mask_side() u32 {
+    return segmentation_core.mask_side;
+}
+
+pub export fn goss_segmentation_create(model_ptr: ?[*]const u8, model_len: usize, threads: i32) ?*segmentation_core.Core {
+    const model = model_ptr orelse return null;
+    if (model_len == 0) return null;
+    return segmentation_core.Core.init(gpa, model[0..model_len], threads) catch null;
+}
+
+pub export fn goss_segmentation_destroy(core: ?*segmentation_core.Core) void {
+    if (core) |c| c.deinit();
+}
+
+pub export fn goss_segmentation_class_count(core: ?*segmentation_core.Core) u32 {
+    const c = core orelse return 0;
+    return c.class_count;
+}
+
+pub export fn goss_segmentation_process(core: ?*segmentation_core.Core, rgba: ?[*]const u8, width: u32, height: u32) i32 {
+    const c = core orelse return status_invalid;
+    const pixels = rgba orelse return status_invalid;
+    if (width == 0 or height == 0) return status_invalid;
+    const frame: sampler.Frame = .{
+        .width = width,
+        .height = height,
+        .pixels = .{ .rgba8 = pixels[0 .. @as(usize, width) * height * 4] },
+    };
+    if (!c.compute(frame)) return status_invalid;
+    c.publish();
+    return status_ok;
+}
+
+pub export fn goss_segmentation_read_mask(core: ?*segmentation_core.Core, out: ?[*]f32) i32 {
+    const c = core orelse return status_invalid;
+    const dst = out orelse return status_invalid;
+    if (!c.subjectMask(@ptrCast(dst))) return status_again;
+    return status_ok;
+}
+
+pub export fn goss_segmentation_read_class_mask(core: ?*segmentation_core.Core, class_index: u32, out: ?[*]f32) i32 {
+    const c = core orelse return status_invalid;
+    const dst = out orelse return status_invalid;
+    if (!c.classMask(class_index, @ptrCast(dst))) return status_again;
+    return status_ok;
 }

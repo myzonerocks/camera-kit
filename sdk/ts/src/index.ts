@@ -97,6 +97,7 @@ const FRAME_ROTATION_SHIFT = 8;
 const LENS_SIGNALS_BYTES = 232;
 const FACE_BLENDSHAPE_COUNT = 52;
 export const FACE_LANDMARK_COUNT = 478;
+export const SEGMENTATION_MASK_SIDE = 256;
 
 export type CaptureState = "idle" | "running" | "denied" | "failed" | "interrupted";
 
@@ -511,6 +512,8 @@ export class Session {
   private readonly landmarksPtr: number;
   /// Fixed layout, reused every tick like the frame descriptor.
   private readonly signalsPtr: number;
+  /// Fixed capacity: the segmentation mask is always mask_side squared.
+  private readonly segmentationMaskPtr: number;
 
   private constructor(
     private readonly mod: EngineModule,
@@ -519,6 +522,7 @@ export class Session {
     this.frameDescPtr = mod.ccall("goss_alloc", "number", ["number"], [32]);
     this.landmarksPtr = mod.ccall("goss_alloc", "number", ["number"], [FACE_LANDMARK_COUNT * 3 * 4]);
     this.signalsPtr = mod.ccall("goss_alloc", "number", ["number"], [LENS_SIGNALS_BYTES]);
+    this.segmentationMaskPtr = mod.ccall("goss_alloc", "number", ["number"], [SEGMENTATION_MASK_SIDE * SEGMENTATION_MASK_SIDE * 4]);
   }
 
   static create(engine: Engine, config?: SessionConfig): Session {
@@ -668,6 +672,24 @@ export class Session {
       "number",
       ["number", "number", "number"],
       [this.handle, this.landmarksPtr, pointCount],
+    );
+  }
+
+  /// Feeds a segmentation mask (SEGMENTATION_MASK_SIDE squared floats,
+  /// from a Segmenter) into the session as the subject texture the blend
+  /// and mask channels sample. Null clears it (no subject this frame).
+  setSegmentationMask(mask: Float32Array | null): void {
+    const count = SEGMENTATION_MASK_SIDE * SEGMENTATION_MASK_SIDE;
+    if (!mask || mask.length < count) {
+      this.mod.ccall("goss_session_set_segmentation_mask", "number", ["number", "number", "number"], [this.handle, 0, 0]);
+      return;
+    }
+    this.mod.HEAPF32.set(mask.subarray(0, count), this.segmentationMaskPtr >> 2);
+    this.mod.ccall(
+      "goss_session_set_segmentation_mask",
+      "number",
+      ["number", "number", "number"],
+      [this.handle, this.segmentationMaskPtr, count],
     );
   }
 

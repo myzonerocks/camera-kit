@@ -175,3 +175,77 @@ export class FaceTracker {
     this.exports.goss_tracking_free(this.resultPtr, this.exports.goss_tracking_result_size());
   }
 }
+
+export const SEGMENTATION_MASK_SIDE = 256;
+
+interface SegmentationExports {
+  memory: WebAssembly.Memory;
+  goss_tracking_alloc(size: number): number;
+  goss_tracking_free(ptr: number, size: number): void;
+  goss_segmentation_mask_side(): number;
+  goss_segmentation_create(modelPtr: number, modelLen: number, threads: number): number;
+  goss_segmentation_destroy(core: number): void;
+  goss_segmentation_process(core: number, rgba: number, width: number, height: number): number;
+  goss_segmentation_read_mask(core: number, out: number): number;
+}
+
+/// The web segmenter: the same wasm module's segmentation core, run in a
+/// Worker. A single .tflite model in, a mask_side x mask_side subject mask
+/// out. Feed the mask to a session with setSegmentationMask.
+export class Segmenter {
+  private constructor(
+    private exports: SegmentationExports,
+    private core: number,
+    private maskPtr: number,
+    private maskSide: number,
+    private framePtr: number,
+    private frameCapacity: number,
+  ) {}
+
+  static async create(moduleBytes: ArrayBuffer, modelBytes: Uint8Array): Promise<Segmenter> {
+    let memory: WebAssembly.Memory | undefined;
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {
+      wasi_snapshot_preview1: totalWasi(() => memory!),
+    });
+    const exports = instance.exports as unknown as SegmentationExports;
+    memory = exports.memory;
+
+    const modelPtr = exports.goss_tracking_alloc(modelBytes.length);
+    if (modelPtr === 0) throw new Error("segmentation module allocation failed");
+    new Uint8Array(exports.memory.buffer, modelPtr, modelBytes.length).set(modelBytes);
+    const core = exports.goss_segmentation_create(modelPtr, modelBytes.length, 1);
+    exports.goss_tracking_free(modelPtr, modelBytes.length);
+    if (core === 0) throw new Error("segmentation model rejected");
+
+    const side = exports.goss_segmentation_mask_side();
+    const maskPtr = exports.goss_tracking_alloc(side * side * 4);
+    if (maskPtr === 0) throw new Error("segmentation module allocation failed");
+    return new Segmenter(exports, core, maskPtr, side, 0, 0);
+  }
+
+  /** Runs the segmenter over one RGBA frame; returns the subject mask
+   * (mask_side x mask_side floats), or null before the first result. */
+  process(rgba: Uint8Array, width: number, height: number): Float32Array | null {
+    const needed = width * height * 4;
+    if (rgba.length < needed) throw new Error("frame shorter than its dimensions");
+    if (this.frameCapacity < needed) {
+      if (this.framePtr !== 0) this.exports.goss_tracking_free(this.framePtr, this.frameCapacity);
+      this.framePtr = this.exports.goss_tracking_alloc(needed);
+      if (this.framePtr === 0) throw new Error("segmentation module allocation failed");
+      this.frameCapacity = needed;
+    }
+    new Uint8Array(this.exports.memory.buffer, this.framePtr, needed).set(rgba.subarray(0, needed));
+    if (this.exports.goss_segmentation_process(this.core, this.framePtr, width, height) !== 0) {
+      throw new Error("segmentation process refused the frame");
+    }
+    if (this.exports.goss_segmentation_read_mask(this.core, this.maskPtr) !== 0) return null;
+    const count = this.maskSide * this.maskSide;
+    return new Float32Array(this.exports.memory.buffer, this.maskPtr, count).slice(0, count);
+  }
+
+  destroy(): void {
+    this.exports.goss_segmentation_destroy(this.core);
+    if (this.framePtr !== 0) this.exports.goss_tracking_free(this.framePtr, this.frameCapacity);
+    this.exports.goss_tracking_free(this.maskPtr, this.maskSide * this.maskSide * 4);
+  }
+}

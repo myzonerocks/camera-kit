@@ -615,15 +615,24 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "math", .module = math_module },
             },
         });
-        const segmentation_module = b.createModule(.{
-            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+        const segmentation_core_module = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation_core.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "runtime", .module = runtime_module },
                 .{ .name = "sampler", .module = sampler_module },
-                .{ .name = "math", .module = math_module },
                 .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_module },
+            },
+        });
+        const segmentation_module = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sampler", .module = sampler_module },
+                .{ .name = "math", .module = math_module },
+                .{ .name = "segmentation_core", .module = segmentation_core_module },
             },
         });
         const beauty_real_module = b.createModule(.{
@@ -754,6 +763,34 @@ pub fn build(b: *std.Build) void {
         });
         runtime_wasi.link_libc = true;
         runtime_wasi.addIncludePath(b.path(".vendor/litert"));
+        // The segmentation core the web module drives directly: runtime,
+        // sampler, and the custom upsample op the segmenters need.
+        const segment_wasi = b.createModule(.{
+            .root_source_file = b.path("core/tracking/segment.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+        });
+        const transpose_conv_bias_wasi = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/transpose_conv_bias.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_wasi },
+                .{ .name = "segment", .module = segment_wasi },
+            },
+        });
+        transpose_conv_bias_wasi.link_libc = true;
+        transpose_conv_bias_wasi.addIncludePath(b.path(".vendor/litert"));
+        const segmentation_core_wasi = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation_core.zig"),
+            .target = wasi_target,
+            .optimize = wasi_optimize,
+            .imports = &.{
+                .{ .name = "runtime", .module = runtime_wasi },
+                .{ .name = "sampler", .module = cores_wasi.sampler },
+                .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_wasi },
+            },
+        });
         const exports_wasi = b.createModule(.{
             .root_source_file = b.path("adapters/tracking/wasm_exports.zig"),
             .target = wasi_target,
@@ -765,6 +802,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sampler", .module = cores_wasi.sampler },
                 .{ .name = "face", .module = cores_wasi.face },
                 .{ .name = "tracker", .module = cores_wasi.tracker },
+                .{ .name = "segmentation_core", .module = segmentation_core_wasi },
             },
         });
         exports_wasi.linkLibrary(buildTfliteLib(b, wasi_target, wasi_optimize, flatc_exe.?, null));
@@ -1066,15 +1104,24 @@ pub fn build(b: *std.Build) void {
                     .{ .name = "math", .module = math_module },
                 },
             });
-            const segmentation_conformance = b.createModule(.{
-                .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            const segmentation_core_conformance = b.createModule(.{
+                .root_source_file = b.path("adapters/tracking/segmentation_core.zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "runtime", .module = runtime_conformance },
                     .{ .name = "sampler", .module = sampler_module },
-                    .{ .name = "math", .module = math_module },
                     .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_conformance },
+                },
+            });
+            const segmentation_conformance = b.createModule(.{
+                .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "sampler", .module = sampler_module },
+                    .{ .name = "math", .module = math_module },
+                    .{ .name = "segmentation_core", .module = segmentation_core_conformance },
                 },
             });
             const beauty_conformance = b.createModule(.{
@@ -1360,15 +1407,24 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         });
         transpose_conv_bias_android.link_libc = true;
         transpose_conv_bias_android.addIncludePath(b.path(".vendor/litert"));
-        const segmentation_android = b.createModule(.{
-            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+        const segmentation_core_android = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation_core.zig"),
             .target = android_target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "runtime", .module = runtime_android },
                 .{ .name = "sampler", .module = tracking_cores_android.sampler },
-                .{ .name = "math", .module = math_android },
                 .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_android },
+            },
+        });
+        const segmentation_android = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = android_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sampler", .module = tracking_cores_android.sampler },
+                .{ .name = "math", .module = math_android },
+                .{ .name = "segmentation_core", .module = segmentation_core_android },
             },
         });
         abi_android.addImport("segmentation", segmentation_android);
@@ -3273,15 +3329,24 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         });
         transpose_conv_bias_ios.link_libc = true;
         transpose_conv_bias_ios.addIncludePath(b.path(".vendor/litert"));
-        const segmentation_ios = b.createModule(.{
-            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+        const segmentation_core_ios = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation_core.zig"),
             .target = ios_target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "runtime", .module = runtime_ios },
                 .{ .name = "sampler", .module = tracking_cores_ios.sampler },
-                .{ .name = "math", .module = math_ios },
                 .{ .name = "transpose_conv_bias", .module = transpose_conv_bias_ios },
+            },
+        });
+        const segmentation_ios = b.createModule(.{
+            .root_source_file = b.path("adapters/tracking/segmentation.zig"),
+            .target = ios_target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sampler", .module = tracking_cores_ios.sampler },
+                .{ .name = "math", .module = math_ios },
+                .{ .name = "segmentation_core", .module = segmentation_core_ios },
             },
         });
         abi_ios.addImport("segmentation", segmentation_ios);

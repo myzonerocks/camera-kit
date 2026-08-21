@@ -497,6 +497,12 @@ goss_status goss_session_set_beauty_makeup_texture(goss_session *session, int32_
  * effects instead. */
 goss_status goss_session_set_face_landmarks(goss_session *session, const float *points, uint32_t point_count);
 
+/* Web analysis-producer path: feeds a segmentation mask the web tracking
+ * module computed into the session as the subject texture the blend and
+ * mask channels sample. mask_len is mask_side * mask_side floats; zero
+ * clears it. Unsupported off the web, where the in-engine worker runs. */
+goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len);
+
 /* Graph thread. The CPU-copy path for a single-plane BGRA8/RGBA8 frame -
  * a canvas or video element's own byte buffer, with no native GPU handle
  * behind it the way goss_session_submit_frame's zero-copy path needs. Same
