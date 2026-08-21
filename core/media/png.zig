@@ -112,7 +112,129 @@ pub fn encodeRgbaOpts(gpa: std.mem.Allocator, out: *std.ArrayList(u8), pixels: [
     try writeChunk(out, gpa, "IEND", &.{});
 }
 
+/// Streams a PNG a horizontal band at a time, so a huge tiled capture
+/// holds only one band, not the whole raw frame. The up filter carries
+/// its previous row across bands and the deflate stream is continuous, so
+/// the bytes match encodeRgbaOpts. Init in place (see begin).
+pub const StreamEncoder = struct {
+    gpa: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    compressed: std.Io.Writer.Allocating,
+    compress: std.compress.flate.Compress,
+    window: []u8,
+    filt: []u8,
+    prev: []u8,
+    wide: []u8,
+    src_row: usize,
+    row_bytes: usize,
+    bit_depth: u8,
+    started: bool,
+
+    pub fn begin(self: *StreamEncoder, gpa: std.mem.Allocator, out: *std.ArrayList(u8), width: u32, height: u32, opts: EncodeOptions) !void {
+        if (width == 0 or height == 0) return error.EmptyImage;
+        if (opts.bit_depth != 8 and opts.bit_depth != 16) return error.Unsupported;
+        const src_row = @as(usize, width) * 4;
+        const bytes_per_sample: usize = if (opts.bit_depth == 16) 2 else 1;
+        const row_bytes = src_row * bytes_per_sample;
+
+        try out.appendSlice(gpa, &png_signature);
+        var ihdr: [13]u8 = undefined;
+        std.mem.writeInt(u32, ihdr[0..4], width, .big);
+        std.mem.writeInt(u32, ihdr[4..8], height, .big);
+        ihdr[8] = opts.bit_depth;
+        ihdr[9] = 6;
+        ihdr[10] = 0;
+        ihdr[11] = 0;
+        ihdr[12] = 0;
+        try writeChunk(out, gpa, "IHDR", &ihdr);
+        if (opts.color.srgb) {
+            try writeChunk(out, gpa, "sRGB", &.{0});
+        } else {
+            if (opts.color.chrm) |chrm| try writeChunk(out, gpa, "cHRM", &chrm);
+            if (opts.color.gama) |gama| try writeChunk(out, gpa, "gAMA", &gama);
+        }
+
+        self.gpa = gpa;
+        self.out = out;
+        self.src_row = src_row;
+        self.row_bytes = row_bytes;
+        self.bit_depth = opts.bit_depth;
+        self.started = false;
+        self.compressed = try .initCapacity(gpa, 4096);
+        errdefer self.compressed.deinit();
+        self.window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+        errdefer gpa.free(self.window);
+        self.filt = try gpa.alloc(u8, row_bytes + 1);
+        errdefer gpa.free(self.filt);
+        self.prev = try gpa.alloc(u8, row_bytes);
+        errdefer gpa.free(self.prev);
+        self.wide = if (opts.bit_depth == 16) try gpa.alloc(u8, row_bytes) else &.{};
+        self.compress = try std.compress.flate.Compress.init(&self.compressed.writer, self.window, .zlib, .level_6);
+    }
+
+    /// Filters and compresses `band_height` rows of tightly packed RGBA8.
+    pub fn writeBand(self: *StreamEncoder, pixels: []const u8, band_height: u32) !void {
+        if (pixels.len != self.src_row * band_height) return error.SizeMismatch;
+        var y: u32 = 0;
+        while (y < band_height) : (y += 1) {
+            const src = pixels[@as(usize, y) * self.src_row ..][0..self.src_row];
+            // The output row: widened big-endian samples at 16-bit, else
+            // the source bytes directly.
+            const row: []const u8 = if (self.bit_depth == 16) blk: {
+                for (src, 0..) |b, i| {
+                    self.wide[i * 2] = b;
+                    self.wide[i * 2 + 1] = b;
+                }
+                break :blk self.wide;
+            } else src;
+            self.filt[0] = 2; // up filter
+            if (!self.started) {
+                @memcpy(self.filt[1..], row);
+                self.started = true;
+            } else {
+                for (row, self.prev, self.filt[1..]) |cur, up, *b| b.* = cur -% up;
+            }
+            @memcpy(self.prev, row);
+            try self.compress.writer.writeAll(self.filt);
+        }
+    }
+
+    pub fn finish(self: *StreamEncoder) !void {
+        try self.compress.finish();
+        try writeChunk(self.out, self.gpa, "IDAT", self.compressed.written());
+        try writeChunk(self.out, self.gpa, "IEND", &.{});
+    }
+
+    pub fn deinit(self: *StreamEncoder) void {
+        self.compressed.deinit();
+        self.gpa.free(self.window);
+        self.gpa.free(self.filt);
+        self.gpa.free(self.prev);
+        if (self.wide.len > 0) self.gpa.free(self.wide);
+    }
+};
+
 const t = std.testing;
+
+test "streaming in bands matches the one-shot encode byte for byte" {
+    const w: u32 = 6;
+    const h: u32 = 5;
+    var pixels: [6 * 5 * 4]u8 = undefined;
+    for (&pixels, 0..) |*p, i| p.* = @intCast((i * 7) & 0xFF);
+    var one: std.ArrayList(u8) = .empty;
+    defer one.deinit(t.allocator);
+    try encodeRgbaOpts(t.allocator, &one, &pixels, w, h, .{});
+    // Stream the same pixels in a 2-row band then a 3-row band.
+    var streamed: std.ArrayList(u8) = .empty;
+    defer streamed.deinit(t.allocator);
+    var enc: StreamEncoder = undefined;
+    try enc.begin(t.allocator, &streamed, w, h, .{});
+    defer enc.deinit();
+    try enc.writeBand(pixels[0 .. 2 * w * 4], 2);
+    try enc.writeBand(pixels[2 * w * 4 ..], 3);
+    try enc.finish();
+    try t.expectEqualSlices(u8, one.items, streamed.items);
+}
 
 test "a known 2x2 image round-trips through the std decoder-free checks" {
     // Without a decoder in std, assert the structural invariants: the
