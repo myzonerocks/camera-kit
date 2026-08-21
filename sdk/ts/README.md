@@ -9,6 +9,10 @@ This SDK owns camera capture through `getUserMedia`, the render loop,
 and decoding the PNGs the core has no decoder for. The frame graph, lens
 runtime, and effect pipeline live in the core.
 
+[docs/INTEGRATION-WEB.md](../../docs/INTEGRATION-WEB.md) is the start-to-finish
+guide: build and host the wasm and model assets, the render loop, and the
+tracking worker.
+
 ## Install
 
 ```json

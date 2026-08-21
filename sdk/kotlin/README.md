@@ -9,6 +9,10 @@ This SDK owns capture ingress, GPU surface handoff, and platform
 tracking. The frame graph, lens runtime, and effect pipeline live in the
 core.
 
+[docs/INTEGRATION-ANDROID.md](../../docs/INTEGRATION-ANDROID.md) is the
+start-to-finish guide: build the native library, add the SDK as an included
+build, and the minimal render loop.
+
 ## Install
 
 Building against a checkout of this repository:
