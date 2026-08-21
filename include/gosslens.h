@@ -281,8 +281,9 @@ goss_status goss_engine_capture_frame(goss_engine *engine, goss_session *session
 
 /* The supported per-frame composited output for a live broadcast source (a
  * LiveKit/WebRTC custom video source), read back in a WebRTC format so the
- * caller publishes it with no swizzle. format is GOSS_PIXEL_RGBA8 or BGRA8;
- * out_data holds out_width * out_height * 4. The blessed live path, not debug. */
+ * caller publishes it with no swizzle. format is GOSS_PIXEL_RGBA8, BGRA8, or
+ * NV12 (BT.709 video range); out_data holds width*height*4 for the packed
+ * formats or width*height*3/2 for NV12. The blessed live path, not debug. */
 goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height);
 
 /* Captures the composited frame and encodes it as a PNG into out_data.

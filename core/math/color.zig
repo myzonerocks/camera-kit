@@ -95,6 +95,55 @@ pub fn rgbToYuv(standard: Standard, range: Range) Conversion {
     return .{ .matrix = inv, .offset = inv.mulVec(-fwd.offset) };
 }
 
+fn encodeSample(v: f32) u8 {
+    return @intFromFloat(std.math.clamp(@round(v * 255.0), 0.0, 255.0));
+}
+
+/// Packs a tightly-strided RGBA8 image into NV12: a full-resolution Y plane
+/// then an interleaved half-resolution Cb,Cr plane. The exact encode mirror
+/// of sampler.sampleNv12 - same (w+1)/2 geometry, same Conversion - so a
+/// round trip through the decoder reproduces the input. Chroma box-averages.
+pub fn rgbaToNv12(rgba: []const u8, width: usize, height: usize, conv: Conversion, y_out: []u8, uv_out: []u8) void {
+    const half_w = (width + 1) / 2;
+    const half_h = (height + 1) / 2;
+    for (0..height) |yy| {
+        for (0..width) |xx| {
+            const p = (yy * width + xx) * 4;
+            const rgb: Vec3 = .{
+                @as(f32, @floatFromInt(rgba[p])) / 255.0,
+                @as(f32, @floatFromInt(rgba[p + 1])) / 255.0,
+                @as(f32, @floatFromInt(rgba[p + 2])) / 255.0,
+            };
+            y_out[yy * width + xx] = encodeSample(conv.apply(rgb)[0]);
+        }
+    }
+    for (0..half_h) |by| {
+        for (0..half_w) |bx| {
+            var acc: Vec3 = .{ 0, 0, 0 };
+            var n: f32 = 0;
+            for (0..2) |dy| {
+                const sy = by * 2 + dy;
+                if (sy >= height) continue;
+                for (0..2) |dx| {
+                    const sx = bx * 2 + dx;
+                    if (sx >= width) continue;
+                    const p = (sy * width + sx) * 4;
+                    acc += Vec3{
+                        @as(f32, @floatFromInt(rgba[p])) / 255.0,
+                        @as(f32, @floatFromInt(rgba[p + 1])) / 255.0,
+                        @as(f32, @floatFromInt(rgba[p + 2])) / 255.0,
+                    };
+                    n += 1;
+                }
+            }
+            const yuv = conv.apply(acc / @as(Vec3, @splat(n)));
+            const o = (by * half_w + bx) * 2;
+            uv_out[o] = encodeSample(yuv[1]);
+            uv_out[o + 1] = encodeSample(yuv[2]);
+        }
+    }
+}
+
 test "video-range black and white anchor points" {
     inline for (.{ Standard.bt601, Standard.bt709, Standard.bt2020 }) |standard| {
         const conv = yuvToRgb(standard, .video);
@@ -139,4 +188,38 @@ test "round-trip through both directions is identity" {
             }
         }
     }
+}
+
+test "rgbaToNv12 encodes bt709 video-range anchors" {
+    const conv = rgbToYuv(.bt709, .video);
+    var y: [4]u8 = undefined;
+    var uv: [2]u8 = undefined;
+
+    // Solid white: video-range luma 235, neutral chroma 128.
+    const white = [_]u8{ 255, 255, 255, 255 } ** 4;
+    rgbaToNv12(&white, 2, 2, conv, &y, &uv);
+    for (y) |v| try std.testing.expectEqual(@as(u8, 235), v);
+    try std.testing.expect(@abs(@as(i32, uv[0]) - 128) <= 1);
+    try std.testing.expect(@abs(@as(i32, uv[1]) - 128) <= 1);
+
+    // Solid red: BT.709 video range is roughly Y 63, Cb 102, Cr 240.
+    const red = [_]u8{ 255, 0, 0, 255 } ** 4;
+    rgbaToNv12(&red, 2, 2, conv, &y, &uv);
+    try std.testing.expect(@abs(@as(i32, y[0]) - 63) <= 1);
+    try std.testing.expect(@abs(@as(i32, uv[0]) - 102) <= 1);
+    try std.testing.expect(@abs(@as(i32, uv[1]) - 240) <= 1);
+}
+
+test "rgbaToNv12 box-averages chroma across a 2x2 block" {
+    const conv = rgbToYuv(.bt709, .video);
+    // Two red pixels, two black - the averaged chroma sits between neutral
+    // and full red, proving the 2x2 downsample rather than a corner sample.
+    const px = [_]u8{
+        255, 0, 0, 255, 0, 0, 0, 255,
+        0, 0, 0, 255, 255, 0, 0, 255,
+    };
+    var y: [4]u8 = undefined;
+    var uv: [2]u8 = undefined;
+    rgbaToNv12(&px, 2, 2, conv, &y, &uv);
+    try std.testing.expect(uv[1] > 128 and uv[1] < 240);
 }

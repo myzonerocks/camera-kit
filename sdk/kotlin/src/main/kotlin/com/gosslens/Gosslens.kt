@@ -217,14 +217,15 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         return encoded
     }
 
-    /** The composited frame in a WebRTC format (BGRA8 = 3 by default), the
-     * supported per-frame output for a live broadcast source. width and height
-     * are the render size; returns width * height * 4 packed bytes, or null
-     * when the renderer is away. Feed it to a LiveKit custom video source. */
+    /** The composited frame in a WebRTC format (BGRA8 = 3 by default, NV12 = 0
+     * for a hardware encoder), the supported per-frame output for a live
+     * broadcast source. width and height are the render size; returns the
+     * packed frame bytes, or null when the renderer is away. */
     fun captureLiveFrame(session: GossSession?, width: Int, height: Int, format: Int = 3): ByteArray? {
         if (width <= 0 || height <= 0) return null
         val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
-        val capacity = width.toLong() * height * 4
+        val pixels = width.toLong() * height
+        val capacity = if (format == 0) pixels + pixels / 2 else pixels * 4
         val data = ByteBuffer.allocateDirect(capacity.toInt())
         if (Gosslens.nativeCaptureLiveFrame(handle, session?.handle ?: 0L, format, data, capacity, info) != 0) return null
         val frame = ByteArray(capacity.toInt())
