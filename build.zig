@@ -3244,9 +3244,24 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
-    abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, true));
-    abi_ios.addImport("script", scriptModule(b, ios_target, optimize, true));
-    abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, true));
+    // Physics, scripting and audio follow their vendor the same way the host
+    // build does, so hiding a vendor turns that subsystem into its stub
+    // instead of leaving an empty library target that fails to link.
+    const have_jolt_ios = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
+        break :blk true;
+    };
+    const have_quickjs_ios = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/quickjs-ng/quickjs.h", .{}) catch break :blk false;
+        break :blk true;
+    };
+    const have_miniaudio_ios = blk: {
+        b.build_root.handle.access(b.graph.io, ".vendor/miniaudio/miniaudio.h", .{}) catch break :blk false;
+        break :blk true;
+    };
+    abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, have_jolt_ios));
+    abi_ios.addImport("script", scriptModule(b, ios_target, optimize, have_quickjs_ios));
+    abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, have_miniaudio_ios));
     abi_ios.addImport("particles", particlesModule(b, ios_target, optimize));
     const lens_manifest_ios = b.createModule(.{
         .root_source_file = b.path("core/lens/manifest.zig"),
@@ -3416,8 +3431,8 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     // same way angle links into gpupixel; install them beside it so a consumer
     // links a complete set instead of two archives stranded in the cache. Zig
     // dedupes these against the compiles the script and physics modules linked.
-    device_libs.append(b.allocator, buildQuickjsLib(b, ios_target, optimize)) catch @panic("oom");
-    device_libs.append(b.allocator, buildJoltLib(b, ios_target, optimize)) catch @panic("oom");
+    if (have_quickjs_ios) device_libs.append(b.allocator, buildQuickjsLib(b, ios_target, optimize)) catch @panic("oom");
+    if (have_jolt_ios) device_libs.append(b.allocator, buildJoltLib(b, ios_target, optimize)) catch @panic("oom");
     // Apple's linker requires 8-byte archive member alignment; the system
     // ranlib rewrites zig's archives into the accepted layout.
     for (device_libs.items) |lib| {
