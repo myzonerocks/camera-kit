@@ -292,6 +292,18 @@ async function run(): Promise<void> {
   blushSlider?.addEventListener("input", () => {
     preview.setBlush(Number(blushSlider.value));
   });
+
+  // The asset-free post-effect lenses run straight from json (no bundle
+  // directory), so the buttons swap them in as a live filter over the camera.
+  const filterLenses: Record<string, string> = {
+    blur: '{"glf":"1.0","id":"goss.demo.blur","version":"1.0.0","display_name":"Blur","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"b","type":"blur.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[]}',
+    grade: '{"glf":"1.0","id":"goss.demo.grade","version":"1.0.0","display_name":"Grade","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"g","type":"grade.pass","inputs":{"frame":"camera"},"params":{},"grade":{"exposure":0.12,"contrast":1.15,"saturation":1.2,"temperature":0.06}}],"triggers":[]}',
+    bloom: '{"glf":"1.0","id":"goss.demo.bloom","version":"1.0.0","display_name":"Bloom","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"m","type":"bloom.pass","inputs":{"frame":"camera"},"params":{},"bloom":{"threshold":0.6,"intensity":0.8}}],"triggers":[]}',
+  };
+  document.getElementById("filter-none")?.addEventListener("click", () => preview.deactivateLens());
+  for (const name of ["blur", "grade", "bloom"]) {
+    document.getElementById(`filter-${name}`)?.addEventListener("click", () => preview.activateLens(filterLenses[name]));
+  }
   (window as unknown as Record<string, unknown>).setBlush = (value: number) => {
     preview.setBlush(value);
   };
