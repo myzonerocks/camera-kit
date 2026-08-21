@@ -1272,7 +1272,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
-    abi_android.addImport("physics", physicsModule(b, android_target, optimize, false));
+    abi_android.addImport("physics", physicsModule(b, android_target, optimize, true));
     abi_android.addImport("script", scriptModule(b, android_target, optimize, true));
     abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, true));
     abi_android.addImport("particles", particlesModule(b, android_target, optimize));
@@ -1494,6 +1494,7 @@ fn physicsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     if (real) {
         module.link_libcpp = true;
         module.addIncludePath(b.path(".vendor/jolt"));
+        addCTargetSysroot(b, module, target);
         module.addCSourceFile(.{
             .file = b.path("adapters/physics/jolt_shim.cpp"),
             .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-DJPH_USE_CPU_COMPUTE" },
@@ -2301,6 +2302,7 @@ fn buildJoltLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     module.link_libc = true;
     module.link_libcpp = true;
     module.addIncludePath(b.path(".vendor/jolt"));
+    addCTargetSysroot(b, module, target);
     var sources: std.ArrayList([]const u8) = .empty;
     listFilesRecursive(b, ".vendor/jolt/Jolt", ".cpp", &.{}, &sources);
     std.mem.sort([]const u8, sources.items, {}, struct {
@@ -3172,7 +3174,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
-    abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, false));
+    abi_ios.addImport("physics", physicsModule(b, ios_target, optimize, true));
     abi_ios.addImport("script", scriptModule(b, ios_target, optimize, true));
     abi_ios.addImport("audio_playback", audioPlaybackModule(b, ios_target, optimize, true));
     abi_ios.addImport("particles", particlesModule(b, ios_target, optimize));
