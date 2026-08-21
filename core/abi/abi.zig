@@ -320,6 +320,10 @@ pub const Session = struct {
     /// size and the final full-screen pass samples only this tile's UV
     /// span, so the tiles stitch byte-identical to a single full render.
     capture_tile: ?render.Renderer.Tile = null,
+    /// The full capture's aspect ratio, so a tiled 3D draw builds its
+    /// perspective from the whole frame (the scene's aspect never changes
+    /// per tile) and the sub-frustum crop selects the tile's slice.
+    capture_aspect: f32 = 0,
     /// Overrides the tile size a still capture splits at; zero uses the
     /// 16384 texture-size floor. Only conformance sets it, to force
     /// tiling at a small resolution and prove the stitch is byte-identical.
@@ -889,6 +893,13 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
 /// blend.pass node whose background HAS landed but segmentation is
 /// unavailable still draws, against the renderer's always-foreground
 /// default mask.
+/// A 3D draw's aspect: the whole capture's when tiling (the scene keeps
+/// its shape across the sub-frustum tiles), else the target rect's own.
+fn tiledAspect(s: *Session, rect_w: u16, rect_h: u16) f32 {
+    if (s.capture_tile != null and s.capture_aspect > 0) return s.capture_aspect;
+    return @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
+}
+
 fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: CurrentFrame, rotation: u32, mirror: bool) !void {
     // The tile is set per final full-screen pass below; every source-res
     // intermediate draw and every non-capture frame renders untiled.
@@ -1191,8 +1202,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             } else |_| {}
                         }
                     }
-                    const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
+                    const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
                     const sprite_texture = s.particle_sprite_textures.get(entry.graph_index) orelse r.defaultSpriteTexture();
+                    // The final pass draws into the capture target, so a tile
+                    // crops the 3D sub-frustum (and the blit's UV) to its slice.
+                    r.tile = if (is_final) s.capture_tile else null;
                     r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, particle_params, particle_fx, glow, sprite_texture);
                     if (output) |target| {
                         input_texture = target.texture;
@@ -1243,7 +1257,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             }
                         }
                     }
-                    const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
+                    const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                    r.tile = if (is_final) s.capture_tile else null;
                     r.submitHair(blit_view, mesh_view, input_texture, hair_mesh, .{ 0.15, 0.1, 0.08, 1.0 }, aspect_ratio);
                     if (output) |target| {
                         input_texture = target.texture;
@@ -1280,7 +1295,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             }
                         }
                     }
-                    const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
+                    const aspect_ratio: f32 = tiledAspect(s, rect_w, rect_h);
+                    r.tile = if (is_final) s.capture_tile else null;
                     r.submitCloth(blit_view, mesh_view, input_texture, cloth_mesh, .{ 0.4, 0.55, 0.85, 1.0 }, aspect_ratio);
                     if (output) |target| {
                         input_texture = target.texture;
@@ -1301,6 +1317,9 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                 next_view_id += 1;
                 const is_final = drawn == ready_count;
                 const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                // The final pass draws into the capture target, so a tile
+                // crops the 3D sub-frustum (and the blit's UV) to its slice.
+                r.tile = if (is_final) s.capture_tile else null;
                 const rect_width = if (output != null and !is_final) width else output_width;
                 const rect_height = if (output != null and !is_final) height else output_height;
                 if (output) |target| {
@@ -1355,7 +1374,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                                 // fill a rect whose z=0 plane spans
                                 // 4*tan(22.5) world units vertically.
                                 const world_height: f32 = 1.6568542;
-                                const rect_aspect = @as(f32, @floatFromInt(rect_width)) / @as(f32, @floatFromInt(rect_height));
+                                const rect_aspect = tiledAspect(s, rect_width, rect_height);
                                 const sx = world_height * rect_aspect / @as(f32, @floatFromInt(width));
                                 const sy = world_height / @as(f32, @floatFromInt(height));
                                 const pixel_to_world: math.Mat4 = .{ .cols = .{
@@ -1370,7 +1389,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         }
                     }
                 }
-                const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_width)) / @as(f32, @floatFromInt(rect_height));
+                const aspect_ratio: f32 = tiledAspect(s, rect_width, rect_height);
                 if (anchored_without_face) {
                     // The anchor's capability degradation: the frame
                     // still passes through, the mesh alone stays off.
@@ -2191,15 +2210,15 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     const render_w: u32 = @as(u32, still_w) * supersample;
     const render_h: u32 = @as(u32, still_h) * supersample;
     // Above the max texture size a single target is impossible, so the
-    // output composites in tiles and stitches. Exact only when the final
-    // draw is the axis-aligned full-screen pass: 3D content and rotated or
+    // output composites in tiles and stitches. The perspective 3D content
+    // (model, cloth, hair, particles) tiles through the per-tile
+    // sub-frustum crop; the screen-space face-mesh overlay and rotated or
     // mirrored plain frames stay single-target under the cap.
     const tile_cap: u32 = if (s.capture_tile_cap != 0) s.capture_tile_cap else 16384;
-    const has_3d = s.model_meshes.count() > 0 or s.mesh_face_textures.count() > 0 or
-        s.cloth_meshes.count() > 0 or s.hair_meshes.count() > 0 or s.particle_meshes.count() > 0;
+    const has_screenspace_mesh = s.mesh_face_textures.count() > 0;
     const rot = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
     const upright = rot == 0 and (current.desc.flags & frame_flag_mirror) == 0;
-    const tileable = !has_3d and upright;
+    const tileable = !has_screenspace_mesh and upright;
     if ((render_w > tile_cap or render_h > tile_cap) and !tileable) return .invalid_argument;
 
     const gpa = e.gpa;
@@ -2214,10 +2233,13 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
 
     const cols: u32 = if (render_w > tile_cap) (render_w + tile_cap - 1) / tile_cap else 1;
     const rows: u32 = if (render_h > tile_cap) (render_h + tile_cap - 1) / tile_cap else 1;
+    // The whole frame's aspect, so tiled 3D draws keep the scene's shape.
+    if (cols > 1 or rows > 1) s.capture_aspect = @as(f32, @floatFromInt(render_w)) / @as(f32, @floatFromInt(render_h));
     defer {
         s.capture_res_width = 0;
         s.capture_res_height = 0;
         s.capture_tile = null;
+        s.capture_aspect = 0;
     }
 
     if (cols == 1 and rows == 1) {
