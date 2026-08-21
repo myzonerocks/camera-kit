@@ -204,6 +204,9 @@ pub const Engine = struct {
     capture_staging: ?render.TextureHandle = null,
     capture_width: u16 = 0,
     capture_height: u16 = 0,
+    /// Reused RGBA scratch for the NV12 live path, which reads back RGBA
+    /// and packs it down - kept off the per-frame allocation path.
+    capture_convert: []u8 = &.{},
     /// Active video recording, fed one composited frame per rendered
     /// frame of recording_session; frames commit two engine frames
     /// after they render so the GPU has finished writing them.
@@ -559,6 +562,7 @@ pub fn destroyEngine(engine: *Engine) void {
         slot.persistent.deinit();
     }
     engine.live_output_slots.deinit(engine.gpa);
+    if (engine.capture_convert.len > 0) engine.gpa.free(engine.capture_convert);
     if (engine.renderer) |*r| r.deinit();
     engine.texture_pool.deinit();
     engine.staging_pool.deinit();
@@ -1956,10 +1960,10 @@ fn swapRedBlue(pixels: []u8) void {
 
 /// The supported per-frame composited output for a live broadcast source:
 /// renders the current frame with the lens chain baked in and reads it back
-/// in a WebRTC-friendly format (rgba8 or bgra8), so a LiveKit or WebRTC
-/// custom source publishes it directly. out_data holds width * height * 4.
+/// in a WebRTC-friendly format (rgba8, bgra8 or nv12), so a LiveKit or WebRTC
+/// custom source publishes it directly. out_data holds the format's frame size.
 pub export fn goss_engine_capture_live_frame(engine: ?*Engine, session: ?*Session, format: u32, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
-    if (format != pixel_format_rgba8 and format != pixel_format_bgra8) return .invalid_argument;
+    if (format != pixel_format_rgba8 and format != pixel_format_bgra8 and format != pixel_format_nv12) return .invalid_argument;
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
     const r = if (e.renderer) |*r| r else return .renderer_unavailable;
@@ -1970,15 +1974,38 @@ pub export fn goss_engine_capture_live_frame(engine: ?*Engine, session: ?*Sessio
     const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
     w.* = e.capture_width;
     h.* = e.capture_height;
-    const full_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
-    if (full_size == 0) return .ok;
-    if (out_capacity < full_size) return .invalid_argument;
-
+    const wpx: usize = e.capture_width;
+    const hpx: usize = e.capture_height;
+    const pixels = wpx * hpx;
+    if (pixels == 0) return .ok;
+    const rgba_size = pixels * 4;
+    const y_size = pixels;
+    const uv_size = 2 * ((wpx + 1) / 2) * ((hpx + 1) / 2);
+    const out_size = if (format == pixel_format_nv12) y_size + uv_size else rgba_size;
+    if (out_capacity < out_size) return .invalid_argument;
     const staging = e.capture_staging orelse return .renderer_unavailable;
+
+    // NV12 reads back RGBA into the reused scratch and packs down; the packed
+    // planes are smaller than the readback, so they cannot share out_data.
+    if (format == pixel_format_nv12) {
+        if (e.capture_convert.len < rgba_size) {
+            if (e.capture_convert.len > 0) e.gpa.free(e.capture_convert);
+            e.capture_convert = e.gpa.alloc(u8, rgba_size) catch return .out_of_memory;
+        }
+        render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+        const ready_frame = render.Renderer.readTexture(staging, e.capture_convert.ptr);
+        while (r.frame() < ready_frame) {}
+        // The readback is packed RGBA; rgbaToNv12 reads R,G,B in that order,
+        // so it needs no swizzle. BT.709 video range, the broadcast default.
+        const conv = math.color.rgbToYuv(.bt709, .video);
+        math.color.rgbaToNv12(e.capture_convert[0..rgba_size], wpx, hpx, conv, data[0..y_size], data[y_size..out_size]);
+        return .ok;
+    }
+
     render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
     const ready_frame = render.Renderer.readTexture(staging, data);
     while (r.frame() < ready_frame) {}
-    if (format == pixel_format_bgra8) swapRedBlue(data[0..full_size]);
+    if (format == pixel_format_bgra8) swapRedBlue(data[0..rgba_size]);
     return .ok;
 }
 

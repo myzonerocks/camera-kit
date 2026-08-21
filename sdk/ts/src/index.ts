@@ -422,11 +422,14 @@ export class GossEngine {
     return out.toDataURL("image/png");
   }
 
-  /// The composited frame as packed bytes in a WebRTC format (BGRA by
-  /// default), the supported per-frame output for a live source. On the web
-  /// the rendered canvas is already a zero-copy source through
-  /// canvas.captureStream(); reach for this only when you need the raw pixels.
+  /// The composited frame as packed bytes in a WebRTC format (BGRA or RGBA),
+  /// the supported per-frame output for a live source. On the web the canvas is
+  /// already a zero-copy source through captureStream(); reach for this only for
+  /// raw pixels. NV12 is the native encoders' path - captureStream handles web.
   async captureLiveFrame(session: GossSession | null, format: GossPixelFormat = GossPixelFormat.Bgra8): Promise<{ pixels: Uint8Array; width: number; height: number }> {
+    if (format !== GossPixelFormat.Bgra8 && format !== GossPixelFormat.Rgba8) {
+      throw new Error("captureLiveFrame on web supports Bgra8 or Rgba8; use captureStream for a live track");
+    }
     const { pixels, width, height } = await this.capturePixels(session);
     if (format === GossPixelFormat.Bgra8) {
       for (let i = 0; i + 3 < pixels.length; i += 4) {

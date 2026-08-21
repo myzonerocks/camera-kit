@@ -163,10 +163,12 @@ extension GossEngine {
     }
 
     /// The composited frame as packed bytes in a WebRTC format (BGRA by
-    /// default), the supported per-frame output for a live broadcast source -
-    /// feed it to a LiveKit or WebRTC custom video source.
+    /// default; NV12 for a hardware encoder), the supported per-frame output
+    /// for a live broadcast source - feed it to a custom video source.
     public func captureLiveFrame(session: GossSession?, width: UInt32, height: UInt32, format: GossPixelFormat = .bgra8) throws -> [UInt8] {
-        var data = [UInt8](repeating: 0, count: Int(width) * Int(height) * 4)
+        let pixels = Int(width) * Int(height)
+        let size = format == .nv12 ? pixels + pixels / 2 : pixels * 4
+        var data = [UInt8](repeating: 0, count: size)
         var outWidth: UInt32 = 0
         var outHeight: UInt32 = 0
         try data.withUnsafeMutableBufferPointer { buffer in
