@@ -22,6 +22,12 @@ The simulator slice is arm64 only. On an Apple-silicon Mac build with
 `ONLY_ACTIVE_ARCH=YES` against a concrete simulator, not a universal
 destination that would also ask for an x86_64 half.
 
+At the app's final link you may see auto-link warnings for `AudioUnit`,
+`CoreAudioTypes`, or `UIUtilities`. They are expected and benign - those
+umbrella frameworks are not standalone link targets on iOS, the requests come
+from inside the vendored libraries, and the engine links what it actually needs
+explicitly. Nothing is missing; the app links and runs.
+
 ## Add the package
 
 Point SwiftPM at the repository, either as a local path while you develop or
