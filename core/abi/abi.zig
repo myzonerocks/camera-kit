@@ -23,6 +23,7 @@ const color = @import("color");
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
+const audio_mix = @import("audio_mix");
 const physics = @import("physics");
 const script = @import("script");
 const audio_playback = @import("audio_playback");
@@ -70,7 +71,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 19;
+pub const abi_minor: u16 = 20;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -443,6 +444,10 @@ pub const Session = struct {
     /// SDK; the engine only decodes and mixes.
     audio_mixer: ?audio_playback.Mixer = null,
     sound_ids: std.StringHashMapUnmanaged(u32) = .{},
+    /// Keeps the lens-to-outgoing-track resampler continuous across
+    /// goss_session_mix_output_audio calls when the outgoing rate differs
+    /// from the mixer's 48 kHz.
+    mix_resampler: audio_mix.Resampler = .{},
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -3369,6 +3374,7 @@ const audio_channels: u32 = 1;
 fn destroySounds(s: *Session) void {
     if (s.audio_mixer) |*m| m.destroy();
     s.audio_mixer = null;
+    s.mix_resampler.reset();
     var it = s.sound_ids.keyIterator();
     while (it.next()) |k| s.engine.gpa.free(k.*);
     s.sound_ids.deinit(s.engine.gpa);
@@ -3403,6 +3409,7 @@ fn createSounds(s: *Session, gpa: std.mem.Allocator, bundle_path: []const u8) vo
         };
     }
     s.audio_mixer = mixer;
+    s.mix_resampler.reset();
 }
 
 /// Starts a voice for every sound a play_sound trigger fired this tick.
@@ -3421,6 +3428,55 @@ pub export fn goss_session_pull_audio(session: ?*Session, out: ?[*]i16, frames: 
     const data = out orelse return .invalid_argument;
     const buf = data[0 .. frames * audio_channels];
     if (s.audio_mixer) |*mixer| mixer.pull(buf, frames) else @memset(buf, 0);
+    return .ok;
+}
+
+/// Folds the active lens sound into the caller's outgoing call/live track:
+/// `mic` (interleaved f32 at `sample_rate`/`channels`, or null for silence)
+/// summed with the 48 kHz mono lens mixer resampled to that rate, into `out`
+/// (frame_count*channels s16). Advances the mixer once, replacing pull_audio.
+pub export fn goss_session_mix_output_audio(session: ?*Session, mic: ?[*]const f32, out: ?[*]i16, frame_count: u32, sample_rate: u32, channels: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const data = out orelse return .invalid_argument;
+    if (frame_count == 0 or sample_rate == 0 or channels == 0 or channels > 8) return .invalid_argument;
+    const span_all = @as(usize, frame_count) * channels;
+    const out_slice = data[0..span_all];
+    const mic_slice: ?[]const f32 = if (mic) |m| m[0..span_all] else null;
+
+    const ratio = @as(f64, @floatFromInt(audio_sample_rate)) / @as(f64, @floatFromInt(sample_rate));
+    const MixCtx = struct {
+        m: *audio_playback.Mixer,
+        fn pull(self: *@This()) i16 {
+            var one: [audio_channels]i16 = .{0};
+            self.m.pull(&one, 1);
+            return one[0];
+        }
+    };
+
+    // The lens mixer is 48 kHz mono. Resample its stream to the outgoing rate a
+    // bounded chunk at a time, then sum with the mic. A missing mixer (no lens
+    // sound) mixes silence, so the outgoing track is the mic alone.
+    var lens_chunk: [1024]i16 = undefined;
+    var done: u32 = 0;
+    while (done < frame_count) {
+        const n = @min(@as(u32, lens_chunk.len), frame_count - done);
+        const lens = lens_chunk[0..n];
+        if (s.audio_mixer) |*mixer| {
+            if (sample_rate == audio_sample_rate) {
+                mixer.pull(lens, n);
+            } else {
+                var ctx = MixCtx{ .m = mixer };
+                s.mix_resampler.process(ratio, lens, &ctx, MixCtx.pull);
+            }
+        } else {
+            @memset(lens, 0);
+        }
+        const base = @as(usize, done) * channels;
+        const span = @as(usize, n) * channels;
+        const mic_chunk: ?[]const f32 = if (mic_slice) |m| m[base .. base + span] else null;
+        audio_mix.combine(lens, mic_chunk, out_slice[base .. base + span], n, channels);
+        done += n;
+    }
     return .ok;
 }
 

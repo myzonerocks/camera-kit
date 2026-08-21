@@ -454,6 +454,16 @@ export fn Java_com_gosslens_Gosslens_nativePullAudio(env: *JniEnv, cls: jobject,
     return @intFromEnum(abi.goss_session_pull_audio(sessionFromHandle(session), out, @intCast(frames)));
 }
 
+/// mic_buffer may be null to mix the lens sound over silence; out_buffer packs
+/// frame_count*channels interleaved s16.
+export fn Java_com_gosslens_Gosslens_nativeMixOutputAudio(env: *JniEnv, cls: jobject, session: i64, mic_buffer: jobject, out_buffer: jobject, frame_count: i32, sample_rate: i32, channels: i32) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const out: [*]i16 = @ptrCast(@alignCast(out_bytes));
+    const mic: ?[*]const f32 = if (getDirectBufferAddress(env, mic_buffer)) |raw| @ptrCast(@alignCast(raw)) else null;
+    return @intFromEnum(abi.goss_session_mix_output_audio(sessionFromHandle(session), mic, out, @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;

@@ -93,4 +93,22 @@ extension GossSession {
             try checked(goss_session_pull_audio(handle, buffer.baseAddress, frames))
         }
     }
+
+    /// Folds the active lens sound into the caller's outgoing call/live track:
+    /// `mic` (interleaved f32 at `sampleRate`/`channels`, or nil for silence)
+    /// summed with the 48 kHz mono lens mixer resampled to that rate; returns
+    /// the mixed interleaved s16. Advances the mixer once, replacing `pullAudio`.
+    public func mixOutputAudio(mic: [Float]?, frameCount: UInt32, sampleRate: UInt32, channels: UInt32) throws -> [Int16] {
+        var out = [Int16](repeating: 0, count: Int(frameCount) * Int(channels))
+        try out.withUnsafeMutableBufferPointer { outBuffer in
+            if let mic = mic {
+                try mic.withUnsafeBufferPointer { micBuffer in
+                    try checked(goss_session_mix_output_audio(handle, micBuffer.baseAddress, outBuffer.baseAddress, frameCount, sampleRate, channels))
+                }
+            } else {
+                try checked(goss_session_mix_output_audio(handle, nil, outBuffer.baseAddress, frameCount, sampleRate, channels))
+            }
+        }
+        return out
+    }
 }

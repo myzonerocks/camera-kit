@@ -90,8 +90,12 @@ frame and returns it in a WebRTC format (BGRA by default), so you build a
 
 It renders once per call, so a broadcast source needs no separate preview
 render. For audio, `submitAudio` feeds the mic in so audio-reactive lenses
-respond and `pullAudio` pulls a lens's own sound out; mix that PCM into your
-outgoing LiveKit audio track the way you would any custom audio source.
+respond. For the outgoing track, `mixOutputAudio` folds the lens's own sound
+into the mic block you are about to publish and hands back the mixed interleaved
+s16 - the engine resamples the lens sound to your track's rate and sums it in,
+so there is nothing to hand-mix (pass a null mic buffer for lens sound over
+silence). `pullAudio` still pulls the lens sound alone for local playback with
+no call; in a call, `mixOutputAudio` replaces it.
 
 ## Method names
 
