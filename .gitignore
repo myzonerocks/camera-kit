@@ -62,11 +62,16 @@ sdk/ts/node_modules/
 sdk/ts/dist/
 sdk/ts/demo/dist.js
 sdk/ts/demo/tracking-worker.js
+sdk/ts/demo/track.js
+sdk/ts/demo/track-worker.js
 sdk/ts/demo/gosslens_web.js
 sdk/ts/demo/gosslens_web.wasm
 sdk/ts/demo/webgpu/
 sdk/ts/demo/gosslens_tracking.wasm
 sdk/ts/demo/face_landmarker.task
+sdk/ts/demo/pose_landmarker_full.task
+sdk/ts/demo/gesture_recognizer.task
+sdk/ts/demo/selfie_multiclass.tflite
 sdk/ts/demo/beauty-baseline.manifest.json
 sdk/ts/**/*.wasm.map
 

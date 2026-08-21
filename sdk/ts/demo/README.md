@@ -50,3 +50,25 @@ Drives the real page in headless Chrome (fake capture device) and
 asserts real deltas for whiten/smooth/reshape/makeup plus live face
 tracking - the same technique the demo's own browser testing uses
 throughout this repo.
+
+## Proving the tracking modules
+
+Face, pose, hand and segmentation each run in a real browser over a
+corpus still, not the live camera. From the repo root, copy the extra
+bundles the proof reads:
+
+    cp .models/pose_landmarker_full.task .models/gesture_recognizer.task .models/selfie_multiclass.tflite sdk/ts/demo/
+    cp .models/corpus/body_standing.jpg .models/corpus/hand_raised.jpg sdk/ts/demo/
+
+Then build the worker and page and run the proof:
+
+    cd sdk/ts/demo
+    bun build ./track-worker.ts --outfile=./track-worker.js --format=esm
+    bun build ./track-page.ts --outfile=./track.js --format=esm
+    bun run track-prove.ts
+
+It stands each pipeline up in turn, runs inference over its still, and
+prints a PASS line with the landmark counts, the detected hand and
+gesture, and the segmentation class count and mask coverage. track-prove
+materializes the corpus and bundles itself, so a fresh checkout proves
+once the models are fetched.
