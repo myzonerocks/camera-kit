@@ -81,26 +81,27 @@ they are not part of the engine archive. Bundle the ones your lenses use.
 ## Lives and calls
 
 Publishing the lens-baked frames into a LiveKit or WebRTC call is a custom
-video source fed one frame per tick. Drive the loop with `captureLiveFrame` -
-it renders the composited frame and hands it back in BGRA, the format WebRTC
-wants, with no channel swizzle of your own. Point it at an IOSurface-backed
-`CVPixelBuffer` so the frame stays ready for VideoToolbox to encode:
+video source fed one frame per tick. `GossLiveOutput` is the zero-copy path:
+it renders the composited frame straight into an IOSurface-backed BGRA pixel
+buffer - no readback - which VideoToolbox then encodes from the same surface.
+Create one per broadcast on the renderer's `MTLDevice` (your `CAMetalLayer`'s):
 
-    // a CVPixelBufferPool of kCVPixelFormatType_32BGRA buffers at the render size,
-    // and a LiveKit BufferCapturer on LocalVideoTrack.createBufferTrack(source: .camera)
+    let live = GossLiveOutput(engine: engine, device: metalLayer.device!, width: w, height: h)!
 
     // per tick
-    var pixelBuffer: CVPixelBuffer?
-    CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pixelBuffer)
-    if let buffer = pixelBuffer {
-        try engine.captureLiveFrame(session: session, into: buffer)
+    if let buffer = live.nextFrame(session: session) {
         capturer.capture(buffer)   // publish; show the same buffer locally too
     }
 
-`captureLiveFrame` renders once per call, so a broadcast source needs no
-separate preview render - display the same buffer locally. It reads the frame
-back into your publish buffer, one copy, not the old capture-plus-swizzle;
-rendering straight into the IOSurface with no readback at all is the next step.
+`nextFrame` renders once per call, so a broadcast source needs no separate
+preview render - display the same buffer locally. It returns nil to skip a
+frame while a fresh pool texture warms up bgfx's override, so just wait for
+the next tick. Under the hood it calls `renderToLiveTexture`, which points the
+final composite pass at your texture instead of the swap chain.
+
+If you would rather own the pixels, `captureLiveFrame(format:)` reads the
+frame back in BGRA, RGBA, or NV12 - one copy, for a software encoder or a
+frame you inspect. The zero-copy `GossLiveOutput` is the broadcast default.
 
 For audio, `submitAudio` feeds the mic in so audio-reactive lenses respond, and
 `pullAudio` pulls a lens's own sound out. Mix that PCM into your outgoing
