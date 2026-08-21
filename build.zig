@@ -3165,6 +3165,22 @@ const IosStepConfig = struct {
     step_description: []const u8,
 };
 
+/// Asks xcrun for the SDK path when the option is absent, so `zig build
+/// ios-simulator` just works on a Mac with Xcode. Any failure returns null
+/// and the caller falls back to its self-documenting error.
+fn detectAppleSdk(b: *std.Build, xcrun_sdk: []const u8) ?[]const u8 {
+    if (@import("builtin").os.tag != .macos) return null;
+    var code: u8 = undefined;
+    const stdout = b.runAllowFail(
+        &.{ "xcrun", "--sdk", xcrun_sdk, "--show-sdk-path" },
+        &code,
+        .ignore,
+    ) catch return null;
+    const trimmed = std.mem.trim(u8, stdout, " \r\n\t");
+    if (trimmed.len == 0) return null;
+    return b.dupe(trimmed);
+}
+
 fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile, config: IosStepConfig) void {
     const ios_step = b.step(config.step_name, config.step_description);
     const shaderc_tool = shaderc_exe orelse {
@@ -3172,7 +3188,8 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         return;
     };
     apple_sdk = b.option([]const u8, config.sdk_option_name, b.fmt("Path to the {s} SDK", .{config.sdk_name})) orelse
-        (if (config.abi == .none) b.sysroot else null);
+        (if (config.abi == .none) b.sysroot else null) orelse
+        detectAppleSdk(b, config.xcrun_sdk);
     if (apple_sdk == null) {
         const missing = b.addFail(b.fmt(
             "gosslens: run zig build {s} -D{s}=\"$(xcrun --sdk {s} --show-sdk-path)\"",

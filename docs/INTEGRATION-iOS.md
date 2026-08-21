@@ -10,17 +10,23 @@ The SDK is thin Swift over a static engine. Build the engine for the slices
 you target; the output lands in `zig-out`.
 
     zig build ios
-    zig build ios-simulator -Dios-simulator-sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+    zig build ios-simulator
 
-The device step reads the SDK from your `--sysroot`; the simulator step needs
-the SDK path passed in, and its error message prints the exact `xcrun` line if
-you leave it out. Each step writes `libgosslens.a` and the vendored archives
+On a Mac with Xcode both steps find their SDK through `xcrun` on their own;
+pass `-Dios-sdk`/`-Dios-simulator-sdk` (or `--sysroot`) only to point at a
+specific one. Each step writes `libgosslens.a` and the vendored archives
 (bgfx, the inference stack, ANGLE, QuickJS, Jolt) into `zig-out/ios` and
 `zig-out/ios-simulator`, all aligned and ready to link.
 
 The simulator slice is arm64 only. On an Apple-silicon Mac build with
 `ONLY_ACTIVE_ARCH=YES` against a concrete simulator, not a universal
 destination that would also ask for an x86_64 half.
+
+At the app's final link you may see auto-link warnings for `AudioUnit`,
+`CoreAudioTypes`, or `UIUtilities`. They are expected and benign - those
+umbrella frameworks are not standalone link targets on iOS, the requests come
+from inside the vendored libraries, and the engine links what it actually needs
+explicitly. Nothing is missing; the app links and runs.
 
 ## Add the package
 
