@@ -20,38 +20,82 @@ fn writeChunk(out: *std.ArrayList(u8), gpa: std.mem.Allocator, kind: *const [4]u
     try out.appendSlice(gpa, &crc_bytes);
 }
 
+/// Color tagging the PNG carries: the sRGB marker, or explicit cHRM
+/// primaries plus gAMA for wide-gamut output. All optional; none is the
+/// untagged default.
+pub const ColorTags = struct {
+    srgb: bool = false,
+    chrm: ?[32]u8 = null,
+    gama: ?[4]u8 = null,
+};
+
+pub const EncodeOptions = struct {
+    /// 8 or 16 bits per channel. 16 widens each 8-bit sample so the file
+    /// is a genuine 16-bit container, ready for the HDR capture target.
+    bit_depth: u8 = 8,
+    color: ColorTags = .{},
+};
+
 /// Encodes tightly packed RGBA8 pixels as a PNG, appending to `out`.
 /// Every scanline uses the up filter - cheap, effective on camera
 /// frames, and one fixed choice keeps the output deterministic.
 pub fn encodeRgba(gpa: std.mem.Allocator, out: *std.ArrayList(u8), pixels: []const u8, width: u32, height: u32) !void {
+    return encodeRgbaOpts(gpa, out, pixels, width, height, .{});
+}
+
+/// The general path: bit depth and color tags on top of encodeRgba.
+pub fn encodeRgbaOpts(gpa: std.mem.Allocator, out: *std.ArrayList(u8), pixels: []const u8, width: u32, height: u32, opts: EncodeOptions) !void {
     if (width == 0 or height == 0) return error.EmptyImage;
-    const row_bytes = @as(usize, width) * 4;
-    if (pixels.len != row_bytes * height) return error.SizeMismatch;
+    if (opts.bit_depth != 8 and opts.bit_depth != 16) return error.Unsupported;
+    const src_row = @as(usize, width) * 4;
+    if (pixels.len != src_row * height) return error.SizeMismatch;
+    const bytes_per_sample: usize = if (opts.bit_depth == 16) 2 else 1;
+    const row_bytes = src_row * bytes_per_sample;
 
     try out.appendSlice(gpa, &png_signature);
 
     var ihdr: [13]u8 = undefined;
     std.mem.writeInt(u32, ihdr[0..4], width, .big);
     std.mem.writeInt(u32, ihdr[4..8], height, .big);
-    ihdr[8] = 8; // bit depth
+    ihdr[8] = opts.bit_depth;
     ihdr[9] = 6; // color type: RGBA
     ihdr[10] = 0; // deflate
     ihdr[11] = 0; // adaptive filtering
     ihdr[12] = 0; // no interlace
     try writeChunk(out, gpa, "IHDR", &ihdr);
 
+    // Color chunks sit between IHDR and IDAT. sRGB and cHRM/gAMA are
+    // mutually exclusive by intent: sRGB for the default, the explicit
+    // primaries for wide gamut.
+    if (opts.color.srgb) {
+        try writeChunk(out, gpa, "sRGB", &.{0}); // perceptual intent
+    } else {
+        if (opts.color.chrm) |chrm| try writeChunk(out, gpa, "cHRM", &chrm);
+        if (opts.color.gama) |gama| try writeChunk(out, gpa, "gAMA", &gama);
+    }
+
     // Filtered scanlines: one filter byte then the row minus the row
-    // above (zero above the first row).
+    // above (zero above the first row). At 16-bit each sample expands to
+    // big-endian first, then the byte-wise filter runs the same way.
     const filtered = try gpa.alloc(u8, (row_bytes + 1) * height);
     defer gpa.free(filtered);
+    const widened: []u8 = if (opts.bit_depth == 16) try gpa.alloc(u8, row_bytes * height) else &.{};
+    defer if (widened.len > 0) gpa.free(widened);
+    const rows: []const u8 = if (opts.bit_depth == 16) blk: {
+        for (0..pixels.len) |i| {
+            widened[i * 2] = pixels[i];
+            widened[i * 2 + 1] = pixels[i];
+        }
+        break :blk widened;
+    } else pixels;
     for (0..height) |y| {
-        const row = pixels[y * row_bytes ..][0..row_bytes];
+        const row = rows[y * row_bytes ..][0..row_bytes];
         const dst = filtered[y * (row_bytes + 1) ..][0 .. row_bytes + 1];
         dst[0] = 2; // up filter
         if (y == 0) {
             @memcpy(dst[1..], row);
         } else {
-            const above = pixels[(y - 1) * row_bytes ..][0..row_bytes];
+            const above = rows[(y - 1) * row_bytes ..][0..row_bytes];
             for (row, above, dst[1..]) |cur, up, *b| b.* = cur -% up;
         }
     }

@@ -207,6 +207,8 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("pose", pose_core_module);
     abi_module.addImport("face_geometry", face_geometry_core_module);
     abi_module.addImport("png", pngModule(b, target, optimize));
+    abi_module.addImport("jpeg", jpegModule(b, target, optimize));
+    abi_module.addImport("color", colorModule(b, target, optimize));
     abi_module.addImport("media_recording", recordingModule(b, target, optimize));
     abi_module.addImport("photo", photoModule(b, target, optimize));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -330,6 +332,8 @@ pub fn build(b: *std.Build) void {
     const fit_module = b.createModule(.{ .root_source_file = b.path("core/math/fit.zig"), .target = target, .optimize = optimize });
     const fit_tests = b.addTest(.{ .root_module = fit_module });
     const png_tests = b.addTest(.{ .root_module = pngModule(b, target, optimize) });
+    const jpeg_tests = b.addTest(.{ .root_module = jpegModule(b, target, optimize) });
+    const color_tests = b.addTest(.{ .root_module = colorModule(b, target, optimize) });
     const audio_analysis_tests = b.addTest(.{ .root_module = audioAnalysisModule(b, target, optimize) });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
@@ -358,6 +362,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = particles_module })).step);
     test_step.dependOn(&b.addRunArtifact(fit_tests).step);
     test_step.dependOn(&b.addRunArtifact(png_tests).step);
+    test_step.dependOn(&b.addRunArtifact(jpeg_tests).step);
+    test_step.dependOn(&b.addRunArtifact(color_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
     if (have_jolt) {
         const physics_tests = b.addTest(.{ .root_module = physicsModule(b, target, optimize, true) });
@@ -649,6 +655,8 @@ pub fn build(b: *std.Build) void {
             },
         });
         abi_tracking_module.addImport("png", pngModule(b, target, optimize));
+        abi_tracking_module.addImport("jpeg", jpegModule(b, target, optimize));
+        abi_tracking_module.addImport("color", colorModule(b, target, optimize));
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -827,6 +835,8 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("pose", tracking_cores_wasm.pose);
     abi_wasm.addImport("face_geometry", tracking_cores_wasm.face_geometry);
     abi_wasm.addImport("png", pngModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("jpeg", jpegModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("color", colorModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
@@ -994,7 +1004,11 @@ pub fn build(b: *std.Build) void {
             },
         });
         const conformance_png_module = pngModule(b, target, optimize);
+        const conformance_jpeg_module = jpegModule(b, target, optimize);
+        const conformance_color_module = colorModule(b, target, optimize);
         abi_conformance_module.addImport("png", conformance_png_module);
+        abi_conformance_module.addImport("jpeg", conformance_jpeg_module);
+        abi_conformance_module.addImport("color", conformance_color_module);
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
@@ -1092,6 +1106,8 @@ pub fn build(b: *std.Build) void {
         });
         if (host_asset) |am| conformance_module.addImport("image", am.image);
         conformance_module.addImport("png", conformance_png_module);
+        conformance_module.addImport("jpeg", conformance_jpeg_module);
+        conformance_module.addImport("color", conformance_color_module);
         const world_replay_module = b.createModule(.{
             .root_source_file = b.path("harness/world_replay.zig"),
             .target = target,
@@ -1251,6 +1267,8 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("pose", tracking_cores_android.pose);
     abi_android.addImport("face_geometry", tracking_cores_android.face_geometry);
     abi_android.addImport("png", pngModule(b, android_target, optimize));
+    abi_android.addImport("jpeg", jpegModule(b, android_target, optimize));
+    abi_android.addImport("color", colorModule(b, android_target, optimize));
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
@@ -1450,6 +1468,14 @@ const TrackingCoreModules = struct {
 // shared by the worker, the harness, and the export layer.
 fn pngModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/png.zig"), .target = target, .optimize = optimize });
+}
+
+fn jpegModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/jpeg.zig"), .target = target, .optimize = optimize });
+}
+
+fn colorModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/color.zig"), .target = target, .optimize = optimize });
 }
 
 fn audioAnalysisModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -3141,6 +3167,8 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("pose", tracking_cores_ios.pose);
     abi_ios.addImport("face_geometry", tracking_cores_ios.face_geometry);
     abi_ios.addImport("png", pngModule(b, ios_target, optimize));
+    abi_ios.addImport("jpeg", jpegModule(b, ios_target, optimize));
+    abi_ios.addImport("color", colorModule(b, ios_target, optimize));
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
@@ -3673,6 +3701,8 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("pose", tracking_cores_em.pose);
     abi_em.addImport("face_geometry", tracking_cores_em.face_geometry);
     abi_em.addImport("png", pngModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("jpeg", jpegModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("color", colorModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));

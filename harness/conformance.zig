@@ -800,6 +800,121 @@ fn proveTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the engine's own photo encoding and color management: the
+/// built-in JPEG decodes back through the platform and is deterministic,
+/// a wide-gamut PNG carries cHRM/gAMA and a wide-gamut JPEG carries an
+/// ICC profile, while a plain sRGB capture carries neither.
+fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL color-managed capture lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const capture = struct {
+        fn run(g: std.mem.Allocator, e: *abi.Engine, sess: *abi.Session, cfg: abi.CaptureConfig) ![]u8 {
+            var needed: usize = 0;
+            var cw: u32 = 0;
+            var ch: u32 = 0;
+            var probe: [1]u8 = undefined;
+            _ = abi.goss_engine_capture_still(e, sess, &cfg, &probe, 0, &needed, &cw, &ch);
+            if (needed == 0) return error.CaptureProbeFailed;
+            const buf = try g.alloc(u8, needed);
+            errdefer g.free(buf);
+            var out_len: usize = 0;
+            if (abi.goss_engine_capture_still(e, sess, &cfg, buf.ptr, buf.len, &out_len, &cw, &ch) != .ok) return error.CaptureFailed;
+            return g.realloc(buf, out_len);
+        }
+    }.run;
+
+    const base = abi.CaptureConfig{ .width = 200, .height = 150, .supersample = 0, .format = 0, .quality = 0 };
+
+    // Wide-gamut PNG carries cHRM and gAMA; the sRGB one carries neither.
+    var p3_png_cfg = base;
+    p3_png_cfg.color_space = 1;
+    const p3_png = try capture(gpa, engine, session, p3_png_cfg);
+    defer gpa.free(p3_png);
+    const srgb_png = try capture(gpa, engine, session, base);
+    defer gpa.free(srgb_png);
+    if (std.mem.indexOf(u8, p3_png, "cHRM") == null or std.mem.indexOf(u8, p3_png, "gAMA") == null) {
+        std.debug.print("conformance: FAIL Display-P3 PNG is missing its cHRM/gAMA chunks\n", .{});
+        return false;
+    }
+    if (std.mem.indexOf(u8, srgb_png, "cHRM") != null) {
+        std.debug.print("conformance: FAIL sRGB PNG unexpectedly carries a gamut chunk\n", .{});
+        return false;
+    }
+
+    // JPEG comes from the built-in encoder: it must decode back through
+    // the platform decoder, and the wide-gamut one carries an ICC.
+    var p3_jpeg_cfg = base;
+    p3_jpeg_cfg.format = 1;
+    p3_jpeg_cfg.color_space = 1;
+    p3_jpeg_cfg.quality = 90;
+    const p3_jpeg = try capture(gpa, engine, session, p3_jpeg_cfg);
+    defer gpa.free(p3_jpeg);
+    var srgb_jpeg_cfg = base;
+    srgb_jpeg_cfg.format = 1;
+    srgb_jpeg_cfg.quality = 90;
+    const srgb_jpeg = try capture(gpa, engine, session, srgb_jpeg_cfg);
+    defer gpa.free(srgb_jpeg);
+    if (std.mem.indexOf(u8, p3_jpeg, "ICC_PROFILE") == null) {
+        std.debug.print("conformance: FAIL Display-P3 JPEG is missing its ICC profile\n", .{});
+        return false;
+    }
+    if (std.mem.indexOf(u8, srgb_jpeg, "ICC_PROFILE") != null) {
+        std.debug.print("conformance: FAIL sRGB JPEG unexpectedly carries an ICC profile\n", .{});
+        return false;
+    }
+    const decoded = try gpa.alloc(u8, 200 * 150 * 4);
+    defer gpa.free(decoded);
+    var dw: u32 = 0;
+    var dh: u32 = 0;
+    abi.photoDecode(srgb_jpeg, decoded, &dw, &dh) catch {
+        std.debug.print("conformance: FAIL built-in JPEG does not decode\n", .{});
+        return false;
+    };
+    if (dw != 200 or dh != 150) {
+        std.debug.print("conformance: FAIL built-in JPEG decoded at {d}x{d}\n", .{ dw, dh });
+        return false;
+    }
+
+    // The built-in encoder is deterministic.
+    const again = try capture(gpa, engine, session, srgb_jpeg_cfg);
+    defer gpa.free(again);
+    if (!std.mem.eql(u8, srgb_jpeg, again)) {
+        std.debug.print("conformance: FAIL built-in JPEG is not deterministic\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the built-in JPEG encoder decodes through the platform and is deterministic; wide-gamut PNG/JPEG carry cHRM/gAMA and ICC, sRGB carries neither\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -2488,6 +2603,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveHairSim(gpa, engine)) return 1;
     if (!try proveHighResCapture(gpa, engine)) return 1;
     if (!try proveTiledCapture(gpa, engine)) return 1;
+    if (!try proveColorManagedCapture(gpa, engine)) return 1;
     if (!try proveScript(gpa, engine)) return 1;
     if (!try proveAudio(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;

@@ -18,6 +18,8 @@ const segmentation = @import("segmentation");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
+const jpeg = @import("jpeg");
+const color = @import("color");
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
@@ -1954,10 +1956,33 @@ pub const photoDecode = photo.decode;
 pub const photoProbeMetadata = photo.probeMetadata;
 pub const photo_supported = photo.supported;
 
-/// Captures the composited frame as a platform photo (1 = JPEG,
-/// 2 = HEIC) at quality percent; out_len always receives the needed
-/// size. Lossy and not bit-stable across runs, so the plain
-/// goss_engine_capture_photo stays the deterministic PNG surface.
+/// Encodes RGBA8 as a lossy photo into the caller buffer, setting
+/// out_len so a too-small buffer can be retried. JPEG is the engine's
+/// own encoder - on every target, never gated on a platform backend;
+/// HEIC routes to the platform. color_space picks the JPEG ICC profile.
+fn encodeLossyPhoto(gpa: std.mem.Allocator, pixels: []const u8, width: u32, height: u32, format: u32, quality: u32, color_space: u32, orientation: u8, data: []u8, out_len: *usize) Status {
+    if (format == 1) {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(gpa);
+        jpeg.encode(gpa, &encoded, pixels, width, height, .{
+            .quality = if (quality == 0) 90 else @intCast(quality),
+            .orientation = orientation,
+            .icc_profile = color.iccProfile(color_space),
+        }) catch return .out_of_memory;
+        out_len.* = encoded.items.len;
+        if (data.len < encoded.items.len) return .invalid_argument;
+        @memcpy(data[0..encoded.items.len], encoded.items);
+        return .ok;
+    }
+    if (!photo.supported) return .unsupported;
+    photo.encode(pixels, width, height, @enumFromInt(format), quality, data, out_len) catch return .invalid_argument;
+    return .ok;
+}
+
+/// Captures the composited frame as a photo (1 = JPEG, 2 = HEIC) at
+/// quality percent; out_len always receives the needed size. Lossy and
+/// not bit-stable across runs, so the plain goss_engine_capture_photo
+/// stays the deterministic PNG surface.
 pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session, format: u32, quality: u32, out_data: ?[*]u8, out_capacity: usize, out_len: ?*usize, out_width: ?*u32, out_height: ?*u32) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -1967,7 +1992,6 @@ pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session,
     const w = out_width orelse return .invalid_argument;
     const h = out_height orelse return .invalid_argument;
     len_out.* = 0;
-    if (!photo.supported) return .unsupported;
     if (format < 1 or format > 2 or quality > 100) return .invalid_argument;
 
     const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
@@ -1984,8 +2008,7 @@ pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session,
     const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
     while (r.frame() < ready_frame) {}
 
-    photo.encode(pixels, e.capture_width, e.capture_height, @enumFromInt(format), quality, data[0..out_capacity], len_out) catch return .invalid_argument;
-    return .ok;
+    return encodeLossyPhoto(gpa, pixels, e.capture_width, e.capture_height, format, quality, 0, 1, data[0..out_capacity], len_out);
 }
 
 pub const WorldState = extern struct {
@@ -2123,6 +2146,11 @@ pub const CaptureConfig = extern struct {
     format: u32,
     /// 1..100 for the lossy formats; 0 = the backend default.
     quality: u32,
+    /// 0 = sRGB, 1 = Display-P3, 2 = Rec2020 - the gamut the file is
+    /// tagged with (PNG chunks, JPEG ICC).
+    color_space: u32 = 0,
+    /// 8 or 16 bits per channel; 16 needs PNG and the HDR capture target.
+    bit_depth: u32 = 8,
 };
 
 /// Composites the still at the configured resolution (the submitted
@@ -2137,10 +2165,14 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     const len_out = out_len orelse return .invalid_argument;
     const w = out_width orelse return .invalid_argument;
     const h = out_height orelse return .invalid_argument;
-    const cfg: CaptureConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .supersample = 0, .format = 0, .quality = 0 };
+    const cfg: CaptureConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .supersample = 0, .format = 0, .quality = 0, .color_space = 0, .bit_depth = 8 };
     len_out.* = 0;
     if (cfg.format > 2) return .invalid_argument;
-    if (cfg.format != 0 and !photo.supported) return .unsupported;
+    // JPEG is the engine's own encoder, present everywhere; only HEIC
+    // still needs the platform photo backend.
+    if (cfg.format == 2 and !photo.supported) return .unsupported;
+    // 16-bit output is the PNG-only high-bit-depth path.
+    if (cfg.bit_depth == 16 and cfg.format != 0) return .invalid_argument;
 
     const current = s.current orelse return .again;
     const still_w: u16 = if (cfg.width != 0) @intCast(@min(cfg.width, 65535)) else @intCast(current.desc.width);
@@ -2264,16 +2296,26 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     h.* = out_h;
 
     if (cfg.format == 0) {
+        // Only wide-gamut and 16-bit captures carry extra chunks, so a
+        // plain sRGB 8-bit PNG stays byte-identical to the base path.
+        const space = color.Space.fromInt(cfg.color_space);
+        var tags: png.ColorTags = .{};
+        if (space != .srgb) {
+            tags.chrm = color.chromaticities(space);
+            tags.gama = color.gamma(space);
+        }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(gpa);
-        png.encodeRgba(gpa, &encoded, pixels, out_w, out_h) catch return .out_of_memory;
+        png.encodeRgbaOpts(gpa, &encoded, pixels, out_w, out_h, .{
+            .bit_depth = if (cfg.bit_depth == 16) 16 else 8,
+            .color = tags,
+        }) catch return .out_of_memory;
         len_out.* = encoded.items.len;
         if (out_capacity < encoded.items.len) return .invalid_argument;
         @memcpy(data[0..encoded.items.len], encoded.items);
         return .ok;
     }
-    photo.encode(pixels, out_w, out_h, @enumFromInt(cfg.format), cfg.quality, data[0..out_capacity], len_out) catch return .invalid_argument;
-    return .ok;
+    return encodeLossyPhoto(gpa, pixels, out_w, out_h, cfg.format, cfg.quality, cfg.color_space, 1, data[0..out_capacity], len_out);
 }
 
 pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
