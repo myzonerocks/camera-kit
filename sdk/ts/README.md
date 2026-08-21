@@ -68,8 +68,13 @@ tour is in the [root README](../../README.md#using-gosslens).
 
 [`demo/`](demo/), a real web page — see [`demo/README.md`](demo/README.md).
 
+## Tests
+
+`bun test` runs the unit suite in [`test/`](test) - the frozen-layout result
+parsers and the WebGPU/WebGL2 pick. The browser end-to-end proofs live in
+[`demo/prove.ts`](demo/prove.ts) and [`demo/track-prove.ts`](demo/track-prove.ts),
+with the host conformance in [`harness/`](../../harness/).
+
 ## TODO
 
 - Publish to npm; the dependency above assumes a monorepo workspace.
-- Add a `test/` suite. Conformance runs through
-  [`demo/prove.ts`](demo/prove.ts) and [`harness/`](../../harness/) for now.

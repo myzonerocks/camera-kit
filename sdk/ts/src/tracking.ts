@@ -96,6 +96,23 @@ function totalWasi(getMemory: () => WebAssembly.Memory): WebAssembly.ModuleImpor
   });
 }
 
+/// Parses the frozen goss_face_result layout out of module memory at ptr:
+/// frameSerial u64, timestampUs i64, presence f32, landmarkCount u32, then
+/// the landmark and blendshape floats. Pure over the buffer so it is testable
+/// without the wasm module.
+export function parseFaceResult(buffer: ArrayBuffer, ptr: number): GossFaceResult {
+  const view = new DataView(buffer, ptr);
+  const floats = new Float32Array(buffer, ptr + 24, GOSS_FACE_LANDMARK_COUNT * 3 + GOSS_FACE_BLENDSHAPE_COUNT);
+  return {
+    frameSerial: view.getBigUint64(0, true),
+    timestampUs: view.getBigInt64(8, true),
+    presence: view.getFloat32(16, true),
+    landmarkCount: view.getUint32(20, true),
+    landmarks: floats.slice(0, GOSS_FACE_LANDMARK_COUNT * 3),
+    blendshapes: floats.slice(GOSS_FACE_LANDMARK_COUNT * 3),
+  };
+}
+
 export class GossFaceTracker {
   private constructor(
     private exports: TrackingExports,
@@ -157,16 +174,7 @@ export class GossFaceTracker {
   /** The newest published result, parsed out of the frozen layout. */
   latest(): GossFaceResult | null {
     if (this.exports.goss_tracking_result(this.instance, this.resultPtr) !== 0) return null;
-    const view = new DataView(this.exports.memory.buffer, this.resultPtr);
-    const floats = new Float32Array(this.exports.memory.buffer, this.resultPtr + 24, GOSS_FACE_LANDMARK_COUNT * 3 + GOSS_FACE_BLENDSHAPE_COUNT);
-    return {
-      frameSerial: view.getBigUint64(0, true),
-      timestampUs: view.getBigInt64(8, true),
-      presence: view.getFloat32(16, true),
-      landmarkCount: view.getUint32(20, true),
-      landmarks: floats.slice(0, GOSS_FACE_LANDMARK_COUNT * 3),
-      blendshapes: floats.slice(GOSS_FACE_LANDMARK_COUNT * 3),
-    };
+    return parseFaceResult(this.exports.memory.buffer, this.resultPtr);
   }
 
   destroy(): void {
@@ -293,6 +301,22 @@ interface PoseExports {
 
 /// The web pose tracker: the wasm module's pose pipeline, run in a Worker.
 /// A pose task bundle in, the 33-landmark pose result out per frame.
+/// Parses the frozen goss_pose_result layout: the header, then the 33-point
+/// landmark floats, the visibility scores, and the presence scores. Pure over
+/// the buffer so it is testable without the wasm module.
+export function parsePoseResult(buffer: ArrayBuffer, ptr: number): GossPoseResult {
+  const view = new DataView(buffer, ptr);
+  return {
+    frameSerial: view.getBigUint64(0, true),
+    timestampUs: view.getBigInt64(8, true),
+    presence: view.getFloat32(16, true),
+    landmarkCount: view.getUint32(20, true),
+    landmarks: new Float32Array(buffer, ptr + 24, GOSS_POSE_LANDMARK_COUNT * 3).slice(),
+    visibilities: new Float32Array(buffer, ptr + 24 + GOSS_POSE_LANDMARK_COUNT * 3 * 4, GOSS_POSE_LANDMARK_COUNT).slice(),
+    presences: new Float32Array(buffer, ptr + 24 + GOSS_POSE_LANDMARK_COUNT * 4 * 4, GOSS_POSE_LANDMARK_COUNT).slice(),
+  };
+}
+
 export class GossPoseTracker {
   private constructor(
     private exports: PoseExports,
@@ -340,20 +364,7 @@ export class GossPoseTracker {
 
   latest(): GossPoseResult | null {
     if (this.exports.goss_pose_result(this.instance, this.resultPtr) !== 0) return null;
-    const buffer = this.exports.memory.buffer;
-    const view = new DataView(buffer, this.resultPtr);
-    const landmarks = new Float32Array(buffer, this.resultPtr + 24, GOSS_POSE_LANDMARK_COUNT * 3).slice();
-    const visibilities = new Float32Array(buffer, this.resultPtr + 24 + GOSS_POSE_LANDMARK_COUNT * 3 * 4, GOSS_POSE_LANDMARK_COUNT).slice();
-    const presences = new Float32Array(buffer, this.resultPtr + 24 + GOSS_POSE_LANDMARK_COUNT * 4 * 4, GOSS_POSE_LANDMARK_COUNT).slice();
-    return {
-      frameSerial: view.getBigUint64(0, true),
-      timestampUs: view.getBigInt64(8, true),
-      presence: view.getFloat32(16, true),
-      landmarkCount: view.getUint32(20, true),
-      landmarks,
-      visibilities,
-      presences,
-    };
+    return parsePoseResult(this.exports.memory.buffer, this.resultPtr);
   }
 
   destroy(): void {
@@ -398,6 +409,32 @@ interface HandExports {
 /// The web hand tracker: the wasm module's hand pipeline, run in a Worker.
 /// A hand landmarker or gesture-recognizer bundle in, up to two tracked
 /// hands out - landmarks, handedness, and a canned gesture when present.
+/// Parses the frozen goss_hand_result layout: the header with hand_count at
+/// offset 16, then up to GOSS_MAX_HANDS records at offset 24, each a
+/// HAND_STRIDE-byte GossHand. Pure over the buffer so it is testable without
+/// the wasm module.
+export function parseHandResult(buffer: ArrayBuffer, ptr: number): GossHandResult {
+  const view = new DataView(buffer, ptr);
+  const handCount = view.getUint32(16, true);
+  const hands: GossHand[] = [];
+  for (let h = 0; h < handCount && h < GOSS_MAX_HANDS; h += 1) {
+    const base = 24 + h * HAND_STRIDE;
+    hands.push({
+      presence: view.getFloat32(base, true),
+      handedness: view.getFloat32(base + 4, true),
+      gesture: view.getUint32(base + 8, true),
+      gestureScore: view.getFloat32(base + 12, true),
+      landmarks: new Float32Array(buffer, ptr + base + 16, GOSS_HAND_LANDMARK_COUNT * 3).slice(),
+    });
+  }
+  return {
+    frameSerial: view.getBigUint64(0, true),
+    timestampUs: view.getBigInt64(8, true),
+    handCount,
+    hands,
+  };
+}
+
 export class GossHandTracker {
   private constructor(
     private exports: HandExports,
@@ -445,26 +482,7 @@ export class GossHandTracker {
 
   latest(): GossHandResult | null {
     if (this.exports.goss_hand_result(this.instance, this.resultPtr) !== 0) return null;
-    const buffer = this.exports.memory.buffer;
-    const view = new DataView(buffer, this.resultPtr);
-    const handCount = view.getUint32(16, true);
-    const hands: GossHand[] = [];
-    for (let h = 0; h < handCount && h < GOSS_MAX_HANDS; h += 1) {
-      const base = 24 + h * HAND_STRIDE;
-      hands.push({
-        presence: view.getFloat32(base, true),
-        handedness: view.getFloat32(base + 4, true),
-        gesture: view.getUint32(base + 8, true),
-        gestureScore: view.getFloat32(base + 12, true),
-        landmarks: new Float32Array(buffer, this.resultPtr + base + 16, GOSS_HAND_LANDMARK_COUNT * 3).slice(),
-      });
-    }
-    return {
-      frameSerial: view.getBigUint64(0, true),
-      timestampUs: view.getBigInt64(8, true),
-      handCount,
-      hands,
-    };
+    return parseHandResult(this.exports.memory.buffer, this.resultPtr);
   }
 
   destroy(): void {
