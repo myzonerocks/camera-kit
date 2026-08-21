@@ -99,6 +99,19 @@ const FACE_BLENDSHAPE_COUNT = 52;
 export const FACE_LANDMARK_COUNT = 478;
 export const SEGMENTATION_MASK_SIDE = 256;
 
+/// The segmentation mask channels a lens can name, in the engine's frozen
+/// order: the derived person mask, then the multiclass model's own labels.
+/// Index 0 (person) rides the subject mask; the rest upload as class masks.
+export const SEGMENTATION_CHANNELS = [
+  "person",
+  "background",
+  "hair",
+  "body_skin",
+  "face_skin",
+  "clothes",
+  "others",
+] as const;
+
 export type CaptureState = "idle" | "running" | "denied" | "failed" | "interrupted";
 
 export interface SessionEvents {
@@ -690,6 +703,32 @@ export class Session {
       "number",
       ["number", "number", "number"],
       [this.handle, this.segmentationMaskPtr, count],
+    );
+  }
+
+  /// The class channels the active lens samples, as a bitmask over
+  /// SEGMENTATION_CHANNELS. Upload exactly these with setSegmentationClassMask
+  /// each frame; zero means only the subject mask is wanted.
+  segmentationChannels(): number {
+    return this.mod.ccall("goss_session_segmentation_channels", "number", ["number"], [this.handle]);
+  }
+
+  /// Feeds one class channel's mask (from a Segmenter's classMask) as the
+  /// texture that channel's passes sample. channel indexes
+  /// SEGMENTATION_CHANNELS; channel 0 (person) goes through
+  /// setSegmentationMask, which clears the classes, so upload these after.
+  setSegmentationClassMask(channel: number, mask: Float32Array | null): void {
+    const count = SEGMENTATION_MASK_SIDE * SEGMENTATION_MASK_SIDE;
+    if (!mask || mask.length < count) {
+      this.mod.ccall("goss_session_set_segmentation_class_mask", "number", ["number", "number", "number", "number"], [this.handle, channel, 0, 0]);
+      return;
+    }
+    this.mod.HEAPF32.set(mask.subarray(0, count), this.segmentationMaskPtr >> 2);
+    this.mod.ccall(
+      "goss_session_set_segmentation_class_mask",
+      "number",
+      ["number", "number", "number", "number"],
+      [this.handle, channel, this.segmentationMaskPtr, count],
     );
   }
 

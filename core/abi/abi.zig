@@ -2893,6 +2893,37 @@ pub export fn goss_session_set_segmentation_mask(session: ?*Session, mask: ?[*]c
     return .ok;
 }
 
+/// The class channels the active lens samples, as a bitmask over
+/// mask_channels (bit 0 person, bit 1 background, and so on). The web app
+/// uploads exactly these class masks each frame; the in-engine worker path
+/// names the same set. Zero means only the subject mask is wanted.
+pub export fn goss_session_segmentation_channels(session: ?*Session) u32 {
+    const s = session orelse return 0;
+    var channels: u32 = 0;
+    var it = s.shader_masks.valueIterator();
+    while (it.next()) |channel| channels |= @as(u32, 1) << @intCast(channel.*);
+    return channels;
+}
+
+/// Uploads one class channel's mask (mask_side x mask_side floats) as the
+/// texture that channel's shader passes sample. Channel indexes
+/// mask_channels; channel 0 (person) rides set_segmentation_mask, which
+/// clears every class channel first, so upload the classes after it.
+pub export fn goss_session_set_segmentation_class_mask(session: ?*Session, channel: u32, mask: ?[*]const f32, mask_len: u32) Status {
+    if (!is_web) return .unsupported;
+    const s = session orelse return .invalid_argument;
+    if (channel == 0 or channel >= manifest.mask_channels.len) return .invalid_argument;
+    if (s.engine.renderer) |*r| {
+        if (s.segmentation_class_textures[channel]) |texture| r.destroyTexture(texture);
+    }
+    s.segmentation_class_textures[channel] = null;
+    if (mask_len == 0) return .ok;
+    if (mask_len != segmentation.mask_len) return .invalid_argument;
+    const m = mask orelse return .invalid_argument;
+    s.segmentation_class_textures[channel] = maskToTexture(@ptrCast(m));
+    return .ok;
+}
+
 /// Runs the beauty chain over one RGBA frame on the calling thread,
 /// reading the newest tracking result for the landmark driven effects
 /// when face tracking is enabled. The stated CPU path: live preview

@@ -187,6 +187,8 @@ interface SegmentationExports {
   goss_segmentation_destroy(core: number): void;
   goss_segmentation_process(core: number, rgba: number, width: number, height: number): number;
   goss_segmentation_read_mask(core: number, out: number): number;
+  goss_segmentation_class_count(core: number): number;
+  goss_segmentation_read_class_mask(core: number, classIndex: number, out: number): number;
 }
 
 /// The web segmenter: the same wasm module's segmentation core, run in a
@@ -239,6 +241,21 @@ export class Segmenter {
       throw new Error("segmentation process refused the frame");
     }
     if (this.exports.goss_segmentation_read_mask(this.core, this.maskPtr) !== 0) return null;
+    const count = this.maskSide * this.maskSide;
+    return new Float32Array(this.exports.memory.buffer, this.maskPtr, count).slice(0, count);
+  }
+
+  /** How many classes the model publishes: one for the selfie/hair
+   * segmenters, more for the multiclass model behind per-class channels. */
+  get classCount(): number {
+    return this.exports.goss_segmentation_class_count(this.core);
+  }
+
+  /** One class channel (mask_side x mask_side floats) from the last
+   * processed frame, or null before the first result. classIndex runs the
+   * model's own label order; channel N of the mask channels reads N - 1. */
+  classMask(classIndex: number): Float32Array | null {
+    if (this.exports.goss_segmentation_read_class_mask(this.core, classIndex, this.maskPtr) !== 0) return null;
     const count = this.maskSide * this.maskSide;
     return new Float32Array(this.exports.memory.buffer, this.maskPtr, count).slice(0, count);
   }

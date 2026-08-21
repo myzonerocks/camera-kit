@@ -503,6 +503,17 @@ goss_status goss_session_set_face_landmarks(goss_session *session, const float *
  * clears it. Unsupported off the web, where the in-engine worker runs. */
 goss_status goss_session_set_segmentation_mask(goss_session *session, const float *mask, uint32_t mask_len);
 
+/* The class channels the active lens samples, as a bitmask over the mask
+ * channels (bit 0 person, bit 1 background, and so on). The web app uploads
+ * exactly these class masks each frame; zero means only the subject mask. */
+uint32_t goss_session_segmentation_channels(goss_session *session);
+
+/* Web analysis-producer path: uploads one class channel's mask (mask_side *
+ * mask_side floats) as the texture that channel's passes sample. channel
+ * indexes the mask channels; channel 0 (person) rides the subject mask,
+ * which clears the class channels, so upload the classes after it. */
+goss_status goss_session_set_segmentation_class_mask(goss_session *session, uint32_t channel, const float *mask, uint32_t mask_len);
+
 /* Graph thread. The CPU-copy path for a single-plane BGRA8/RGBA8 frame -
  * a canvas or video element's own byte buffer, with no native GPU handle
  * behind it the way goss_session_submit_frame's zero-copy path needs. Same

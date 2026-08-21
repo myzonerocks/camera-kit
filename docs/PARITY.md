@@ -10,7 +10,7 @@ CaptureOutput, Events.
 | Live capture | demonstrated on device | built, no hardware yet | demonstrated in browser |
 | Preview render | demonstrated on device | built, no hardware yet | demonstrated in browser |
 | Face tracking | demonstrated on device | built, no hardware yet | demonstrated in browser |
-| Segmentation | proven in the host harness, multiclass with per-class lens channels | built, no hardware yet | built, the sync segmentation core on the wasm tracking module, fed back through set_segmentation_mask |
+| Segmentation | proven in the host harness, multiclass with per-class lens channels | built, no hardware yet | built, the sync segmentation core on the wasm tracking module, subject and per-class channels fed back through set_segmentation_mask and set_segmentation_class_mask |
 | Pose tracking | proven in the host harness | built, no hardware yet | built, the pose pipeline on the wasm tracking module, read through a PoseTracker |
 | Hand tracking (landmarks, handedness, gestures) | proven in the host harness | built, no hardware yet | built, the hand pipeline on the wasm tracking module, read through a HandTracker |
 | Beauty (six effects) | demonstrated on device | built, no hardware yet | demonstrated in browser |
