@@ -4,10 +4,10 @@
 // exactly what it reaches for, no filesystem, no sockets. Frames go in as
 // RGBA pixels, the frozen result struct comes back parsed.
 
-export const FACE_LANDMARK_COUNT = 478;
-export const FACE_BLENDSHAPE_COUNT = 52;
+export const GOSS_FACE_LANDMARK_COUNT = 478;
+export const GOSS_FACE_BLENDSHAPE_COUNT = 52;
 
-export interface FaceResult {
+export interface GossFaceResult {
   frameSerial: bigint;
   timestampUs: bigint;
   presence: number;
@@ -96,7 +96,7 @@ function totalWasi(getMemory: () => WebAssembly.Memory): WebAssembly.ModuleImpor
   });
 }
 
-export class FaceTracker {
+export class GossFaceTracker {
   private constructor(
     private exports: TrackingExports,
     private instance: number,
@@ -111,34 +111,34 @@ export class FaceTracker {
   /** Optional stage reporting for hosts that want startup visibility. */
   static onStage: ((stage: string) => void) | null = null;
 
-  static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<FaceTracker> {
+  static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<GossFaceTracker> {
     let memory: WebAssembly.Memory | undefined;
-    FaceTracker.onStage?.("instantiating");
+    GossFaceTracker.onStage?.("instantiating");
     const { instance } = await WebAssembly.instantiate(moduleBytes, {
       wasi_snapshot_preview1: totalWasi(() => memory!),
     });
-    FaceTracker.onStage?.("instantiated");
+    GossFaceTracker.onStage?.("instantiated");
     const exports = instance.exports as unknown as TrackingExports;
     memory = exports.memory;
 
-    FaceTracker.onStage?.("engines starting");
+    GossFaceTracker.onStage?.("engines starting");
     const taskPtr = exports.goss_tracking_alloc(taskBundle.length);
     if (taskPtr === 0) throw new Error("tracking module allocation failed");
     new Uint8Array(exports.memory.buffer, taskPtr, taskBundle.length).set(taskBundle);
-    FaceTracker.onStage?.("bundle staged");
+    GossFaceTracker.onStage?.("bundle staged");
     const handle = exports.goss_tracking_create(taskPtr, taskBundle.length);
-    FaceTracker.onStage?.("engines returned");
+    GossFaceTracker.onStage?.("engines returned");
     exports.goss_tracking_free(taskPtr, taskBundle.length);
     if (handle === 0) throw new Error("tracking bundle rejected");
 
     const resultPtr = exports.goss_tracking_alloc(exports.goss_tracking_result_size());
     if (resultPtr === 0) throw new Error("tracking module allocation failed");
-    return new FaceTracker(exports, handle, resultPtr, 0, 0);
+    return new GossFaceTracker(exports, handle, resultPtr, 0, 0);
   }
 
   /** Runs the pipeline over one RGBA frame; returns the parsed result, or
    * null while nothing has been published yet. */
-  process(rgba: Uint8Array, width: number, height: number, timestampUs: bigint): FaceResult | null {
+  process(rgba: Uint8Array, width: number, height: number, timestampUs: bigint): GossFaceResult | null {
     const needed = width * height * 4;
     if (rgba.length < needed) throw new Error("frame shorter than its dimensions");
     if (this.frameCapacity < needed) {
@@ -155,17 +155,17 @@ export class FaceTracker {
   }
 
   /** The newest published result, parsed out of the frozen layout. */
-  latest(): FaceResult | null {
+  latest(): GossFaceResult | null {
     if (this.exports.goss_tracking_result(this.instance, this.resultPtr) !== 0) return null;
     const view = new DataView(this.exports.memory.buffer, this.resultPtr);
-    const floats = new Float32Array(this.exports.memory.buffer, this.resultPtr + 24, FACE_LANDMARK_COUNT * 3 + FACE_BLENDSHAPE_COUNT);
+    const floats = new Float32Array(this.exports.memory.buffer, this.resultPtr + 24, GOSS_FACE_LANDMARK_COUNT * 3 + GOSS_FACE_BLENDSHAPE_COUNT);
     return {
       frameSerial: view.getBigUint64(0, true),
       timestampUs: view.getBigInt64(8, true),
       presence: view.getFloat32(16, true),
       landmarkCount: view.getUint32(20, true),
-      landmarks: floats.slice(0, FACE_LANDMARK_COUNT * 3),
-      blendshapes: floats.slice(FACE_LANDMARK_COUNT * 3),
+      landmarks: floats.slice(0, GOSS_FACE_LANDMARK_COUNT * 3),
+      blendshapes: floats.slice(GOSS_FACE_LANDMARK_COUNT * 3),
     };
   }
 
@@ -176,7 +176,7 @@ export class FaceTracker {
   }
 }
 
-export const SEGMENTATION_MASK_SIDE = 256;
+export const GOSS_SEGMENTATION_MASK_SIDE = 256;
 
 interface SegmentationExports {
   memory: WebAssembly.Memory;
@@ -194,7 +194,7 @@ interface SegmentationExports {
 /// The web segmenter: the same wasm module's segmentation core, run in a
 /// Worker. A single .tflite model in, a mask_side x mask_side subject mask
 /// out. Feed the mask to a session with setSegmentationMask.
-export class Segmenter {
+export class GossSegmenter {
   private constructor(
     private exports: SegmentationExports,
     private core: number,
@@ -204,7 +204,7 @@ export class Segmenter {
     private frameCapacity: number,
   ) {}
 
-  static async create(moduleBytes: ArrayBuffer, modelBytes: Uint8Array): Promise<Segmenter> {
+  static async create(moduleBytes: ArrayBuffer, modelBytes: Uint8Array): Promise<GossSegmenter> {
     let memory: WebAssembly.Memory | undefined;
     const { instance } = await WebAssembly.instantiate(moduleBytes, {
       wasi_snapshot_preview1: totalWasi(() => memory!),
@@ -222,7 +222,7 @@ export class Segmenter {
     const side = exports.goss_segmentation_mask_side();
     const maskPtr = exports.goss_tracking_alloc(side * side * 4);
     if (maskPtr === 0) throw new Error("segmentation module allocation failed");
-    return new Segmenter(exports, core, maskPtr, side, 0, 0);
+    return new GossSegmenter(exports, core, maskPtr, side, 0, 0);
   }
 
   /** Runs the segmenter over one RGBA frame; returns the subject mask
@@ -267,9 +267,9 @@ export class Segmenter {
   }
 }
 
-export const POSE_LANDMARK_COUNT = 33;
+export const GOSS_POSE_LANDMARK_COUNT = 33;
 
-export interface PoseResult {
+export interface GossPoseResult {
   frameSerial: bigint;
   timestampUs: bigint;
   presence: number;
@@ -293,7 +293,7 @@ interface PoseExports {
 
 /// The web pose tracker: the wasm module's pose pipeline, run in a Worker.
 /// A pose task bundle in, the 33-landmark pose result out per frame.
-export class PoseTracker {
+export class GossPoseTracker {
   private constructor(
     private exports: PoseExports,
     private instance: number,
@@ -302,7 +302,7 @@ export class PoseTracker {
     private frameCapacity: number,
   ) {}
 
-  static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<PoseTracker> {
+  static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<GossPoseTracker> {
     let memory: WebAssembly.Memory | undefined;
     const { instance } = await WebAssembly.instantiate(moduleBytes, {
       wasi_snapshot_preview1: totalWasi(() => memory!),
@@ -319,10 +319,10 @@ export class PoseTracker {
 
     const resultPtr = exports.goss_tracking_alloc(exports.goss_pose_result_size());
     if (resultPtr === 0) throw new Error("pose module allocation failed");
-    return new PoseTracker(exports, handle, resultPtr, 0, 0);
+    return new GossPoseTracker(exports, handle, resultPtr, 0, 0);
   }
 
-  process(rgba: Uint8Array, width: number, height: number, timestampUs: bigint): PoseResult | null {
+  process(rgba: Uint8Array, width: number, height: number, timestampUs: bigint): GossPoseResult | null {
     const needed = width * height * 4;
     if (rgba.length < needed) throw new Error("frame shorter than its dimensions");
     if (this.frameCapacity < needed) {
@@ -338,13 +338,13 @@ export class PoseTracker {
     return this.latest();
   }
 
-  latest(): PoseResult | null {
+  latest(): GossPoseResult | null {
     if (this.exports.goss_pose_result(this.instance, this.resultPtr) !== 0) return null;
     const buffer = this.exports.memory.buffer;
     const view = new DataView(buffer, this.resultPtr);
-    const landmarks = new Float32Array(buffer, this.resultPtr + 24, POSE_LANDMARK_COUNT * 3).slice();
-    const visibilities = new Float32Array(buffer, this.resultPtr + 24 + POSE_LANDMARK_COUNT * 3 * 4, POSE_LANDMARK_COUNT).slice();
-    const presences = new Float32Array(buffer, this.resultPtr + 24 + POSE_LANDMARK_COUNT * 4 * 4, POSE_LANDMARK_COUNT).slice();
+    const landmarks = new Float32Array(buffer, this.resultPtr + 24, GOSS_POSE_LANDMARK_COUNT * 3).slice();
+    const visibilities = new Float32Array(buffer, this.resultPtr + 24 + GOSS_POSE_LANDMARK_COUNT * 3 * 4, GOSS_POSE_LANDMARK_COUNT).slice();
+    const presences = new Float32Array(buffer, this.resultPtr + 24 + GOSS_POSE_LANDMARK_COUNT * 4 * 4, GOSS_POSE_LANDMARK_COUNT).slice();
     return {
       frameSerial: view.getBigUint64(0, true),
       timestampUs: view.getBigInt64(8, true),
@@ -363,11 +363,11 @@ export class PoseTracker {
   }
 }
 
-export const HAND_LANDMARK_COUNT = 21;
-export const MAX_HANDS = 2;
-const HAND_STRIDE = 16 + HAND_LANDMARK_COUNT * 3 * 4; // one Hand, bytes
+export const GOSS_HAND_LANDMARK_COUNT = 21;
+export const GOSS_MAX_HANDS = 2;
+const HAND_STRIDE = 16 + GOSS_HAND_LANDMARK_COUNT * 3 * 4; // one GossHand, bytes
 
-export interface Hand {
+export interface GossHand {
   presence: number;
   /** the model's score that this is a right hand. */
   handedness: number;
@@ -377,11 +377,11 @@ export interface Hand {
   landmarks: Float32Array;
 }
 
-export interface HandResult {
+export interface GossHandResult {
   frameSerial: bigint;
   timestampUs: bigint;
   handCount: number;
-  hands: Hand[];
+  hands: GossHand[];
 }
 
 interface HandExports {
@@ -398,7 +398,7 @@ interface HandExports {
 /// The web hand tracker: the wasm module's hand pipeline, run in a Worker.
 /// A hand landmarker or gesture-recognizer bundle in, up to two tracked
 /// hands out - landmarks, handedness, and a canned gesture when present.
-export class HandTracker {
+export class GossHandTracker {
   private constructor(
     private exports: HandExports,
     private instance: number,
@@ -407,7 +407,7 @@ export class HandTracker {
     private frameCapacity: number,
   ) {}
 
-  static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<HandTracker> {
+  static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<GossHandTracker> {
     let memory: WebAssembly.Memory | undefined;
     const { instance } = await WebAssembly.instantiate(moduleBytes, {
       wasi_snapshot_preview1: totalWasi(() => memory!),
@@ -424,10 +424,10 @@ export class HandTracker {
 
     const resultPtr = exports.goss_tracking_alloc(exports.goss_hand_result_size());
     if (resultPtr === 0) throw new Error("hand module allocation failed");
-    return new HandTracker(exports, handle, resultPtr, 0, 0);
+    return new GossHandTracker(exports, handle, resultPtr, 0, 0);
   }
 
-  process(rgba: Uint8Array, width: number, height: number, timestampUs: bigint): HandResult | null {
+  process(rgba: Uint8Array, width: number, height: number, timestampUs: bigint): GossHandResult | null {
     const needed = width * height * 4;
     if (rgba.length < needed) throw new Error("frame shorter than its dimensions");
     if (this.frameCapacity < needed) {
@@ -443,20 +443,20 @@ export class HandTracker {
     return this.latest();
   }
 
-  latest(): HandResult | null {
+  latest(): GossHandResult | null {
     if (this.exports.goss_hand_result(this.instance, this.resultPtr) !== 0) return null;
     const buffer = this.exports.memory.buffer;
     const view = new DataView(buffer, this.resultPtr);
     const handCount = view.getUint32(16, true);
-    const hands: Hand[] = [];
-    for (let h = 0; h < handCount && h < MAX_HANDS; h += 1) {
+    const hands: GossHand[] = [];
+    for (let h = 0; h < handCount && h < GOSS_MAX_HANDS; h += 1) {
       const base = 24 + h * HAND_STRIDE;
       hands.push({
         presence: view.getFloat32(base, true),
         handedness: view.getFloat32(base + 4, true),
         gesture: view.getUint32(base + 8, true),
         gestureScore: view.getFloat32(base + 12, true),
-        landmarks: new Float32Array(buffer, this.resultPtr + base + 16, HAND_LANDMARK_COUNT * 3).slice(),
+        landmarks: new Float32Array(buffer, this.resultPtr + base + 16, GOSS_HAND_LANDMARK_COUNT * 3).slice(),
       });
     }
     return {

@@ -4,7 +4,7 @@ import Foundation
 /// The live signals goss_session_tick_lens evaluates a lens's compiled
 /// triggers against. hasFace false means every face-driven signal reads
 /// as false regardless of what blendshapes holds.
-public struct LensSignals {
+public struct GossLensSignals {
     public var hasFace: Bool
     public var handsPresent: Bool
     public var tap: Bool
@@ -38,9 +38,9 @@ public struct LensSignals {
     }
 }
 
-/// Lens lifecycle, reached directly off Session rather than its own
+/// Lens lifecycle, reached directly off GossSession rather than its own
 /// handle type.
-extension Session {
+extension GossSession {
     /// Replaces any currently active lens with the one manifestJson
     /// describes, and applies its default effect values to the beauty
     /// chain if one is enabled.
@@ -69,7 +69,7 @@ extension Session {
     /// Advances the active lens by dtUs of real time, applying every
     /// effect value its triggers change to the beauty chain. Throws
     /// .again with no active lens.
-    public func tickLens(dtUs: UInt32, signals: LensSignals) throws {
+    public func tickLens(dtUs: UInt32, signals: GossLensSignals) throws {
         try signals.withRaw { raw in
             try checked(goss_session_tick_lens(handle, dtUs, &raw))
         }

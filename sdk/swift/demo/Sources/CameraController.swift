@@ -24,7 +24,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private let captureSession = AVCaptureSession()
     private let outputQueue = DispatchQueue(label: "com.gosslens.demo.capture")
     private var textureCache: CVMetalTextureCache?
-    private var session: Session?
+    private var session: GossSession?
 
     // Main-thread only: the two most recently SUBMITTED frames' platform
     // objects. Advancing on successful submits rather than captures means
@@ -81,7 +81,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         }
     }
 
-    func start(session: Session?, position: AVCaptureDevice.Position = .front) {
+    func start(session: GossSession?, position: AVCaptureDevice.Position = .front) {
         self.session = session
         enableEngineFeaturesWhenActive()
 
@@ -332,7 +332,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
               let uvTexture = CVMetalTextureGetTexture(uvRef)
         else { return }
 
-        var standard: ColorStandard = .bt709
+        var standard: GossColorStandard = .bt709
         if let matrix = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String {
             if matrix == (kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String) {
                 standard = .bt601
@@ -352,7 +352,7 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         // retainedFrames on a successful submit.
         DispatchQueue.main.async { [weak self, session, pixelBuffer, yRef, uvRef] in
             guard let self else { return }
-            let desc = FrameDesc(width: UInt32(width), height: UInt32(height), pixelFormat: .nv12, colorStandard: standard, rotationDegrees: rotationDegrees, mirrored: self.mirrored, timestampUs: timestampUs)
+            let desc = GossFrameDesc(width: UInt32(width), height: UInt32(height), pixelFormat: .nv12, colorStandard: standard, rotationDegrees: rotationDegrees, mirrored: self.mirrored, timestampUs: timestampUs)
             if (try? session.submitFrame(desc: desc, planes: [yPlane, uvPlane])) != nil {
                 self.submittedFrames += 1
                 self.frameWidth = width

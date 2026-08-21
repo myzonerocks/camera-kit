@@ -1,8 +1,8 @@
 import CGosslens
 
-/// Pixel/screenshot readback, reached directly off Engine rather than
+/// Pixel/screenshot readback, reached directly off GossEngine rather than
 /// its own handle type.
-extension Engine {
+extension GossEngine {
     /// Debug/test tooling only. Requests a screenshot of the next
     /// presented frame, written to path with a ".tga" suffix appended.
     public func requestScreenshot(path: String) throws {
@@ -16,7 +16,7 @@ extension Engine {
     /// and reads the composited output back as RGBA8, row 0 first, at
     /// the renderer's real dimensions - the returned width and height,
     /// which the caller's requested size only bounds.
-    public func captureFrame(session: Session?, width: UInt32, height: UInt32) throws -> (pixels: [UInt8], width: UInt32, height: UInt32) {
+    public func captureFrame(session: GossSession?, width: UInt32, height: UInt32) throws -> (pixels: [UInt8], width: UInt32, height: UInt32) {
         var data = [UInt8](repeating: 0, count: Int(width) * Int(height) * 4)
         var outWidth: UInt32 = 0
         var outHeight: UInt32 = 0
@@ -29,7 +29,7 @@ extension Engine {
     /// Renders like captureFrame and returns the composited output
     /// encoded as PNG bytes, sized by a probe call first. Deterministic:
     /// the same composited pixels, the same bytes.
-    public func capturePhoto(session: Session?) throws -> (png: [UInt8], width: UInt32, height: UInt32) {
+    public func capturePhoto(session: GossSession?) throws -> (png: [UInt8], width: UInt32, height: UInt32) {
         var needed = 0
         var outWidth: UInt32 = 0
         var outHeight: UInt32 = 0
@@ -85,7 +85,7 @@ extension Engine {
     /// Captures a still at the configured resolution - the submitted
     /// frame's own size by default - decoupled from the preview swap
     /// chain, so a full-sensor still is not clamped to preview size.
-    public func captureStill(session: Session?, config: StillConfig = StillConfig()) throws -> (data: [UInt8], width: UInt32, height: UInt32) {
+    public func captureStill(session: GossSession?, config: StillConfig = StillConfig()) throws -> (data: [UInt8], width: UInt32, height: UInt32) {
         var raw = goss_capture_config(width: config.width, height: config.height, supersample: config.supersample, format: config.format.rawValue, quality: config.quality, color_space: config.colorSpace.rawValue, bit_depth: config.bitDepth)
         var needed = 0
         var outWidth: UInt32 = 0
@@ -107,7 +107,7 @@ extension Engine {
 
     /// Captures the composited frame in a platform photo format. The
     /// PNG capturePhoto stays the deterministic surface.
-    public func capturePhoto(session: Session?, as format: PhotoFormat, quality: UInt32 = 0) throws -> (data: [UInt8], width: UInt32, height: UInt32) {
+    public func capturePhoto(session: GossSession?, as format: PhotoFormat, quality: UInt32 = 0) throws -> (data: [UInt8], width: UInt32, height: UInt32) {
         var needed = 0
         var outWidth: UInt32 = 0
         var outHeight: UInt32 = 0
@@ -129,7 +129,7 @@ extension Engine {
     /// Starts recording the session's rendered frames, effects baked
     /// in, into an MP4 at path. One recording per engine; every
     /// rendered frame appends until stopRecording.
-    public func startRecording(session: Session, path: String, width: UInt32 = 0, height: UInt32 = 0, bitrate: UInt32 = 0, hevc: Bool = false) throws {
+    public func startRecording(session: GossSession, path: String, width: UInt32 = 0, height: UInt32 = 0, bitrate: UInt32 = 0, hevc: Bool = false) throws {
         var config = goss_recording_config(width: width, height: height, bitrate_bps: bitrate, codec: hevc ? 1 : 0)
         let bytes = Array(path.utf8)
         try bytes.withUnsafeBufferPointer { buffer in
@@ -146,7 +146,7 @@ extension Engine {
     /// Feeds interleaved f32 PCM into the session: the engine's level
     /// and beat analysis drives audio triggers, and an active recording
     /// muxes it as the audio track.
-    public func submitAudio(session: Session, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32, timestampUs: Int64) throws {
+    public func submitAudio(session: GossSession, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32, timestampUs: Int64) throws {
         try samples.withUnsafeBufferPointer { buffer in
             try checked(goss_session_submit_audio(session.handle, buffer.baseAddress, frameCount, sampleRate, channels, timestampUs))
         }

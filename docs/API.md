@@ -21,18 +21,29 @@ not ship first and be reconciled later.
 
 Every public ABI operation belongs to one public construct.
 
-| Type | Owns |
-|---|---|
-| `Gosslens` | ABI bootstrap and pure stateless helpers |
-| `Engine` | engine and render-surface lifecycle |
-| `CaptureOutput` | screenshots, pixel readback, photo/video output |
-| `Session` | frame submission, tracking, beauty, segmentation, runtime control |
-| `Events` | per-session state and pull-based results |
-| `LensRegistry` | lens activation, deactivation, and ticking |
+| Construct | Spelled | Owns |
+|---|---|---|
+| bootstrap | `Gosslens` | ABI bootstrap and pure stateless helpers |
+| engine | `GossEngine` | engine and render-surface lifecycle |
+| capture output | `GossEngine` capture methods | screenshots, pixel readback, photo/video output |
+| session | `GossSession` | frame submission, tracking, beauty, segmentation, runtime control |
+| events | `GossSession` pull results | per-session state and pull-based results |
+| lens registry | `GossSession` lens methods | lens activation, deactivation, and ticking |
 
-`CaptureOutput`, `Events`, and `LensRegistry` may be exposed as borrowed views
-or flattened convenience methods where the SDK already does so, but operation
-names and parameter meaning do not change.
+Capture output, events, and lens registry flatten onto `GossEngine` and
+`GossSession` where the SDK already does so; operation names and parameter
+meaning do not change.
+
+## Type spelling
+
+Every concrete public type is spelled with a `Goss` prefix - `GossEngine`,
+`GossSession`, `GossFaceResult`, `GossStatus`, and so on - so a type name never
+collides with a host app's own `Session`, `Engine`, or `Frame`. The one
+exception is the bootstrap namespace, which keeps the brand name `Gosslens`
+because it never collides. TypeScript's top-level constants take a `GOSS_`
+prefix for the same reason; Swift and Kotlin already scope theirs inside a type
+or the `Gosslens` namespace. Method names, parameters, and value semantics do
+not change with the spelling.
 
 New media work does not automatically create new public types. If a new ABI
 operation cannot fit this ontology cleanly, the type model is extended here
@@ -121,11 +132,11 @@ file must move together.
 | `goss_alloc` | ABI buffer plumbing for the wasm boundary; no public SDK operation | web internal |
 | `goss_free` | ABI buffer plumbing for the wasm boundary; no public SDK operation | web internal |
 
-### Engine
+### GossEngine
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_engine_create` | `Engine.create(config)` | all SDKs |
+| `goss_engine_create` | `GossEngine.create(config)` | all SDKs |
 | `goss_engine_destroy` | `destroy()`; Kotlin may use `close()` | all SDKs |
 | `goss_engine_init_renderer` | `initRenderer(surface, width, height)` | all SDKs |
 | `goss_engine_resize` | `resize(width, height)` | all SDKs |
@@ -143,13 +154,13 @@ file must move together.
 | `goss_engine_recording_start` | `startRecording(session, path, config)`, appending one video frame per rendered frame with effects baked in | Swift and Kotlin |
 | `goss_engine_recording_stop` | `stopRecording()`, flushing in-flight frames and finalizing the file | same |
 | `goss_session_submit_audio` | `submitAudio(session, samples, frameCount, sampleRate, channels, timestampUs)`, feeding level and beat triggers always and the recording's audio track where the backend muxes audio | Swift and Kotlin |
-| `goss_session_submit_world` | `submitWorld(session, state, planes, anchors, light)`, feeding the tracking-state trigger and world-anchored content | Swift WorldSource on ARKit, the ARCore demo feeder, and the web SDK's WebXRWorldSource |
+| `goss_session_submit_world` | `submitWorld(session, state, planes, anchors, light)`, feeding the tracking-state trigger and world-anchored content | Swift GossWorldSource on ARKit, the ARCore demo feeder, and the web SDK's GossWebXRWorldSource |
 
-### Session lifecycle
+### GossSession lifecycle
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_create` | `Session.create(engine, config)` | all SDKs |
+| `goss_session_create` | `GossSession.create(engine, config)` | all SDKs |
 | `goss_session_destroy` | `destroy()`; Kotlin may use `close()` | all SDKs |
 
 ### Frame submission

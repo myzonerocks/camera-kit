@@ -5,7 +5,7 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Plane
 import com.google.ar.core.TrackingState
 import com.gosslens.Gosslens
-import com.gosslens.Session
+import com.gosslens.GossSession
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -13,7 +13,7 @@ import java.nio.ByteOrder
  * projection, tracked planes, anchors, and the light estimate, one
  * submit per ARCore frame. The activity owns the ARCore session; this
  * feeder only reads its frames. */
-class WorldFeeder(private val session: Session) {
+class WorldFeeder(private val session: GossSession) {
     private val stateBuffer = ByteBuffer.allocateDirect(144).order(ByteOrder.nativeOrder())
     private val lightBuffer = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
     private var planesBuffer = ByteBuffer.allocateDirect(88 * 8).order(ByteOrder.nativeOrder())

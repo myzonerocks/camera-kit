@@ -154,12 +154,12 @@ enum ConformanceRunner {
     /// own renderOnce - proves activation and teardown aren't hiding state
     /// that would make a second run trivially match the first.
     private static func renderOnce(metalLayer: CAMetalLayer, width: UInt32, height: UInt32, corpus: Nv12Corpus, outPath: String) -> String? {
-        guard let engine = try? Engine.create() else { return nil }
+        guard let engine = try? GossEngine.create() else { return nil }
         defer { engine.destroy() }
 
         guard (try? engine.initRenderer(surface: Unmanaged.passUnretained(metalLayer).toOpaque(), width: width, height: height)) != nil else { return nil }
 
-        guard let session = try? Session.create(engine: engine) else { return nil }
+        guard let session = try? GossSession.create(engine: engine) else { return nil }
         defer { session.destroy() }
 
         guard let lensManifestURL = Bundle.main.url(forResource: "manifest", withExtension: "json", subdirectory: "shader-tint") else { return nil }

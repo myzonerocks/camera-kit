@@ -19,10 +19,10 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.gosslens.Engine
-import com.gosslens.FaceResult
-import com.gosslens.LensSignals
-import com.gosslens.Session
+import com.gosslens.GossEngine
+import com.gosslens.GossFaceResult
+import com.gosslens.GossLensSignals
+import com.gosslens.GossSession
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
@@ -34,8 +34,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private val tag = "GOSSDROID"
     private lateinit var surfaceView: SurfaceView
     private lateinit var overlay: FaceOverlayView
-    private var engine: Engine? = null
-    private var session: Session? = null
+    private var engine: GossEngine? = null
+    private var session: GossSession? = null
     private val analysisExecutor = Executors.newSingleThreadExecutor()
 
     private var cameraFrames = 0
@@ -43,7 +43,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
     private var fpsWindowStart = 0L
     private var fpsWindowFrames = 0
     private var lastFrameNanos = 0L
-    private val lensSignals = LensSignals()
+    private val lensSignals = GossLensSignals()
 
     // Ring depth 2: submits hop to the main thread (bgfx's contract), so
     // the analyzer refills the next slot while the prior one is in
@@ -105,10 +105,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
             ConformanceRunner.run(this, holder.surface, width, height)
             return
         }
-        val created = Engine.create()
+        val created = GossEngine.create()
         created.initRenderer(holder.surface, width, height)
         engine = created
-        val createdSession = Session.create(created)
+        val createdSession = GossSession.create(created)
         session = createdSession
         Log.i(tag, "renderer up ${width}x$height")
         try {
@@ -189,7 +189,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
      * render frame regardless of whether that particular result was new
      * keeps the lens's own animation ramps advancing smoothly at display
      * refresh rate rather than at tracking cadence. */
-    private fun tickLens(session: Session, dtUs: Int) {
+    private fun tickLens(session: GossSession, dtUs: Int) {
         val hasFace = overlay.hasFaceResult &&
             overlay.latestFaceResult.presence >= 0.5f &&
             overlay.latestFaceResult.landmarkCount > 0
@@ -222,7 +222,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback {
         return filesDir.absolutePath
     }
 
-    // Each slider reaches Session.setBeauty directly; the effect only
+    // Each slider reaches GossSession.setBeauty directly; the effect only
     // shows up once something reads the rgba back out through
     // beautifyFrame, which this cpu copy path preview does not do yet.
     private fun setupBeautyControls(root: FrameLayout) {

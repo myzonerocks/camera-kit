@@ -18,16 +18,16 @@ final class PreviewViewController: UIViewController {
     private let beautyStack = UIStackView()
     private let faceLayer = CAShapeLayer()
     private let handLayer = CAShapeLayer()
-    private let trackedFace = FaceResult()
-    private let trackedHands = HandResult()
-    private let trackedPose = PoseResult()
+    private let trackedFace = GossFaceResult()
+    private let trackedHands = GossHandResult()
+    private let trackedPose = GossPoseResult()
     private let poseLayer = CAShapeLayer()
     private var lastPoseSerial: UInt64 = 0
     private var lastFaceSerial: UInt64 = 0
     private var lastHandSerial: UInt64 = 0
 
-    private var engine: Engine?
-    private var session: Session?
+    private var engine: GossEngine?
+    private var session: GossSession?
     private var displayLink: CADisplayLink?
 
     private var renderedFrames = 0
@@ -172,7 +172,7 @@ final class PreviewViewController: UIViewController {
     }
 
     private func startEngine(pixelWidth: UInt32, pixelHeight: UInt32) {
-        guard let newEngine = try? Engine.create() else {
+        guard let newEngine = try? GossEngine.create() else {
             statusLabel.text = "engine create failed"
             return
         }
@@ -186,7 +186,7 @@ final class PreviewViewController: UIViewController {
             return
         }
 
-        guard let newSession = try? Session.create(engine: newEngine) else {
+        guard let newSession = try? GossSession.create(engine: newEngine) else {
             statusLabel.text = "session create failed"
             return
         }
@@ -275,8 +275,8 @@ final class PreviewViewController: UIViewController {
         let scaleX = bounds.width / sensorHeight
         let scaleY = bounds.height / sensorWidth
         for handAt in 0 ..< trackedHands.handCount {
-            let base = handAt * HandResult.landmarkCount * 3
-            for point in 0 ..< HandResult.landmarkCount {
+            let base = handAt * GossHandResult.landmarkCount * 3
+            for point in 0 ..< GossHandResult.landmarkCount {
                 let x = CGFloat(trackedHands.landmarks[base + point * 3])
                 let y = CGFloat(trackedHands.landmarks[base + point * 3 + 1])
                 var viewX = (sensorHeight - y) * scaleX
@@ -327,7 +327,7 @@ final class PreviewViewController: UIViewController {
     /// at display refresh rate rather than at tracking cadence.
     private func tickLens(dtUs: UInt32) {
         guard let session else { return }
-        let signals = LensSignals(
+        let signals = GossLensSignals(
             hasFace: trackedFace.presence >= 0.5 && trackedFace.landmarkCount > 0,
             handsPresent: trackedHands.handCount > 0,
             blendshapes: trackedFace.blendshapes
@@ -347,7 +347,7 @@ final class PreviewViewController: UIViewController {
 }
 
 private extension ProcessInfo.ThermalState {
-    var gossThermal: Thermal {
+    var gossThermal: GossThermal {
         switch self {
         case .nominal: return .nominal
         case .fair: return .fair

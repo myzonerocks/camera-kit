@@ -3,7 +3,7 @@
 // the module instantiated, the model bundle parsed, inference over a
 // decoded still. Reports one structured summary the page turns into a title.
 
-import { FaceTracker, PoseTracker, HandTracker, Segmenter } from "../src/tracking";
+import { GossFaceTracker, GossPoseTracker, GossHandTracker, GossSegmenter } from "../src/tracking";
 
 interface Frame {
   rgba: Uint8Array;
@@ -45,7 +45,7 @@ async function run(): Promise<Record<string, unknown>> {
 
   // Face: the corpus portrait detects, the control frame stays empty.
   {
-    const tracker = await FaceTracker.create(moduleBytes, await bundle("./face_landmarker.task"));
+    const tracker = await GossFaceTracker.create(moduleBytes, await bundle("./face_landmarker.task"));
     const face = await loadFrame("./face_frontal_b.jpg");
     let present = null;
     for (let f = 0; f < 3; f += 1) present = tracker.process(face.rgba, face.width, face.height, BigInt(f * 33_000));
@@ -63,7 +63,7 @@ async function run(): Promise<Record<string, unknown>> {
 
   // Pose: the standing body resolves the 33-landmark skeleton.
   {
-    const tracker = await PoseTracker.create(moduleBytes, await bundle("./pose_landmarker_full.task"));
+    const tracker = await GossPoseTracker.create(moduleBytes, await bundle("./pose_landmarker_full.task"));
     const body = await loadFrame("./body_standing.jpg");
     let pose = null;
     for (let f = 0; f < 4; f += 1) pose = tracker.process(body.rgba, body.width, body.height, BigInt(f * 33_000));
@@ -75,10 +75,10 @@ async function run(): Promise<Record<string, unknown>> {
     };
   }
 
-  // Hand: the full gesture bundle nests the landmarker, so this proves
+  // GossHand: the full gesture bundle nests the landmarker, so this proves
   // landmarks, handedness and a canned gesture off one raised hand.
   {
-    const tracker = await HandTracker.create(moduleBytes, await bundle("./gesture_recognizer.task"));
+    const tracker = await GossHandTracker.create(moduleBytes, await bundle("./gesture_recognizer.task"));
     const raised = await loadFrame("./hand_raised.jpg");
     let hand = null;
     for (let f = 0; f < 4; f += 1) hand = tracker.process(raised.rgba, raised.width, raised.height, BigInt(f * 33_000));
@@ -95,7 +95,7 @@ async function run(): Promise<Record<string, unknown>> {
   // Segmentation: the multiclass model gives a subject mask plus its own
   // class channels, the ones a lens binds per channel.
   {
-    const segmenter = await Segmenter.create(moduleBytes, await bundle("./selfie_multiclass.tflite"));
+    const segmenter = await GossSegmenter.create(moduleBytes, await bundle("./selfie_multiclass.tflite"));
     const face = await loadFrame("./face_frontal_b.jpg");
     let subject: Float32Array | null = null;
     for (let f = 0; f < 2; f += 1) subject = segmenter.process(face.rgba, face.width, face.height);

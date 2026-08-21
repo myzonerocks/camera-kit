@@ -4,11 +4,11 @@
 // arrive as transferred buffers, so the exchange copies nothing on the
 // page side.
 
-import { FaceTracker } from "../src/tracking";
+import { GossFaceTracker } from "../src/tracking";
 
-FaceTracker.onStage = (stage) => self.postMessage({ kind: "stage", stage });
+GossFaceTracker.onStage = (stage) => self.postMessage({ kind: "stage", stage });
 
-let tracker: FaceTracker | null = null;
+let tracker: GossFaceTracker | null = null;
 
 self.postMessage({ kind: "booted" });
 self.onerror = (event) => {
@@ -34,7 +34,7 @@ self.onmessage = async (event: MessageEvent<InitMessage | FrameMessage>) => {
   if (message.kind === "init") {
     try {
       self.postMessage({ kind: "stage", stage: "init received" });
-      tracker = await FaceTracker.create(message.moduleBytes, new Uint8Array(message.taskBundle));
+      tracker = await GossFaceTracker.create(message.moduleBytes, new Uint8Array(message.taskBundle));
       self.postMessage({ kind: "ready" });
     } catch (error) {
       self.postMessage({ kind: "error", message: String(error) });

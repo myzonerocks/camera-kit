@@ -1,7 +1,7 @@
 import CGosslens
 
 /// Frame-path pool bounds; zero means the built-in default.
-public struct EngineConfig {
+public struct GossEngineConfig {
     public var texturePoolCapacity: UInt32
     public var stagingPoolCapacity: UInt32
 
@@ -15,11 +15,11 @@ public struct EngineConfig {
 /// to the thread that creates it, the graph thread - unchecked because
 /// that confinement is the ABI's own contract, not something the
 /// compiler can see through an opaque handle.
-public final class Engine: @unchecked Sendable {
+public final class GossEngine: @unchecked Sendable {
     let handle: OpaquePointer
     private var destroyed = false
 
-    public static func create(config: EngineConfig = EngineConfig()) throws -> Engine {
+    public static func create(config: GossEngineConfig = GossEngineConfig()) throws -> GossEngine {
         var raw = goss_engine_config(
             texture_pool_capacity: config.texturePoolCapacity,
             staging_pool_capacity: config.stagingPoolCapacity
@@ -27,7 +27,7 @@ public final class Engine: @unchecked Sendable {
         var handle: OpaquePointer?
         try checked(goss_engine_create(&raw, &handle))
         guard let handle else { throw GossStatus.outOfMemory }
-        return Engine(handle: handle)
+        return GossEngine(handle: handle)
     }
 
     private init(handle: OpaquePointer) {
@@ -59,7 +59,7 @@ public final class Engine: @unchecked Sendable {
 
     /// Draws session's most recent frame to the surface and presents. A
     /// nil session presents the clear color.
-    public func renderFrame(session: Session?) throws {
+    public func renderFrame(session: GossSession?) throws {
         try checked(goss_engine_render_frame(handle, session?.handle))
     }
 }
