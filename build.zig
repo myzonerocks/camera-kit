@@ -802,6 +802,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "sampler", .module = cores_wasi.sampler },
                 .{ .name = "face", .module = cores_wasi.face },
                 .{ .name = "tracker", .module = cores_wasi.tracker },
+                .{ .name = "pose", .module = cores_wasi.pose },
                 .{ .name = "segmentation_core", .module = segmentation_core_wasi },
             },
         });
