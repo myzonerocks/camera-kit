@@ -96,6 +96,7 @@ pub const Renderer = struct {
     width: u32,
     height: u32,
     layout: c.bgfx_vertex_layout_t,
+    billboard_layout: c.bgfx_vertex_layout_t,
     rgba_program: c.bgfx_program_handle_t,
     nv12_program: c.bgfx_program_handle_t,
     lut_program: c.bgfx_program_handle_t,
@@ -250,6 +251,14 @@ pub const Renderer = struct {
         _ = c.bgfx_vertex_layout_add(&layout, c.BGFX_ATTRIB_TEXCOORD0, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         c.bgfx_vertex_layout_end(&layout);
 
+        // The fading-sprite mesh carries a corner index, remaining-life
+        // fraction, and spin seed per vertex alongside the particle centre.
+        var billboard_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&billboard_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_POSITION, 3, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_TEXCOORD0, 3, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&billboard_layout);
+
         const backend = c.bgfx_get_renderer_type();
         const rgba_program, const nv12_program = switch (backend) {
             c.BGFX_RENDERER_TYPE_METAL => .{
@@ -326,6 +335,7 @@ pub const Renderer = struct {
             .width = options.width,
             .height = options.height,
             .layout = layout,
+            .billboard_layout = billboard_layout,
             .rgba_program = rgba_program,
             .nv12_program = nv12_program,
             .lut_program = lut_program,
@@ -1238,8 +1248,9 @@ pub const Renderer = struct {
         vertex_count: u32,
     };
 
-    pub fn createParticleMesh(r: *Renderer, count: u32) !ParticleMesh {
-        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(count, &r.layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+    pub fn createParticleMesh(r: *Renderer, count: u32, fade: bool) !ParticleMesh {
+        const vlayout = if (fade) &r.billboard_layout else &r.layout;
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(count, vlayout, c.BGFX_BUFFER_ALLOW_RESIZE);
         return .{ .position_buffer = position_buffer, .vertex_count = count };
     }
 
@@ -1253,11 +1264,12 @@ pub const Renderer = struct {
         c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
     }
 
-    /// Uploads already-interleaved sprite vertices (position, life, corner
-    /// index per vertex) straight into the mesh - writeBillboards' output.
+    /// Uploads already-interleaved sprite vertices (position, corner index,
+    /// life, seed per vertex - six floats) straight into the mesh; the
+    /// writeBillboards output.
     pub fn updateParticleMeshFaded(mesh: ParticleMesh, faded: []const f32) void {
-        const count = @min(faded.len / 5, mesh.vertex_count);
-        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(faded.ptr, @intCast(count * 5 * @sizeOf(f32))));
+        const count = @min(faded.len / 6, mesh.vertex_count);
+        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(faded.ptr, @intCast(count * 6 * @sizeOf(f32))));
     }
 
     pub fn destroyParticleMesh(mesh: ParticleMesh) void {
@@ -1272,7 +1284,7 @@ pub const Renderer = struct {
         return r.default_sprite_texture;
     }
 
-    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, sprite_size_ndc: [2]f32, glow: bool, sprite_texture: c.bgfx_texture_handle_t) void {
+    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, particle_params: [4]f32, glow: bool, sprite_texture: c.bgfx_texture_handle_t) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
@@ -1286,8 +1298,7 @@ pub const Renderer = struct {
         if (fade) {
             c.bgfx_set_texture(0, r.tex_sprite, sprite_texture, std.math.maxInt(u32));
             c.bgfx_set_uniform(r.particle_cool_uniform, &cool_color, 1);
-            const size_vec4 = [4]f32{ sprite_size_ndc[0], sprite_size_ndc[1], 0.0, 0.0 };
-            c.bgfx_set_uniform(r.particle_size_uniform, &size_vec4, 1);
+            c.bgfx_set_uniform(r.particle_size_uniform, &particle_params, 1);
             // Glow blends additively (overlaps brighten); otherwise a plain
             // src-alpha composite.
             const dst = if (glow) c.BGFX_STATE_BLEND_ONE else c.BGFX_STATE_BLEND_INV_SRC_ALPHA;

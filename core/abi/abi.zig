@@ -1149,19 +1149,24 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     // fountain, at a fixed step so the sim stays deterministic.
                     var fade = false;
                     var glow = false;
-                    var sprite_size_ndc: [2]f32 = .{ 0, 0 };
-                    const base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
+                    var particle_params: [4]f32 = .{ 0, 0, 1, 0 };
+                    var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
                     var cool_color = base_color;
                     if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
                         if (!s.capture_requested) sys.step(1.0 / 60.0);
                         fade = sys.field.fade;
                         glow = sys.field.glow;
+                        if (sys.field.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                        cool_color = base_color;
                         if (sys.field.cool) |c_| cool_color = .{ c_[0], c_[1], c_[2], 1.0 };
                         const count = sys.field.count;
                         if (fade) {
                             const sprite_px: f32 = if (sys.field.size > 0) @floatFromInt(sys.field.size) else 8.0;
-                            sprite_size_ndc = .{ sprite_px / @as(f32, @floatFromInt(rect_w)), sprite_px / @as(f32, @floatFromInt(rect_h)) };
-                            if (s.engine.gpa.alloc(f32, count * 6 * 5)) |verts| {
+                            // Size at death relative to birth (1 = unchanged), and
+                            // the spin in turns over life, packed for u_particleSize.
+                            const end_ratio: f32 = if (sys.field.size_end) |end_px| @as(f32, @floatFromInt(end_px)) / @max(sprite_px, 1.0) else 1.0;
+                            particle_params = .{ sprite_px / @as(f32, @floatFromInt(rect_w)), sprite_px / @as(f32, @floatFromInt(rect_h)), end_ratio, sys.field.spin };
+                            if (s.engine.gpa.alloc(f32, count * 6 * 6)) |verts| {
                                 defer s.engine.gpa.free(verts);
                                 sys.writeBillboards(verts);
                                 render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
@@ -1176,7 +1181,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     }
                     const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
                     const sprite_texture = s.particle_sprite_textures.get(entry.graph_index) orelse r.defaultSpriteTexture();
-                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, sprite_size_ndc, glow, sprite_texture);
+                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, particle_params, glow, sprite_texture);
                     if (output) |target| {
                         input_texture = target.texture;
                         if (!is_final) next_slot += 1;
@@ -3341,11 +3346,12 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .fade = pf.fade, .cool = pf.cool, .size = pf.size, .glow = pf.glow })) |sys| {
+                const pattern: particles.Pattern = if (std.mem.eql(u8, pf.pattern, "rain")) .rain else if (std.mem.eql(u8, pf.pattern, "burst")) .burst else .fountain;
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .glow = pf.glow, .pattern = pattern })) |sys| {
                     // A fading fountain draws six-vertex sprite quads; a plain
                     // one draws one point per particle.
                     const vertex_count = if (pf.fade) pf.count * 6 else pf.count;
-                    if (r.createParticleMesh(vertex_count)) |mesh| {
+                    if (r.createParticleMesh(vertex_count, pf.fade)) |mesh| {
                         session.particle_systems.put(gpa, model.graph_index, sys) catch {
                             var s2 = sys;
                             s2.deinit();

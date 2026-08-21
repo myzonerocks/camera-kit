@@ -371,9 +371,10 @@ pub const Renderer = struct {
         vertex_count: u32 = 0,
     };
 
-    pub fn createParticleMesh(r: *Renderer, count: u32) !ParticleMesh {
+    pub fn createParticleMesh(r: *Renderer, count: u32, fade: bool) !ParticleMesh {
         _ = r;
         _ = count;
+        _ = fade;
         return .{};
     }
 
@@ -397,7 +398,7 @@ pub const Renderer = struct {
         return .{};
     }
 
-    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, sprite_size_ndc: [2]f32, glow: bool, sprite_texture: TextureHandle) void {
+    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, particle_params: [4]f32, glow: bool, sprite_texture: TextureHandle) void {
         _ = r;
         _ = blit_view;
         _ = mesh_view;
@@ -407,7 +408,7 @@ pub const Renderer = struct {
         _ = cool_color;
         _ = aspect_ratio;
         _ = fade;
-        _ = sprite_size_ndc;
+        _ = particle_params;
         _ = glow;
         _ = sprite_texture;
     }

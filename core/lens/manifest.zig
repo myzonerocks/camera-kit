@@ -104,6 +104,24 @@ pub const ParticleField = struct {
     /// textured with, shaping the point beyond the soft round default. Null
     /// draws the built-in soft round sprite.
     sprite: ?[]const u8 = null,
+    /// The emission shape: fountain (default), rain, burst, ring, cone, sphere.
+    pattern: []const u8 = "fountain",
+    /// The rgb each particle is drawn at; null uses the engine's warm default.
+    color: ?[3]f32 = null,
+    /// 0..1 fractions varying launch speed and lifetime per particle.
+    speed_spread: f32 = 0,
+    lifetime_spread: f32 = 0,
+    /// Velocity damping per second (drag) and a constant wind force.
+    drag: f32 = 0,
+    wind: [3]f32 = .{ 0, 0, 0 },
+    /// A deterministic swirl amplitude added to velocity.
+    turbulence: f32 = 0,
+    /// Emit everything once and let it die out, rather than looping.
+    oneshot: bool = false,
+    /// Sprite size in pixels at death, if the size changes over life.
+    size_end: ?u32 = null,
+    /// Turns a textured sprite spins over its life.
+    spin: f32 = 0,
 };
 
 pub const GradeField = struct {
@@ -725,6 +743,10 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "fade")) |v| {
                     if (v == .bool) field.fade = v.bool;
                 }
+                if (getField(pv.object, "color")) |v| {
+                    var rgb: [3]f32 = .{ 0, 0, 0 };
+                    if (readVec3(v, &rgb)) field.color = rgb else try diags.add(path.slice(), "particles color must be three numbers", .{});
+                }
                 if (getField(pv.object, "cool")) |v| {
                     var rgb: [3]f32 = .{ 0, 0, 0 };
                     if (readVec3(v, &rgb)) field.cool = rgb else try diags.add(path.slice(), "particles cool must be three numbers", .{});
@@ -737,6 +759,31 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "sprite")) |v| {
                     if (try expectString(diags, path, v)) |stem| field.sprite = try arena.dupe(u8, stem);
+                }
+                if (getField(pv.object, "pattern")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        const known = [_][]const u8{ "fountain", "rain", "burst", "ring", "cone", "sphere" };
+                        var ok = false;
+                        for (known) |k| {
+                            if (std.mem.eql(u8, name, k)) ok = true;
+                        }
+                        if (ok) field.pattern = try arena.dupe(u8, name) else try diags.add(path.slice(), "unknown particles pattern '{s}'", .{name});
+                    }
+                }
+                if (getField(pv.object, "speed_spread")) |v| field.speed_spread = @floatCast(numberOf(v) orelse field.speed_spread);
+                if (getField(pv.object, "lifetime_spread")) |v| field.lifetime_spread = @floatCast(numberOf(v) orelse field.lifetime_spread);
+                if (getField(pv.object, "drag")) |v| field.drag = @floatCast(numberOf(v) orelse field.drag);
+                if (getField(pv.object, "turbulence")) |v| field.turbulence = @floatCast(numberOf(v) orelse field.turbulence);
+                if (getField(pv.object, "spin")) |v| field.spin = @floatCast(numberOf(v) orelse field.spin);
+                if (getField(pv.object, "wind")) |v| {
+                    var w: [3]f32 = .{ 0, 0, 0 };
+                    if (readVec3(v, &w)) field.wind = w else try diags.add(path.slice(), "particles wind must be three numbers", .{});
+                }
+                if (getField(pv.object, "oneshot")) |v| {
+                    if (v == .bool) field.oneshot = v.bool;
+                }
+                if (getField(pv.object, "size_end")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= 64) field.size_end = @intCast(v.integer) else try diags.add(path.slice(), "particles size_end must be an integer 1..64", .{});
                 }
                 particle_field = field;
             }
