@@ -19,6 +19,7 @@ object Gosslens {
     internal external fun nativeResize(engine: Long, width: Int, height: Int)
     internal external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
     internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
+    internal external fun nativeCaptureLiveFrame(engine: Long, session: Long, format: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeCaptureStill(engine: Long, session: Long, width: Int, height: Int, supersample: Int, format: Int, quality: Int, colorSpace: Int, bitDepth: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
@@ -214,6 +215,21 @@ class GossEngine private constructor(internal val handle: Long) : AutoCloseable 
         val encoded = ByteArray(info.getLong(0).toInt())
         data.get(encoded)
         return encoded
+    }
+
+    /** The composited frame in a WebRTC format (BGRA8 = 3 by default), the
+     * supported per-frame output for a live broadcast source. width and height
+     * are the render size; returns width * height * 4 packed bytes, or null
+     * when the renderer is away. Feed it to a LiveKit custom video source. */
+    fun captureLiveFrame(session: GossSession?, width: Int, height: Int, format: Int = 3): ByteArray? {
+        if (width <= 0 || height <= 0) return null
+        val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        val capacity = width.toLong() * height * 4
+        val data = ByteBuffer.allocateDirect(capacity.toInt())
+        if (Gosslens.nativeCaptureLiveFrame(handle, session?.handle ?: 0L, format, data, capacity, info) != 0) return null
+        val frame = ByteArray(capacity.toInt())
+        data.get(frame)
+        return frame
     }
 
     /** A high-resolution still: the composited frame at its own or a

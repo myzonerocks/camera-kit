@@ -75,6 +75,22 @@ The `.task` bundles (`face_landmarker.task`, `gesture_recognizer.task`,
 `pose_landmarker_full.task`) are separate resources you ship with your app;
 they are not part of the `.so`. Bundle the ones your lenses use.
 
+## Lives and calls
+
+Publishing the lens-baked frames into a LiveKit or WebRTC call is a custom
+video source fed one frame per tick. `captureLiveFrame` renders the composited
+frame and returns it in a WebRTC format (BGRA by default), so you build a
+`VideoFrame` for the source with no channel swizzle of your own:
+
+    val frame = engine.captureLiveFrame(session, width, height) ?: return
+    // wrap frame (BGRA, width x height) in a VideoFrame and hand it to the
+    // custom VideoSource you publish; show the same frame locally too
+
+It renders once per call, so a broadcast source needs no separate preview
+render. For audio, `submitAudio` feeds the mic in so audio-reactive lenses
+respond and `pullAudio` pulls a lens's own sound out; mix that PCM into your
+outgoing LiveKit audio track the way you would any custom audio source.
+
 ## Method names
 
 The operation names match the other SDKs: `GossEngine.create(config)`,

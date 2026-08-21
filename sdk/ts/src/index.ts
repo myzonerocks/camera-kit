@@ -422,6 +422,22 @@ export class GossEngine {
     return out.toDataURL("image/png");
   }
 
+  /// The composited frame as packed bytes in a WebRTC format (BGRA by
+  /// default), the supported per-frame output for a live source. On the web
+  /// the rendered canvas is already a zero-copy source through
+  /// canvas.captureStream(); reach for this only when you need the raw pixels.
+  async captureLiveFrame(session: GossSession | null, format: GossPixelFormat = GossPixelFormat.Bgra8): Promise<{ pixels: Uint8Array; width: number; height: number }> {
+    const { pixels, width, height } = await this.capturePixels(session);
+    if (format === GossPixelFormat.Bgra8) {
+      for (let i = 0; i + 3 < pixels.length; i += 4) {
+        const red = pixels[i];
+        pixels[i] = pixels[i + 2];
+        pixels[i + 2] = red;
+      }
+    }
+    return { pixels, width, height };
+  }
+
   /// A high-resolution still of the composited frame at its own resolution
   /// (width and height 0) or a requested one, decoupled from the preview
   /// size, returned as the encoded image bytes. Wasm core only: the pure

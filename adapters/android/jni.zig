@@ -332,6 +332,19 @@ export fn Java_com_gosslens_Gosslens_nativeCaptureStill(env: *JniEnv, cls: jobje
     return @intFromEnum(status);
 }
 
+export fn Java_com_gosslens_Gosslens_nativeCaptureLiveFrame(env: *JniEnv, cls: jobject, engine: i64, session: i64, format: i32, data_buffer: jobject, data_capacity: i64, info_buffer: jobject) i32 {
+    _ = cls;
+    const info_bytes = getDirectBufferAddress(env, info_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const info: *extern struct { width: u32, height: u32 } = @ptrCast(@alignCast(info_bytes));
+    const data = getDirectBufferAddress(env, data_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    var width: u32 = 0;
+    var height: u32 = 0;
+    const status = abi.goss_engine_capture_live_frame(engineFromHandle(engine), sessionFromHandle(session), @intCast(@max(format, 0)), @ptrCast(data), @intCast(data_capacity), &width, &height);
+    info.width = width;
+    info.height = height;
+    return @intFromEnum(status);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeRecordingStart(env: *JniEnv, cls: jobject, engine: i64, session: i64, path_buffer: jobject, path_len: i32, width: i32, height: i32, bitrate: i32, codec: i32) i32 {
     _ = cls;
     const path = getDirectBufferAddress(env, path_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);

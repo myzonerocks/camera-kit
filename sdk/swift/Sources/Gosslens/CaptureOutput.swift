@@ -1,4 +1,5 @@
 import CGosslens
+import CoreVideo
 
 /// Pixel/screenshot readback, reached directly off GossEngine rather than
 /// its own handle type.
@@ -149,6 +150,51 @@ extension GossEngine {
     public func submitAudio(session: GossSession, samples: [Float], frameCount: UInt32, sampleRate: UInt32, channels: UInt32, timestampUs: Int64) throws {
         try samples.withUnsafeBufferPointer { buffer in
             try checked(goss_session_submit_audio(session.handle, buffer.baseAddress, frameCount, sampleRate, channels, timestampUs))
+        }
+    }
+
+    /// The composited frame as packed bytes in a WebRTC format (BGRA by
+    /// default), the supported per-frame output for a live broadcast source -
+    /// feed it to a LiveKit or WebRTC custom video source.
+    public func captureLiveFrame(session: GossSession?, width: UInt32, height: UInt32, format: GossPixelFormat = .bgra8) throws -> [UInt8] {
+        var data = [UInt8](repeating: 0, count: Int(width) * Int(height) * 4)
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        try data.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_engine_capture_live_frame(handle, session?.handle, format.rawValue, buffer.baseAddress, buffer.count, &outWidth, &outHeight))
+        }
+        return data
+    }
+
+    /// Writes the composited frame straight into a BGRA CVPixelBuffer - the
+    /// pixel buffer a LiveKit BufferCapturer publishes. The buffer must be
+    /// kCVPixelFormatType_32BGRA at the render size; an IOSurface-backed one
+    /// keeps the frame ready for a zero-copy encode.
+    public func captureLiveFrame(session: GossSession?, into pixelBuffer: CVPixelBuffer) throws {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let stride = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let tight = width * 4
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { throw GossStatus.invalidArgument }
+        var outWidth: UInt32 = 0
+        var outHeight: UInt32 = 0
+        let dst = base.assumingMemoryBound(to: UInt8.self)
+        // A tightly packed buffer takes the readback directly; a row-padded
+        // one takes it through a scratch buffer copied in per row.
+        if stride == tight {
+            try checked(goss_engine_capture_live_frame(handle, session?.handle, GossPixelFormat.bgra8.rawValue, dst, stride * height, &outWidth, &outHeight))
+            return
+        }
+        var scratch = [UInt8](repeating: 0, count: tight * height)
+        try scratch.withUnsafeMutableBufferPointer { buffer in
+            try checked(goss_engine_capture_live_frame(handle, session?.handle, GossPixelFormat.bgra8.rawValue, buffer.baseAddress, buffer.count, &outWidth, &outHeight))
+        }
+        scratch.withUnsafeBufferPointer { buffer in
+            for row in 0..<height {
+                dst.advanced(by: row * stride).update(from: buffer.baseAddress! + row * tight, count: tight)
+            }
         }
     }
 }
