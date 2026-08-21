@@ -2338,26 +2338,33 @@ fn proveNoLeaks(gpa: std.mem.Allocator) !bool {
 const CountingAllocator = struct {
     backing: std.mem.Allocator,
     in_use: usize = 0,
+    peak: usize = 0,
 
     fn allocator(self: *CountingAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn bump(self: *CountingAllocator) void {
+        if (self.in_use > self.peak) self.peak = self.in_use;
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const p = self.backing.rawAlloc(len, alignment, ra) orelse return null;
         self.in_use += len;
+        self.bump();
         return p;
     }
     fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         if (!self.backing.rawResize(buf, alignment, new_len, ra)) return false;
         self.in_use = self.in_use - buf.len + new_len;
+        self.bump();
         return true;
     }
     fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const p = self.backing.rawRemap(buf, alignment, new_len, ra) orelse return null;
         self.in_use = self.in_use - buf.len + new_len;
+        self.bump();
         return p;
     }
     fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void {
@@ -2418,6 +2425,88 @@ fn provePerFrameBudget(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *Co
         return false;
     }
     std.debug.print("conformance: PROOF the full stack holds a flat {d}-byte per-frame footprint over {d} frames (no accumulation)\n", .{ steady_min, total_frames - warmup });
+    return true;
+}
+
+/// Proves a tiled PNG capture streams instead of buffering the whole
+/// frame: forced to many tiles, the streaming path's peak heap stays a
+/// full render buffer below the full-buffer path's - the memory unlock
+/// that lets a very large capture fit in a phone's RAM.
+fn provePeakBoundedCapture(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingAllocator) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL peak-bounded capture lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    // An 800x600 output at a 100px tile cap forces an 8x6 grid. Both the
+    // streaming and full-buffer paths hold the same compressed output, so
+    // the difference in peak heap is the full render buffer the streaming
+    // path never allocates.
+    const render_size: usize = 800 * 600 * 4;
+    const cfg = abi.CaptureConfig{ .width = 800, .height = 600, .supersample = 0, .format = 0, .quality = 0 };
+    const buf = try gpa.alloc(u8, render_size + 65536); // via gpa, uncounted
+    defer gpa.free(buf);
+    var out_len: usize = 0;
+    var ow: u32 = 0;
+    var oh: u32 = 0;
+
+    const measure = struct {
+        fn run(e: *abi.Engine, sess: *abi.Session, ct: *CountingAllocator, config: *const abi.CaptureConfig, out: []u8, no_stream: bool) usize {
+            sess.capture_tile_cap = 100;
+            sess.capture_no_stream = no_stream;
+            ct.peak = ct.in_use;
+            const base = ct.in_use;
+            var ol: usize = 0;
+            var cw: u32 = 0;
+            var ch: u32 = 0;
+            _ = abi.goss_engine_capture_still(e, sess, config, out.ptr, out.len, &ol, &cw, &ch);
+            sess.capture_tile_cap = 0;
+            sess.capture_no_stream = false;
+            return ct.peak - base;
+        }
+    }.run;
+
+    const peak_stream = measure(engine, session, counter, &cfg, buf, false);
+    const peak_full = measure(engine, session, counter, &cfg, buf, true);
+    // Sanity: the capture itself still succeeds and is the right size.
+    session.capture_tile_cap = 100;
+    const status = abi.goss_engine_capture_still(engine, session, &cfg, buf.ptr, buf.len, &out_len, &ow, &oh);
+    session.capture_tile_cap = 0;
+    if (status != .ok or ow != 800 or oh != 600) {
+        std.debug.print("conformance: FAIL peak-bounded capture ({d}x{d})\n", .{ ow, oh });
+        return false;
+    }
+    // The full-buffer path must peak at least a render buffer higher, and
+    // the streaming path must not carry a full render buffer.
+    if (peak_full < peak_stream + render_size - (render_size / 8)) {
+        std.debug.print("conformance: FAIL streaming did not save a render buffer (stream {d}, full {d}, render {d})\n", .{ peak_stream, peak_full, render_size });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a tiled PNG capture streams: peak heap {d} bytes vs {d} for the full-buffer path, saving ~{d} bytes (the render buffer) across an 8x6 grid\n", .{ peak_stream, peak_full, peak_full - peak_stream });
     return true;
 }
 
@@ -2838,5 +2927,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveTiledPostEffect(gpa, engine)) return 1;
     if (!try proveNoLeaks(gpa)) return 1;
     if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;
+    if (!try provePeakBoundedCapture(gpa, engine, &frame_counter)) return 1;
     return 0;
 }

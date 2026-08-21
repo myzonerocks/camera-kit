@@ -328,6 +328,10 @@ pub const Session = struct {
     /// 16384 texture-size floor. Only conformance sets it, to force
     /// tiling at a small resolution and prove the stitch is byte-identical.
     capture_tile_cap: u32 = 0,
+    /// Forces the full-buffer capture path even when the streaming path
+    /// would apply. Only conformance sets it, to compare peak memory of
+    /// the two paths and prove streaming holds no full render buffer.
+    capture_no_stream: bool = false,
     face_tracking: ?*tracking.Tracking = null,
     hand_tracking: ?*tracking.hand_worker.HandTracking = null,
     pose_tracking: ?*tracking.pose_worker.PoseTracking = null,
@@ -2228,8 +2232,6 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         h.* = 0;
         return .ok;
     }
-    const rendered = gpa.alloc(u8, render_size) catch return .out_of_memory;
-    defer gpa.free(rendered);
 
     const cols: u32 = if (render_w > tile_cap) (render_w + tile_cap - 1) / tile_cap else 1;
     const rows: u32 = if (render_h > tile_cap) (render_h + tile_cap - 1) / tile_cap else 1;
@@ -2241,6 +2243,76 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         s.capture_tile = null;
         s.capture_aspect = 0;
     }
+
+    // Streaming tiled PNG: encode each tile-row band as it finishes and
+    // free it, so peak memory is one band plus the compressed output, not
+    // the whole render buffer - what lets a large capture fit in a phone's
+    // RAM. Supersample and the lossy formats keep the full-buffer path.
+    if ((cols > 1 or rows > 1) and cfg.format == 0 and supersample == 1 and !s.capture_no_stream) {
+        const space = color.Space.fromInt(cfg.color_space);
+        var tags: png.ColorTags = .{};
+        if (space != .srgb) {
+            tags.chrm = color.chromaticities(space);
+            tags.gama = color.gamma(space);
+        }
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(gpa);
+        var enc: png.StreamEncoder = undefined;
+        enc.begin(gpa, &encoded, render_w, render_h, .{
+            .bit_depth = if (cfg.bit_depth == 16) 16 else 8,
+            .color = tags,
+        }) catch return .out_of_memory;
+        defer enc.deinit();
+        const band = gpa.alloc(u8, @as(usize, render_w) * @min(tile_cap, render_h) * 4) catch return .out_of_memory;
+        defer gpa.free(band);
+        var ty: u32 = 0;
+        while (ty < rows) : (ty += 1) {
+            const tile_y = ty * tile_cap;
+            const th: u32 = @min(tile_cap, render_h - tile_y);
+            var tx: u32 = 0;
+            while (tx < cols) : (tx += 1) {
+                const tile_x = tx * tile_cap;
+                const tw: u32 = @min(tile_cap, render_w - tile_x);
+                s.capture_res_width = @intCast(tw);
+                s.capture_res_height = @intCast(th);
+                s.capture_tile = .{
+                    .u0 = @as(f32, @floatFromInt(tile_x)) / @as(f32, @floatFromInt(render_w)),
+                    .v0 = @as(f32, @floatFromInt(tile_y)) / @as(f32, @floatFromInt(render_h)),
+                    .u1 = @as(f32, @floatFromInt(tile_x + tw)) / @as(f32, @floatFromInt(render_w)),
+                    .v1 = @as(f32, @floatFromInt(tile_y + th)) / @as(f32, @floatFromInt(render_h)),
+                };
+                const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
+                if (e.capture_width == 0 or e.capture_height == 0) {
+                    w.* = 0;
+                    h.* = 0;
+                    return .ok;
+                }
+                const staging = e.capture_staging orelse return .renderer_unavailable;
+                const tile_buf = gpa.alloc(u8, @as(usize, tw) * @as(usize, th) * 4) catch return .out_of_memory;
+                defer gpa.free(tile_buf);
+                render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+                const ready_frame = render.Renderer.readTexture(staging, tile_buf.ptr);
+                while (r.frame() < ready_frame) {}
+                var row: u32 = 0;
+                while (row < th) : (row += 1) {
+                    const dst = (@as(usize, row) * @as(usize, render_w) + tile_x) * 4;
+                    const src = @as(usize, row) * @as(usize, tw) * 4;
+                    @memcpy(band[dst..][0 .. @as(usize, tw) * 4], tile_buf[src..][0 .. @as(usize, tw) * 4]);
+                }
+            }
+            enc.writeBand(band[0 .. @as(usize, render_w) * th * 4], th) catch return .out_of_memory;
+        }
+        enc.finish() catch return .out_of_memory;
+        w.* = render_w;
+        h.* = render_h;
+        len_out.* = encoded.items.len;
+        if (out_capacity < encoded.items.len) return .invalid_argument;
+        @memcpy(data[0..encoded.items.len], encoded.items);
+        return .ok;
+    }
+
+    const rendered = gpa.alloc(u8, render_size) catch return .out_of_memory;
+    defer gpa.free(rendered);
 
     if (cols == 1 and rows == 1) {
         // Whole frame in one target: read straight into the output buffer,
