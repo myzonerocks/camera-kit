@@ -3412,6 +3412,12 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     var device_libs: std.ArrayList(*std.Build.Step.Compile) = .empty;
     device_libs.appendSlice(b.allocator, &.{ gosslens_ios, bgfx_ios }) catch @panic("oom");
     device_libs.appendSlice(b.allocator, inference_libs.items) catch @panic("oom");
+    // Scripting and physics link into gosslens as their own static libs the
+    // same way angle links into gpupixel; install them beside it so a consumer
+    // links a complete set instead of two archives stranded in the cache. Zig
+    // dedupes these against the compiles the script and physics modules linked.
+    device_libs.append(b.allocator, buildQuickjsLib(b, ios_target, optimize)) catch @panic("oom");
+    device_libs.append(b.allocator, buildJoltLib(b, ios_target, optimize)) catch @panic("oom");
     // Apple's linker requires 8-byte archive member alignment; the system
     // ranlib rewrites zig's archives into the accepted layout.
     for (device_libs.items) |lib| {

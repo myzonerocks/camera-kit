@@ -47,48 +47,13 @@ targets:
         CODE_SIGN_STYLE: Automatic
         SWIFT_VERSION: "6"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging.h
+        # The engine's -l list and frameworks now ride on the Gosslens
+        # package's linkerSettings; this target inherits them by depending on
+        # the package. Only the per-slice search paths, which the package
+        # can't know, stay here.
         HEADER_SEARCH_PATHS: ["$(PROJECT_DIR)/../../../include"]
         "LIBRARY_SEARCH_PATHS[sdk=iphoneos*]": ["$(PROJECT_DIR)/../../../zig-out/ios"]
         "LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]": ["$(PROJECT_DIR)/../../../zig-out/ios-simulator"]
-        OTHER_LDFLAGS:
-          - "-lgosslens"
-          - "-lgpupixel"
-          - "-langle"
-          - "-lyuv"
-          - "-lbgfx"
-          - "-ltflite"
-          - "-lxnnpack"
-          - "-lxnnpack-fp16arith"
-          - "-lxnnpack-neonfp16arith"
-          - "-lxnnpack-neonfp16arith_aarch64"
-          - "-lxnnpack-neondot"
-          - "-lxnnpack-neondot_aarch64"
-          - "-lxnnpack-neondotfp16arith"
-          - "-lxnnpack-neoni8mm"
-          - "-lxnnpack-aarch64"
-          - "-labsl"
-          - "-lruy"
-          - "-lfarmhash"
-          - "-lfft2d"
-          - "-lflatbuffers"
-          - "-lcpuinfo"
-          - "-lpthreadpool"
-          - "-lz"
-          - "-lc++"
-          - "-framework"
-          - "Metal"
-          - "-framework"
-          - "QuartzCore"
-          - "-framework"
-          - "CoreMedia"
-          - "-framework"
-          - "CoreVideo"
-          - "-framework"
-          - "IOSurface"
-          - "-framework"
-          - "VideoToolbox"
-          - "-framework"
-          - "AVFoundation"
         TARGETED_DEVICE_FAMILY: "1"
     info:
       path: Sources/Info.plist
