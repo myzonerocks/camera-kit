@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.face-sparkle",
+  "version": "1.0.0",
+  "display_name": "Face Sparkle",
+  "engine_compat": ">=0.5",
+  "capabilities": ["face"],
+  "parameters": [],
+  "nodes": [
+    {"id": "sparkle", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 140, "pattern": "face", "gravity": 1.2, "speed": 0.4, "lifetime": 1.4, "drag": 0.4, "fade": true, "size": 7, "glow": true, "spin": 1.0, "color": [1.0, 0.9, 0.5], "cool": [1.0, 0.4, 0.7]}}
+  ],
+  "triggers": []
+}

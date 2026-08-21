@@ -116,6 +116,17 @@ pub const ParticleField = struct {
     wind: [3]f32 = .{ 0, 0, 0 },
     /// A deterministic swirl amplitude added to velocity.
     turbulence: f32 = 0,
+    /// A point particles are pulled toward and how strongly (a gravity well).
+    attract: ?[3]f32 = null,
+    attract_strength: f32 = 0,
+    /// Orbital swirl strength around the vertical axis.
+    vortex: f32 = 0,
+    /// A floor height particles bounce off; null falls through.
+    floor: ?f32 = null,
+    /// How far a sprite stretches along its screen velocity (streaks); 0 round.
+    stretch: f32 = 0,
+    /// Frames in a square sprite sheet flip-booked over life; 1 is a still.
+    frames: u32 = 1,
     /// Emit everything once and let it die out, rather than looping.
     oneshot: bool = false,
     /// Sprite size in pixels at death, if the size changes over life.
@@ -762,7 +773,7 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "pattern")) |v| {
                     if (try expectString(diags, path, v)) |name| {
-                        const known = [_][]const u8{ "fountain", "rain", "burst", "ring", "cone", "sphere" };
+                        const known = [_][]const u8{ "fountain", "rain", "burst", "ring", "cone", "sphere", "box", "disc", "hemisphere", "face" };
                         var ok = false;
                         for (known) |k| {
                             if (std.mem.eql(u8, name, k)) ok = true;
@@ -775,6 +786,17 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "drag")) |v| field.drag = @floatCast(numberOf(v) orelse field.drag);
                 if (getField(pv.object, "turbulence")) |v| field.turbulence = @floatCast(numberOf(v) orelse field.turbulence);
                 if (getField(pv.object, "spin")) |v| field.spin = @floatCast(numberOf(v) orelse field.spin);
+                if (getField(pv.object, "vortex")) |v| field.vortex = @floatCast(numberOf(v) orelse field.vortex);
+                if (getField(pv.object, "attract_strength")) |v| field.attract_strength = @floatCast(numberOf(v) orelse field.attract_strength);
+                if (getField(pv.object, "stretch")) |v| field.stretch = @floatCast(numberOf(v) orelse field.stretch);
+                if (getField(pv.object, "floor")) |v| field.floor = @floatCast(numberOf(v) orelse 0.0);
+                if (getField(pv.object, "attract")) |v| {
+                    var target: [3]f32 = .{ 0, 0, 0 };
+                    if (readVec3(v, &target)) field.attract = target else try diags.add(path.slice(), "particles attract must be three numbers", .{});
+                }
+                if (getField(pv.object, "frames")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= 64) field.frames = @intCast(v.integer) else try diags.add(path.slice(), "particles frames must be an integer 1..64", .{});
+                }
                 if (getField(pv.object, "wind")) |v| {
                     var w: [3]f32 = .{ 0, 0, 0 };
                     if (readVec3(v, &w)) field.wind = w else try diags.add(path.slice(), "particles wind must be three numbers", .{});

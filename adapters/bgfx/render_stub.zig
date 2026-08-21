@@ -398,7 +398,7 @@ pub const Renderer = struct {
         return .{};
     }
 
-    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, particle_params: [4]f32, glow: bool, sprite_texture: TextureHandle) void {
+    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, particle_params: [4]f32, particle_fx: [4]f32, glow: bool, sprite_texture: TextureHandle) void {
         _ = r;
         _ = blit_view;
         _ = mesh_view;
@@ -409,6 +409,7 @@ pub const Renderer = struct {
         _ = aspect_ratio;
         _ = fade;
         _ = particle_params;
+        _ = particle_fx;
         _ = glow;
         _ = sprite_texture;
     }

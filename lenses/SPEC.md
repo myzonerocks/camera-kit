@@ -175,23 +175,31 @@ all are optional with engine defaults. Like cloth it needs no glb
 asset, and without a tracked head the strands hang from their initial
 pose, the standard capability degradation.
 
-A model.gltf node may instead carry a `"particles": {"count", "gravity",
-"speed", "lifetime"}` field: the node becomes a particle fountain instead
-of a glb mesh. `count` (1 to 4096) particles emit from the origin with an
-index-spread velocity, integrate under `gravity`, and respawn when their
-`lifetime` runs out, drawn as points over the frame. The sim is a
-deterministic CPU integration - no clock, no randomness - so the same
-field and frame count produce the same picture, conformance bit-stable; it
-needs no glb asset. Add `"fade": true` and each particle draws as a
-camera-facing sprite - a soft round point alpha-blended by its remaining
-life, dimming to nothing as it ages rather than popping out when it
-respawns - at `"size"` pixels (1 to 64, a visible default when omitted);
-add `"cool": [r, g, b]` and a fading sprite also crosses from the draw
-colour at birth toward that colour by death, an ember glowing hot then
-cooling; add `"glow": true` and the sprites blend additively so overlaps
-brighten, a fire glow rather than a flat composite; add `"sprite":
-"<stem>"` and each sprite is textured with `assets/<stem>.png`, shaping the
-point into a star, spark or any image beyond the built-in soft round.
+A model.gltf node may instead carry a `"particles"` field: the node becomes
+a particle system instead of a glb mesh, drawn over the frame. The sim is a
+deterministic CPU integration - no clock, no randomness, every particle a
+pure function of its index and elapsed steps - so the same field and frame
+count produce the same picture, conformance bit-stable; it needs no glb
+asset. `count` is how many (1 to 4096); the rest of the field tunes emission,
+motion, and appearance:
+
+- Emission `"pattern"`: `fountain` (default), `rain`, `burst`, `ring`,
+  `cone`, `sphere`, `box`, `disc`, `hemisphere`, or `face` - the last spawns
+  from the tracked face landmarks (sparkles off the face), degrading to
+  nothing without a tracked subject.
+- Motion: `"gravity"`, `"speed"` and `"lifetime"` (each with a 0..1
+  `"speed_spread"` / `"lifetime_spread"` to vary it per particle), `"drag"`
+  (air resistance), `"wind": [x, y, z]`, `"turbulence"` (swirl), `"attract":
+  [x, y, z]` with `"attract_strength"` (a gravity well), `"vortex"` (orbital
+  swirl), `"floor"` (a height particles bounce off), and `"oneshot"` (emit
+  once and die out rather than looping).
+- Appearance (with `"fade": true` each particle is a camera-facing sprite,
+  otherwise a one-pixel point): `"size"` px at birth with an optional
+  `"size_end"`, `"color": [r, g, b]` crossing to a `"cool"` colour over life,
+  `"spin"` turns over life, `"stretch"` along the screen velocity (streaks),
+  `"glow": true` for additive blending, a `"sprite": "<stem>"` textured with
+  `assets/<stem>.png`, and `"frames"` to flip-book through a square sprite
+  sheet over life.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the

@@ -286,6 +286,9 @@ pub const Session = struct {
     /// A fading fountain's own sprite texture, loaded once at activation from
     /// assets/<stem>.png when the particles field names one.
     particle_sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// A reusable buffer of tracked-landmark spawn points (particle world
+    /// space) for the face emission pattern, refilled each frame.
+    particle_emitter_buf: [96][3]f32 = undefined,
     hair_vcount: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     physics_last_us: i64 = 0,
 
@@ -1150,9 +1153,11 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     var fade = false;
                     var glow = false;
                     var particle_params: [4]f32 = .{ 0, 0, 1, 0 };
+                    var particle_fx: [4]f32 = .{ 1, 1, 0, 0 };
                     var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
                     var cool_color = base_color;
                     if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
+                        if (sys.field.pattern == .face) feedFaceEmitters(s, sys, width, height);
                         if (!s.capture_requested) sys.step(1.0 / 60.0);
                         fade = sys.field.fade;
                         glow = sys.field.glow;
@@ -1166,7 +1171,12 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                             // the spin in turns over life, packed for u_particleSize.
                             const end_ratio: f32 = if (sys.field.size_end) |end_px| @as(f32, @floatFromInt(end_px)) / @max(sprite_px, 1.0) else 1.0;
                             particle_params = .{ sprite_px / @as(f32, @floatFromInt(rect_w)), sprite_px / @as(f32, @floatFromInt(rect_h)), end_ratio, sys.field.spin };
-                            if (s.engine.gpa.alloc(f32, count * 6 * 6)) |verts| {
+                            // Flip-book frames, the square sheet's cells per row,
+                            // and the velocity stretch, for u_particleFx.
+                            const frames: f32 = @floatFromInt(@max(sys.field.frames, 1));
+                            const sheet_dim: f32 = @ceil(@sqrt(frames));
+                            particle_fx = .{ frames, sheet_dim, sys.field.stretch, 0 };
+                            if (s.engine.gpa.alloc(f32, count * 6 * 8)) |verts| {
                                 defer s.engine.gpa.free(verts);
                                 sys.writeBillboards(verts);
                                 render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
@@ -1181,7 +1191,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     }
                     const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
                     const sprite_texture = s.particle_sprite_textures.get(entry.graph_index) orelse r.defaultSpriteTexture();
-                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, particle_params, glow, sprite_texture);
+                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, particle_params, particle_fx, glow, sprite_texture);
                     if (output) |target| {
                         input_texture = target.texture;
                         if (!is_final) next_slot += 1;
@@ -3312,6 +3322,55 @@ fn pollMeshFaceLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allo
     }
 }
 
+/// Fills the session's emitter buffer with a sampled subset of the live face
+/// landmarks, mapped from frame pixels into the particle camera's world space,
+/// and points the face-pattern sim at them. No tracked face leaves the buffer
+/// empty and the fountain at rest.
+fn feedFaceEmitters(s: *Session, sys: *particles.System, frame_w: u32, frame_h: u32) void {
+    const worker = s.face_tracking orelse {
+        sys.setEmitters(&.{});
+        return;
+    };
+    var tracked: face.Result = undefined;
+    if (!tracking.readResult(worker, &tracked) or tracked.landmark_count_out == 0 or tracked.presence < 0.5) {
+        sys.setEmitters(&.{});
+        return;
+    }
+    const fw: f32 = @floatFromInt(@max(frame_w, 1));
+    const fh: f32 = @floatFromInt(@max(frame_h, 1));
+    const aspect = fw / fh;
+    const half: f32 = 0.828; // tan(22.5 deg) * the particle camera's eye z (2)
+    const total = @min(tracked.landmark_count_out, face.landmark_count);
+    const stride = @max(total / s.particle_emitter_buf.len, 1);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < total and n < s.particle_emitter_buf.len) : (i += stride) {
+        const px = tracked.landmarks[i * 3 + 0];
+        const py = tracked.landmarks[i * 3 + 1];
+        const ndc_x = (px / fw) * 2.0 - 1.0;
+        const ndc_y = (py / fh) * 2.0 - 1.0;
+        s.particle_emitter_buf[n] = .{ ndc_x * half * aspect, -ndc_y * half, 0 };
+        n += 1;
+    }
+    sys.setEmitters(s.particle_emitter_buf[0..n]);
+}
+
+/// Maps a lens-format particle pattern name to the sim's emission shape,
+/// defaulting to the fountain for anything unrecognised.
+fn particlePattern(name: []const u8) particles.Pattern {
+    const names = [_]struct { s: []const u8, p: particles.Pattern }{
+        .{ .s = "rain", .p = .rain },       .{ .s = "burst", .p = .burst },
+        .{ .s = "ring", .p = .ring },       .{ .s = "cone", .p = .cone },
+        .{ .s = "sphere", .p = .sphere },   .{ .s = "box", .p = .box },
+        .{ .s = "disc", .p = .disc },       .{ .s = "hemisphere", .p = .hemisphere },
+        .{ .s = "face", .p = .face },
+    };
+    for (names) |n| {
+        if (std.mem.eql(u8, name, n.s)) return n.p;
+    }
+    return .fountain;
+}
+
 /// Loads a fading fountain's sprite texture synchronously at activation - a
 /// small image, so no background loader: assets/<stem>.png decoded to a
 /// static texture, best-effort, leaving the node on the built-in soft round
@@ -3346,8 +3405,8 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
-                const pattern: particles.Pattern = if (std.mem.eql(u8, pf.pattern, "rain")) .rain else if (std.mem.eql(u8, pf.pattern, "burst")) .burst else .fountain;
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .glow = pf.glow, .pattern = pattern })) |sys| {
+                const pattern = particlePattern(pf.pattern);
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .pattern = pattern })) |sys| {
                     // A fading fountain draws six-vertex sprite quads; a plain
                     // one draws one point per particle.
                     const vertex_count = if (pf.fade) pf.count * 6 else pf.count;

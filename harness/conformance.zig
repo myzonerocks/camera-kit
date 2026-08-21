@@ -1364,6 +1364,77 @@ fn proveParticlePatterns(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the AR spawn off tracked landmarks: the face-sparkle lens uses the face
+/// emission pattern, so particles spawn from the tracked face landmarks. With
+/// face tracking on the portrait corpus it develops (settled differs from
+/// initial) and is bit-stable across runs.
+fn proveFaceSparkle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/face-sparkle", ".lens-packages/face-sparkle".len) != .ok) {
+            std.debug.print("conformance: FAIL face-sparkle lens activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var initial_shot: []u8 = &.{};
+        defer if (initial_shot.len > 0) gpa.free(initial_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 2 or i == 85) {
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                var w: u32 = 0;
+                var h: u32 = 0;
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 2) initial_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, initial_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL face-sparkle did not move\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            var png_bytes: std.ArrayList(u8) = .empty;
+            defer png_bytes.deinit(gpa);
+            try png.encodeRgba(gpa, &png_bytes, settled_shot, 400, 300);
+            try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-face-sparkle.png", .data = png_bytes.items });
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL face-sparkle is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF particles spawn from tracked face landmarks (the AR face pattern) and render deterministically, bit-stable across runs\n", .{});
+    return true;
+}
+
 /// Proves a post-effect lens activates from raw json, no bundle directory:
 /// goss_session_activate_lens on a blur.pass manifest builds the composite
 /// chain (the asset-free path the web uses), so the capture differs from the
@@ -2427,6 +2498,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveEmber(gpa, engine)) return 1;
     if (!try proveStarSprite(gpa, engine)) return 1;
     if (!try proveParticlePatterns(gpa, engine)) return 1;
+    if (!try proveFaceSparkle(gpa, engine)) return 1;
     if (!try proveJsonPostEffect(gpa, engine)) return 1;
     if (!try proveJsonParticles(gpa, engine)) return 1;
     if (!try proveFullStack(gpa, engine)) return 1;
