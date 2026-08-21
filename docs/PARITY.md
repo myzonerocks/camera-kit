@@ -23,10 +23,10 @@ CaptureOutput, Events.
 | Audio triggers (level, beat) | proven in the host harness | built, no hardware yet | not wired |
 | Recording audio track + A/V sync | proven in the host harness, zero end drift | video-only until the audio encoder lands | backend not landed |
 | World tracking (pose, planes, anchors, light) | ARKit source built, no hardware yet; seam proven on the replay track in the host harness | ARCore demo feeder built, no hardware yet | WebXR source built and typechecked, no browser run yet |
-| Lens physics (rigid bodies on model nodes) | proven in the host harness, deterministic settle | built, Jolt on the NDK, no hardware yet | stub, holds initial pose |
-| Lens physics chains (constraints on anchors) | proven in the host harness, deterministic swing | built, Jolt on the NDK, no hardware yet | stub, holds initial pose |
-| Lens cloth (soft-body sheets) | proven in the host harness, deterministic drape | built, Jolt on the NDK, no hardware yet | stub, holds initial pose |
-| Lens strand hair (Jolt compute) | proven in the host harness, deterministic settle | built, Jolt on the NDK, no hardware yet | stub, holds initial pose |
+| Lens physics (rigid bodies on model nodes) | proven in the host harness, deterministic settle | built, Jolt on the NDK, no hardware yet | built, Jolt on wasm, single-threaded |
+| Lens physics chains (constraints on anchors) | proven in the host harness, deterministic swing | built, Jolt on the NDK, no hardware yet | built, Jolt on wasm, single-threaded |
+| Lens cloth (soft-body sheets) | proven in the host harness, deterministic drape | built, Jolt on the NDK, no hardware yet | built, Jolt on wasm, single-threaded |
+| Lens strand hair (Jolt compute) | proven in the host harness, deterministic settle | built, Jolt on the NDK, no hardware yet | built, Jolt on wasm, single-threaded |
 | Lens scripting (QuickJS-ng, sandboxed, deterministic) | proven in the host harness: a script drives a parameter from a signal, bit-stable | built, QuickJS-ng linked, no hardware yet | built, QuickJS-ng linked for wasm |
 | Lens audio playback (miniaudio, deterministic mixer) | proven in the host harness: a play_sound trigger mixes a voice, silent before, bit-stable after | built, miniaudio linked, no hardware yet | built, miniaudio linked for wasm |
 | Post-effect nodes (blur, parametric grade, bloom) | proven in the host harness, each with a reference lens and a conformance proof | built, no hardware yet | built |
