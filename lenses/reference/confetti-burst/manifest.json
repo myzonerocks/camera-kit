@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.confetti-burst",
+  "version": "1.0.0",
+  "display_name": "Confetti Burst",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "confetti", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 180, "pattern": "burst", "gravity": 1.5, "speed": 1.2, "speed_spread": 0.4, "lifetime": 2.5, "lifetime_spread": 0.3, "fade": true, "size": 10, "size_end": 4, "spin": 2.0, "color": [1.0, 0.4, 0.6]}}
+  ],
+  "triggers": []
+}

@@ -19,6 +19,7 @@ object Gosslens {
     internal external fun nativeResize(engine: Long, width: Int, height: Int)
     internal external fun nativeRequestScreenshot(engine: Long, pathBuffer: ByteBuffer, pathLen: Int): Int
     internal external fun nativeCapturePhoto(engine: Long, session: Long, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
+    internal external fun nativeCaptureStill(engine: Long, session: Long, width: Int, height: Int, supersample: Int, format: Int, quality: Int, colorSpace: Int, bitDepth: Int, dataBuffer: ByteBuffer, dataCapacity: Long, infoBuffer: ByteBuffer): Int
     internal external fun nativeRecordingStart(engine: Long, session: Long, pathBuffer: ByteBuffer, pathLen: Int, width: Int, height: Int, bitrate: Int, codec: Int): Int
     internal external fun nativeRecordingStop(engine: Long): Int
     internal external fun nativeSubmitWorld(session: Long, stateBuffer: ByteBuffer, planesBuffer: ByteBuffer, planeCount: Int, anchorsBuffer: ByteBuffer, anchorCount: Int, lightBuffer: ByteBuffer): Int
@@ -69,6 +70,8 @@ object Gosslens {
     internal external fun nativeActivateLens(session: Long, manifestBuffer: ByteBuffer, manifestLen: Int): Int
     internal external fun nativeDeactivateLens(session: Long)
     internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
+    internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
+    internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -208,6 +211,24 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
         if (needed <= 0L) return null
         val data = ByteBuffer.allocateDirect(needed.toInt())
         if (Gosslens.nativeCapturePhoto(handle, session?.handle ?: 0L, data, needed, info) != 0) return null
+        val encoded = ByteArray(info.getLong(0).toInt())
+        data.get(encoded)
+        return encoded
+    }
+
+    /** A high-resolution still: the composited frame at its own or a
+     * requested resolution, encoded as PNG (0), JPEG (1) or HEIC (2).
+     * colorSpace tags the gamut (0 sRGB, 1 P3, 2 Rec2020); bitDepth 16 is
+     * the PNG high-bit-depth path. Null when the renderer/backend is away. */
+    fun captureStill(session: Session?, width: Int = 0, height: Int = 0, supersample: Int = 0, format: Int = 0, quality: Int = 0, colorSpace: Int = 0, bitDepth: Int = 8): ByteArray? {
+        val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+        val probe = ByteBuffer.allocateDirect(1)
+        val probeStatus = Gosslens.nativeCaptureStill(handle, session?.handle ?: 0L, width, height, supersample, format, quality, colorSpace, bitDepth, probe, 0L, info)
+        val needed = info.getLong(0)
+        if (probeStatus == 0 && needed == 0L) return ByteArray(0)
+        if (needed <= 0L) return null
+        val data = ByteBuffer.allocateDirect(needed.toInt())
+        if (Gosslens.nativeCaptureStill(handle, session?.handle ?: 0L, width, height, supersample, format, quality, colorSpace, bitDepth, data, needed, info) != 0) return null
         val encoded = ByteArray(info.getLong(0).toInt())
         data.get(encoded)
         return encoded
@@ -510,6 +531,21 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
      * chain, if one is enabled. False with no active lens. */
     fun tickLens(dtUs: Int, signals: LensSignals): Boolean =
         Gosslens.nativeTickLens(handle, dtUs, signals.buffer) == 0
+
+    /** Reads a live parameter of the active lens by name, including whatever
+     * a script node last wrote. Null with no active lens or no such name. */
+    fun parameterValue(name: String): Float? {
+        val nameBytes = name.toByteArray(Charsets.UTF_8)
+        val nameBuf = ByteBuffer.allocateDirect(nameBytes.size).apply { put(nameBytes); rewind() }
+        val outBuf = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+        return if (Gosslens.nativeParameterValue(handle, nameBuf, nameBytes.size, outBuf) == 0) outBuf.getFloat(0) else null
+    }
+
+    /** Pulls the next block of mixed lens audio into a direct [out] buffer
+     * (frames interleaved s16) that play_sound triggers produced, for the app
+     * to route to platform audio out. */
+    fun pullAudio(out: ByteBuffer, frames: Int): Boolean =
+        Gosslens.nativePullAudio(handle, out, frames) == 0
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,

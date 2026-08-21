@@ -1,0 +1,13 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.warm-grade",
+  "version": "1.0.0",
+  "display_name": "Warm Grade",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "warm", "type": "grade.pass", "inputs": {"frame": "camera"}, "params": {}, "grade": {"exposure": 0.15, "contrast": 1.2, "saturation": 1.25, "temperature": 0.06}}
+  ],
+  "triggers": []
+}

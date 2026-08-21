@@ -18,6 +18,8 @@ const segmentation = @import("segmentation");
 const face = @import("face");
 const face_geometry = @import("face_geometry");
 const png = @import("png");
+const jpeg = @import("jpeg");
+const color = @import("color");
 const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
@@ -185,6 +187,11 @@ pub const Engine = struct {
     /// never per frame - only one chain is ever in flight at a time, so
     /// two targets are enough regardless of how many passes a lens has.
     chain_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
+    /// A bloom.pass node's own scratch pair, sized alongside chain_targets:
+    /// the bright pass extracts into one, blurs H into the other and V back,
+    /// leaving the chain's two ping-pong targets free to hold the frame
+    /// being read and the composite being written.
+    bloom_targets: [2]?render.Renderer.OffscreenTarget = .{ null, null },
     chain_width: u16 = 0,
     chain_height: u16 = 0,
     /// Dedicated target for goss_engine_capture_frame - separate from
@@ -278,6 +285,12 @@ pub const Session = struct {
     hair_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.HairMesh) = .empty,
     particle_systems: std.AutoHashMapUnmanaged(graph.NodeIndex, particles.System) = .empty,
     particle_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
+    /// A fading fountain's own sprite texture, loaded once at activation from
+    /// assets/<stem>.png when the particles field names one.
+    particle_sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// A reusable buffer of tracked-landmark spawn points (particle world
+    /// space) for the face emission pattern, refilled each frame.
+    particle_emitter_buf: [96][3]f32 = undefined,
     hair_vcount: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     physics_last_us: i64 = 0,
 
@@ -446,6 +459,13 @@ pub const Session = struct {
     /// One bgfx texture per blend.pass node whose background finished
     /// loading.
     blend_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
+    /// The parametric color grade of each spliced grade.pass node, packed
+    /// as (exposure, contrast, saturation, temperature) - resolved once at
+    /// activation since grade.pass ships no asset and needs no loader.
+    grade_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
+    /// The glow of each spliced bloom.pass node, packed as (threshold,
+    /// intensity, 0, 0) - resolved once at activation like grade_params.
+    bloom_params: std.AutoHashMapUnmanaged(graph.NodeIndex, [4]f32) = .empty,
     mesh_face_loaders: std.AutoHashMapUnmanaged(graph.NodeIndex, *asset.ImageLoader) = .empty,
     mesh_face_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     /// model.gltf nodes anchored to the tracked face, by graph index.
@@ -511,6 +531,9 @@ pub fn destroyEngine(engine: *Engine) void {
     for (engine.chain_targets) |slot| {
         if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
     }
+    for (engine.bloom_targets) |slot| {
+        if (slot) |target| render.Renderer.destroyOffscreenTarget(target);
+    }
     if (engine.capture_target) |target| render.Renderer.destroyOffscreenTarget(target);
     if (engine.capture_staging) |staging| {
         if (engine.renderer) |*r| r.destroyTexture(staging);
@@ -527,6 +550,10 @@ pub fn destroyEngine(engine: *Engine) void {
 fn ensureChainTargets(e: *Engine, width: u16, height: u16) !void {
     if (e.chain_width == width and e.chain_height == height and e.chain_targets[0] != null) return;
     for (&e.chain_targets) |*slot| {
+        if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.* = try render.Renderer.createOffscreenTarget(width, height);
+    }
+    for (&e.bloom_targets) |*slot| {
         if (slot.*) |target| render.Renderer.destroyOffscreenTarget(target);
         slot.* = try render.Renderer.createOffscreenTarget(width, height);
     }
@@ -821,7 +848,7 @@ fn applyWebBeautyChain(r: *render.Renderer, s: *Session, next_view_id: *u8, widt
         const blit_view = next_view_id.*;
         next_view_id.* += 1;
         render.Renderer.setViewTarget(blit_view, s.web_beauty_makeup_targets[0].?, width, height);
-        r.submitShaderPass(blit_view, r.passthroughProgram(), current);
+        r.submitShaderPass(blit_view, r.passthroughProgram(), current, r.default_mask_texture);
         var slot: usize = 0;
 
         if (lipstick_ready) {
@@ -871,6 +898,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
         const ready = switch (entry.kind) {
             .shader => s.shader_programs.contains(entry.graph_index),
             .lut => s.lut_textures.contains(entry.graph_index),
+            // A blur pass needs no loaded resource - the blur program is
+            // built in - so it is always ready to draw.
+            .blur => true,
+            // A grade pass ships no asset either; its params are resolved
+            // at activation, so it is ready once they are in place.
+            .grade => s.grade_params.contains(entry.graph_index),
+            // Bloom is the same: no asset, params resolved at activation.
+            .bloom => s.bloom_params.contains(entry.graph_index),
             // Only the background image gates readiness - the mask
             // degrades to the renderer's always-foreground default
             // when segmentation is unavailable (SPEC's rule: a node
@@ -985,6 +1020,79 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     if (!is_final) next_slot += 1;
                 }
             },
+            .blur => {
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                const rect_w = if (is_final) output_width else width;
+                const rect_h = if (is_final) output_height else height;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, rect_w, rect_h) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                const step: [2]f32 = .{ 1.5 / @as(f32, @floatFromInt(rect_w)), 1.5 / @as(f32, @floatFromInt(rect_h)) };
+                r.submitBlurPass(view_id, input_texture, step);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .grade => {
+                const grade = s.grade_params.get(entry.graph_index) orelse continue;
+                drawn += 1;
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const is_final = drawn == ready_count;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitGradePass(view_id, input_texture, grade);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
+            .bloom => {
+                const bloom = s.bloom_params.get(entry.graph_index) orelse continue;
+                const scratch0 = e.bloom_targets[0] orelse continue;
+                const scratch1 = e.bloom_targets[1] orelse continue;
+                drawn += 1;
+                const is_final = drawn == ready_count;
+                const base_texture = input_texture;
+
+                // Bright pass, then a separable blur (H then V) through the
+                // two bloom scratch targets - all at working resolution,
+                // never tiled, leaving the frame in base_texture intact.
+                r.tile = null;
+                var bloom_view = next_view_id;
+                next_view_id += 1;
+                render.Renderer.setViewTarget(bloom_view, scratch0, width, height);
+                r.submitBloomExtract(bloom_view, base_texture, bloom);
+
+                bloom_view = next_view_id;
+                next_view_id += 1;
+                render.Renderer.setViewTarget(bloom_view, scratch1, width, height);
+                r.submitBlurPass(bloom_view, scratch0.texture, .{ 2.0 / @as(f32, @floatFromInt(width)), 0.0 });
+
+                bloom_view = next_view_id;
+                next_view_id += 1;
+                render.Renderer.setViewTarget(bloom_view, scratch0, width, height);
+                r.submitBlurPass(bloom_view, scratch1.texture, .{ 0.0, 2.0 / @as(f32, @floatFromInt(height)) });
+
+                // Composite the blurred glow back over the base, honoring
+                // is_final's target, rect, and capture tile like every
+                // other chain stage's final draw.
+                const view_id = next_view_id;
+                next_view_id += 1;
+                const output = if (is_final) finalTarget(e, s) else targets[next_slot % 2];
+                r.tile = if (is_final) s.capture_tile else null;
+                if (output) |target| render.Renderer.setViewTarget(view_id, target, if (is_final) output_width else width, if (is_final) output_height else height) else render.Renderer.setViewTarget(view_id, null, output_width, output_height);
+                r.submitBloomComposite(view_id, base_texture, scratch0.texture, bloom);
+                if (output) |target| {
+                    input_texture = target.texture;
+                    if (!is_final) next_slot += 1;
+                }
+            },
             .blend => {
                 const background_texture = s.blend_textures.get(entry.graph_index) orelse continue;
                 const mask_texture = s.segmentation_texture orelse r.default_mask_texture;
@@ -1044,17 +1152,48 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                     }
                     // A capture is a snapshot; only a live frame advances the
                     // fountain, at a fixed step so the sim stays deterministic.
+                    var fade = false;
+                    var glow = false;
+                    var particle_params: [4]f32 = .{ 0, 0, 1, 0 };
+                    var particle_fx: [4]f32 = .{ 1, 1, 0, 0 };
+                    var base_color: [4]f32 = .{ 0.9, 0.8, 0.3, 1.0 };
+                    var cool_color = base_color;
                     if (s.particle_systems.getPtr(entry.graph_index)) |sys| {
+                        if (sys.field.pattern == .face) feedFaceEmitters(s, sys, width, height);
                         if (!s.capture_requested) sys.step(1.0 / 60.0);
+                        fade = sys.field.fade;
+                        glow = sys.field.glow;
+                        if (sys.field.color) |c_| base_color = .{ c_[0], c_[1], c_[2], 1.0 };
+                        cool_color = base_color;
+                        if (sys.field.cool) |c_| cool_color = .{ c_[0], c_[1], c_[2], 1.0 };
                         const count = sys.field.count;
-                        if (s.engine.gpa.alloc(f32, count * 3)) |positions| {
-                            defer s.engine.gpa.free(positions);
-                            sys.writePositions(positions);
-                            r.updateParticleMesh(particle_mesh, positions);
-                        } else |_| {}
+                        if (fade) {
+                            const sprite_px: f32 = if (sys.field.size > 0) @floatFromInt(sys.field.size) else 8.0;
+                            // Size at death relative to birth (1 = unchanged), and
+                            // the spin in turns over life, packed for u_particleSize.
+                            const end_ratio: f32 = if (sys.field.size_end) |end_px| @as(f32, @floatFromInt(end_px)) / @max(sprite_px, 1.0) else 1.0;
+                            particle_params = .{ sprite_px / @as(f32, @floatFromInt(rect_w)), sprite_px / @as(f32, @floatFromInt(rect_h)), end_ratio, sys.field.spin };
+                            // Flip-book frames, the square sheet's cells per row,
+                            // and the velocity stretch, for u_particleFx.
+                            const frames: f32 = @floatFromInt(@max(sys.field.frames, 1));
+                            const sheet_dim: f32 = @ceil(@sqrt(frames));
+                            particle_fx = .{ frames, sheet_dim, sys.field.stretch, 0 };
+                            if (s.engine.gpa.alloc(f32, count * 6 * 8)) |verts| {
+                                defer s.engine.gpa.free(verts);
+                                sys.writeBillboards(verts);
+                                render.Renderer.updateParticleMeshFaded(particle_mesh, verts);
+                            } else |_| {}
+                        } else {
+                            if (s.engine.gpa.alloc(f32, count * 3)) |verts| {
+                                defer s.engine.gpa.free(verts);
+                                sys.writePositions(verts);
+                                r.updateParticleMesh(particle_mesh, verts);
+                            } else |_| {}
+                        }
                     }
                     const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
-                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, .{ 0.9, 0.8, 0.3, 1.0 }, aspect_ratio);
+                    const sprite_texture = s.particle_sprite_textures.get(entry.graph_index) orelse r.defaultSpriteTexture();
+                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, particle_params, particle_fx, glow, sprite_texture);
                     if (output) |target| {
                         input_texture = target.texture;
                         if (!is_final) next_slot += 1;
@@ -1333,6 +1472,8 @@ pub fn destroySession(session: *Session) void {
     destroyMeshFaceState(session);
     session.blend_loaders.deinit(session.engine.gpa);
     session.blend_textures.deinit(session.engine.gpa);
+    session.grade_params.deinit(session.engine.gpa);
+    session.bloom_params.deinit(session.engine.gpa);
     session.mesh_face_loaders.deinit(session.engine.gpa);
     session.mesh_face_textures.deinit(session.engine.gpa);
     session.model_face_anchors.deinit(session.engine.gpa);
@@ -1347,6 +1488,7 @@ pub fn destroySession(session: *Session) void {
     session.hair_vcount.deinit(session.engine.gpa);
     session.particle_meshes.deinit(session.engine.gpa);
     session.particle_systems.deinit(session.engine.gpa);
+    session.particle_sprite_textures.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -1814,10 +1956,33 @@ pub const photoDecode = photo.decode;
 pub const photoProbeMetadata = photo.probeMetadata;
 pub const photo_supported = photo.supported;
 
-/// Captures the composited frame as a platform photo (1 = JPEG,
-/// 2 = HEIC) at quality percent; out_len always receives the needed
-/// size. Lossy and not bit-stable across runs, so the plain
-/// goss_engine_capture_photo stays the deterministic PNG surface.
+/// Encodes RGBA8 as a lossy photo into the caller buffer, setting
+/// out_len so a too-small buffer can be retried. JPEG is the engine's
+/// own encoder - on every target, never gated on a platform backend;
+/// HEIC routes to the platform. color_space picks the JPEG ICC profile.
+fn encodeLossyPhoto(gpa: std.mem.Allocator, pixels: []const u8, width: u32, height: u32, format: u32, quality: u32, color_space: u32, orientation: u8, data: []u8, out_len: *usize) Status {
+    if (format == 1) {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(gpa);
+        jpeg.encode(gpa, &encoded, pixels, width, height, .{
+            .quality = if (quality == 0) 90 else @intCast(quality),
+            .orientation = orientation,
+            .icc_profile = color.iccProfile(color_space),
+        }) catch return .out_of_memory;
+        out_len.* = encoded.items.len;
+        if (data.len < encoded.items.len) return .invalid_argument;
+        @memcpy(data[0..encoded.items.len], encoded.items);
+        return .ok;
+    }
+    if (!photo.supported) return .unsupported;
+    photo.encode(pixels, width, height, @enumFromInt(format), quality, data, out_len) catch return .invalid_argument;
+    return .ok;
+}
+
+/// Captures the composited frame as a photo (1 = JPEG, 2 = HEIC) at
+/// quality percent; out_len always receives the needed size. Lossy and
+/// not bit-stable across runs, so the plain goss_engine_capture_photo
+/// stays the deterministic PNG surface.
 pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session, format: u32, quality: u32, out_data: ?[*]u8, out_capacity: usize, out_len: ?*usize, out_width: ?*u32, out_height: ?*u32) Status {
     const e = engine orelse return .invalid_argument;
     const s = session orelse return .invalid_argument;
@@ -1827,7 +1992,6 @@ pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session,
     const w = out_width orelse return .invalid_argument;
     const h = out_height orelse return .invalid_argument;
     len_out.* = 0;
-    if (!photo.supported) return .unsupported;
     if (format < 1 or format > 2 or quality > 100) return .invalid_argument;
 
     const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
@@ -1844,8 +2008,7 @@ pub export fn goss_engine_capture_photo_as(engine: ?*Engine, session: ?*Session,
     const ready_frame = render.Renderer.readTexture(staging, pixels.ptr);
     while (r.frame() < ready_frame) {}
 
-    photo.encode(pixels, e.capture_width, e.capture_height, @enumFromInt(format), quality, data[0..out_capacity], len_out) catch return .invalid_argument;
-    return .ok;
+    return encodeLossyPhoto(gpa, pixels, e.capture_width, e.capture_height, format, quality, 0, 1, data[0..out_capacity], len_out);
 }
 
 pub const WorldState = extern struct {
@@ -1983,6 +2146,11 @@ pub const CaptureConfig = extern struct {
     format: u32,
     /// 1..100 for the lossy formats; 0 = the backend default.
     quality: u32,
+    /// 0 = sRGB, 1 = Display-P3, 2 = Rec2020 - the gamut the file is
+    /// tagged with (PNG chunks, JPEG ICC).
+    color_space: u32 = 0,
+    /// 8 or 16 bits per channel; 16 needs PNG and the HDR capture target.
+    bit_depth: u32 = 8,
 };
 
 /// Composites the still at the configured resolution (the submitted
@@ -1997,10 +2165,14 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     const len_out = out_len orelse return .invalid_argument;
     const w = out_width orelse return .invalid_argument;
     const h = out_height orelse return .invalid_argument;
-    const cfg: CaptureConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .supersample = 0, .format = 0, .quality = 0 };
+    const cfg: CaptureConfig = if (config) |c_| c_.* else .{ .width = 0, .height = 0, .supersample = 0, .format = 0, .quality = 0, .color_space = 0, .bit_depth = 8 };
     len_out.* = 0;
     if (cfg.format > 2) return .invalid_argument;
-    if (cfg.format != 0 and !photo.supported) return .unsupported;
+    // JPEG is the engine's own encoder, present everywhere; only HEIC
+    // still needs the platform photo backend.
+    if (cfg.format == 2 and !photo.supported) return .unsupported;
+    // 16-bit output is the PNG-only high-bit-depth path.
+    if (cfg.bit_depth == 16 and cfg.format != 0) return .invalid_argument;
 
     const current = s.current orelse return .again;
     const still_w: u16 = if (cfg.width != 0) @intCast(@min(cfg.width, 65535)) else @intCast(current.desc.width);
@@ -2124,16 +2296,26 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
     h.* = out_h;
 
     if (cfg.format == 0) {
+        // Only wide-gamut and 16-bit captures carry extra chunks, so a
+        // plain sRGB 8-bit PNG stays byte-identical to the base path.
+        const space = color.Space.fromInt(cfg.color_space);
+        var tags: png.ColorTags = .{};
+        if (space != .srgb) {
+            tags.chrm = color.chromaticities(space);
+            tags.gama = color.gamma(space);
+        }
         var encoded: std.ArrayList(u8) = .empty;
         defer encoded.deinit(gpa);
-        png.encodeRgba(gpa, &encoded, pixels, out_w, out_h) catch return .out_of_memory;
+        png.encodeRgbaOpts(gpa, &encoded, pixels, out_w, out_h, .{
+            .bit_depth = if (cfg.bit_depth == 16) 16 else 8,
+            .color = tags,
+        }) catch return .out_of_memory;
         len_out.* = encoded.items.len;
         if (out_capacity < encoded.items.len) return .invalid_argument;
         @memcpy(data[0..encoded.items.len], encoded.items);
         return .ok;
     }
-    photo.encode(pixels, out_w, out_h, @enumFromInt(cfg.format), cfg.quality, data[0..out_capacity], len_out) catch return .invalid_argument;
-    return .ok;
+    return encodeLossyPhoto(gpa, pixels, out_w, out_h, cfg.format, cfg.quality, cfg.color_space, 1, data[0..out_capacity], len_out);
 }
 
 pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
@@ -2730,6 +2912,9 @@ fn destroyBlendState(session: *Session) void {
         while (texture_it.next()) |handle| r.destroyTexture(handle.*);
     }
     session.blend_textures.clearRetainingCapacity();
+    // grade.pass and bloom.pass hold only plain params, nothing to free.
+    session.grade_params.clearRetainingCapacity();
+    session.bloom_params.clearRetainingCapacity();
 }
 
 fn destroyMeshFaceState(session: *Session) void {
@@ -2746,14 +2931,16 @@ fn destroyMeshFaceState(session: *Session) void {
         while (hm_it.next()) |mesh| render.Renderer.destroyHairMesh(mesh.*);
     }
     if (session.engine.renderer) |*r| {
-        _ = r;
         var pm_it = session.particle_meshes.valueIterator();
         while (pm_it.next()) |mesh| render.Renderer.destroyParticleMesh(mesh.*);
+        var sprite_it = session.particle_sprite_textures.valueIterator();
+        while (sprite_it.next()) |tex| r.destroyTexture(tex.*);
     }
     var ps_it = session.particle_systems.valueIterator();
     while (ps_it.next()) |sys| sys.deinit();
     session.particle_meshes.clearRetainingCapacity();
     session.particle_systems.clearRetainingCapacity();
+    session.particle_sprite_textures.clearRetainingCapacity();
     session.hair_meshes.clearRetainingCapacity();
     session.hair_ids.clearRetainingCapacity();
     session.hair_vcount.clearRetainingCapacity();
@@ -2862,18 +3049,31 @@ fn setupScript(s: *Session) void {
 /// Runs the lens script's update(lens) once, exposing the current signals
 /// and passing the live parameters in and out. Bounded stack buffers, no
 /// per-frame allocation; a script exception or timeout just skips the write.
+// The signal names a script reads as lens.signals.<name>: the six live
+// signals, then the full ARKit blendshape set by name so a script can react
+// to an expression (lens.signals.jawOpen) the way a trigger reads
+// jawOpen.blendshape. Built once - every name is a static string.
+const base_signal_names = [_][*:0]const u8{ "face_present", "hands_present", "audio_level", "audio_beat", "world_tracking_state", "tap" };
+const script_signal_names = blk: {
+    var arr: [base_signal_names.len + face.blendshape_count][*:0]const u8 = undefined;
+    for (base_signal_names, 0..) |name, i| arr[i] = name;
+    for (face.blendshape_names, 0..) |name, i| arr[base_signal_names.len + i] = @ptrCast(name.ptr);
+    break :blk arr;
+};
+
 fn runScript(s: *Session, signals: *const trigger.Signals) void {
     const engine = if (s.script_engine) |*e| e else return;
     const lens = if (s.active_lens) |*l| l else return;
-    const sig_names = [_][*:0]const u8{ "face_present", "hands_present", "audio_level", "audio_beat", "world_tracking_state", "tap" };
-    const sig_values = [_]f64{
-        if (signals.face_present) 1.0 else 0.0,
-        if (signals.hands_present) 1.0 else 0.0,
-        signals.audio_level,
-        if (signals.audio_beat) 1.0 else 0.0,
-        signals.world_tracking_state,
-        if (signals.tap) 1.0 else 0.0,
-    };
+    var sig_values: [script_signal_names.len]f64 = undefined;
+    sig_values[0] = if (signals.face_present) 1.0 else 0.0;
+    sig_values[1] = if (signals.hands_present) 1.0 else 0.0;
+    sig_values[2] = signals.audio_level;
+    sig_values[3] = if (signals.audio_beat) 1.0 else 0.0;
+    sig_values[4] = signals.world_tracking_state;
+    sig_values[5] = if (signals.tap) 1.0 else 0.0;
+    for (0..face.blendshape_count) |i| {
+        sig_values[base_signal_names.len + i] = if (signals.blendshapes) |bs| bs[i] else 0.0;
+    }
     const n = @min(s.script_param_names.len, 256);
     var name_ptrs: [256][*:0]const u8 = undefined;
     var values: [256]f64 = undefined;
@@ -2881,7 +3081,7 @@ fn runScript(s: *Session, signals: *const trigger.Signals) void {
         name_ptrs[i] = s.script_param_names[i].ptr;
         values[i] = lens.param_values[i];
     }
-    engine.tick(&sig_names, &sig_values, name_ptrs[0..n], values[0..n]) catch return;
+    engine.tick(&script_signal_names, &sig_values, name_ptrs[0..n], values[0..n]) catch return;
     for (0..n) |i| lens.setParam(s.script_param_names[i], @floatCast(values[i]));
 }
 
@@ -2951,10 +3151,23 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     const s = session orelse return .invalid_argument;
     const bytes = manifest_json orelse return .invalid_argument;
     if (manifest_len == 0) return .invalid_argument;
-    activateLens(s, s.engine.gpa, bytes[0..manifest_len]) catch |err| return switch (err) {
+    const gpa = s.engine.gpa;
+    activateLens(s, gpa, bytes[0..manifest_len]) catch |err| return switch (err) {
         error.OutOfMemory => .out_of_memory,
         else => .invalid_argument,
     };
+    // The asset-free composite nodes (blur.pass, grade.pass, bloom.pass) need
+    // no bundle, so build the chain and their params here too - a lens
+    // activated from raw json, as on the web, gets its post-effects. Nodes
+    // that need packaged assets stay not-ready until a directory load.
+    createGradeParams(s, gpa) catch {};
+    createBloomParams(s, gpa) catch {};
+    // A particle fountain also needs no bundle (the CPU sim and its mesh are
+    // built from the field alone), so create it here too; the empty bundle
+    // path just means a glTF model's own asset never loads, degrading it,
+    // while the fountain runs. A sprite image would need a directory.
+    createModelLoaders(s, gpa, "") catch {};
+    buildChainOrder(s, gpa) catch {};
     return .ok;
 }
 
@@ -2986,6 +3199,29 @@ fn createShaderPrograms(session: *Session, gpa: std.mem.Allocator, bundle_path: 
         if (pass.mask_channel) |channel| {
             session.shader_masks.put(gpa, pass.graph_index, channel) catch {};
         }
+    }
+}
+
+/// Resolves every spliced grade.pass node's parametric grade into
+/// session.grade_params, once at activation - grade.pass ships no asset
+/// and runs no loader, so its params are ready the moment the chain is.
+fn createGradeParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const grades = try lens.gradePassNodes(gpa, &session.lens_graph);
+    defer gpa.free(grades);
+    for (grades) |g| {
+        session.grade_params.put(gpa, g.graph_index, g.grade) catch {};
+    }
+}
+
+/// Resolves every spliced bloom.pass node's glow into session.bloom_params,
+/// once at activation - mirrors createGradeParams, one node type over.
+fn createBloomParams(session: *Session, gpa: std.mem.Allocator) !void {
+    const lens = if (session.active_lens) |*l| l else return;
+    const blooms = try lens.bloomPassNodes(gpa, &session.lens_graph);
+    defer gpa.free(blooms);
+    for (blooms) |b| {
+        session.bloom_params.put(gpa, b.graph_index, b.bloom) catch {};
     }
 }
 
@@ -3128,6 +3364,73 @@ fn pollMeshFaceLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allo
     }
 }
 
+/// Fills the session's emitter buffer with a sampled subset of the live face
+/// landmarks, mapped from frame pixels into the particle camera's world space,
+/// and points the face-pattern sim at them. No tracked face leaves the buffer
+/// empty and the fountain at rest.
+fn feedFaceEmitters(s: *Session, sys: *particles.System, frame_w: u32, frame_h: u32) void {
+    const worker = s.face_tracking orelse {
+        sys.setEmitters(&.{});
+        return;
+    };
+    var tracked: face.Result = undefined;
+    if (!tracking.readResult(worker, &tracked) or tracked.landmark_count_out == 0 or tracked.presence < 0.5) {
+        sys.setEmitters(&.{});
+        return;
+    }
+    const fw: f32 = @floatFromInt(@max(frame_w, 1));
+    const fh: f32 = @floatFromInt(@max(frame_h, 1));
+    const aspect = fw / fh;
+    const half: f32 = 0.828; // tan(22.5 deg) * the particle camera's eye z (2)
+    const total = @min(tracked.landmark_count_out, face.landmark_count);
+    const stride = @max(total / s.particle_emitter_buf.len, 1);
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < total and n < s.particle_emitter_buf.len) : (i += stride) {
+        const px = tracked.landmarks[i * 3 + 0];
+        const py = tracked.landmarks[i * 3 + 1];
+        const ndc_x = (px / fw) * 2.0 - 1.0;
+        const ndc_y = (py / fh) * 2.0 - 1.0;
+        s.particle_emitter_buf[n] = .{ ndc_x * half * aspect, -ndc_y * half, 0 };
+        n += 1;
+    }
+    sys.setEmitters(s.particle_emitter_buf[0..n]);
+}
+
+/// Maps a lens-format particle pattern name to the sim's emission shape,
+/// defaulting to the fountain for anything unrecognised.
+fn particlePattern(name: []const u8) particles.Pattern {
+    const names = [_]struct { s: []const u8, p: particles.Pattern }{
+        .{ .s = "rain", .p = .rain },       .{ .s = "burst", .p = .burst },
+        .{ .s = "ring", .p = .ring },       .{ .s = "cone", .p = .cone },
+        .{ .s = "sphere", .p = .sphere },   .{ .s = "box", .p = .box },
+        .{ .s = "disc", .p = .disc },       .{ .s = "hemisphere", .p = .hemisphere },
+        .{ .s = "face", .p = .face },
+    };
+    for (names) |n| {
+        if (std.mem.eql(u8, name, n.s)) return n.p;
+    }
+    return .fountain;
+}
+
+/// Loads a fading fountain's sprite texture synchronously at activation - a
+/// small image, so no background loader: assets/<stem>.png decoded to a
+/// static texture, best-effort, leaving the node on the built-in soft round
+/// default when the sprite is missing or unreadable.
+fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, graph_index: graph.NodeIndex, stem: []const u8) void {
+    if (comptime !has_file_io) return;
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch return;
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(4 * 1024 * 1024)) catch return;
+    defer gpa.free(bytes);
+    const decoded = image.decode(gpa, bytes) catch return;
+    defer gpa.free(decoded.rgba);
+    const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+    session.particle_sprite_textures.put(gpa, graph_index, texture) catch {
+        if (session.engine.renderer) |*r| r.destroyTexture(texture);
+    };
+}
+
 /// Starts a background load for every spliced model.gltf node's .glb
 /// (assets/<stem>.glb) - mirrors createLutLoaders/createBlendLoaders
 /// exactly, one node type over.
@@ -3144,13 +3447,18 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
         }
         if (model.particles) |pf| {
             if (session.engine.renderer) |*r| {
-                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime })) |sys| {
-                    if (r.createParticleMesh(pf.count)) |mesh| {
+                const pattern = particlePattern(pf.pattern);
+                if (particles.System.init(gpa, .{ .count = pf.count, .gravity = pf.gravity, .speed = pf.speed, .lifetime = pf.lifetime, .speed_spread = pf.speed_spread, .lifetime_spread = pf.lifetime_spread, .drag = pf.drag, .wind = pf.wind, .turbulence = pf.turbulence, .attract = pf.attract, .attract_strength = pf.attract_strength, .vortex = pf.vortex, .floor = pf.floor, .oneshot = pf.oneshot, .fade = pf.fade, .color = pf.color, .cool = pf.cool, .size = pf.size, .size_end = pf.size_end, .spin = pf.spin, .stretch = pf.stretch, .frames = pf.frames, .glow = pf.glow, .pattern = pattern })) |sys| {
+                    // A fading fountain draws six-vertex sprite quads; a plain
+                    // one draws one point per particle.
+                    const vertex_count = if (pf.fade) pf.count * 6 else pf.count;
+                    if (r.createParticleMesh(vertex_count, pf.fade)) |mesh| {
                         session.particle_systems.put(gpa, model.graph_index, sys) catch {
                             var s2 = sys;
                             s2.deinit();
                         };
                         session.particle_meshes.put(gpa, model.graph_index, mesh) catch {};
+                        if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
                     } else |_| {
                         var s2 = sys;
                         s2.deinit();
@@ -3316,6 +3624,8 @@ fn activateLensFromDirectory(session: *Session, gpa: std.mem.Allocator, bundle_p
     try createBlendLoaders(session, gpa, bundle_path);
     try createMeshFaceLoaders(session, gpa, bundle_path);
     try createModelLoaders(session, gpa, bundle_path);
+    try createGradeParams(session, gpa);
+    try createBloomParams(session, gpa);
     try buildChainOrder(session, gpa);
     createSounds(session, gpa, bundle_path);
 }

@@ -195,6 +195,28 @@ pub const Renderer = struct {
         _ = step;
     }
 
+    pub fn submitGradePass(r: *Renderer, view_id: u16, input_texture: TextureHandle, grade: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = grade;
+    }
+
+    pub fn submitBloomExtract(r: *Renderer, view_id: u16, input_texture: TextureHandle, params: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = input_texture;
+        _ = params;
+    }
+
+    pub fn submitBloomComposite(r: *Renderer, view_id: u16, base_texture: TextureHandle, bloom_texture: TextureHandle, params: [4]f32) void {
+        _ = r;
+        _ = view_id;
+        _ = base_texture;
+        _ = bloom_texture;
+        _ = params;
+    }
+
     pub fn submitBeautyFace(r: *Renderer, view_id: u16, input_texture: TextureHandle, mean_texture: TextureHandle, lookup_gray: TextureHandle, lookup_origin: TextureHandle, lookup_skin: TextureHandle, lookup_custom: TextureHandle, smooth_amount: f32, whiten_amount: f32) void {
         _ = r;
         _ = view_id;
@@ -349,9 +371,10 @@ pub const Renderer = struct {
         vertex_count: u32 = 0,
     };
 
-    pub fn createParticleMesh(r: *Renderer, count: u32) !ParticleMesh {
+    pub fn createParticleMesh(r: *Renderer, count: u32, fade: bool) !ParticleMesh {
         _ = r;
         _ = count;
+        _ = fade;
         return .{};
     }
 
@@ -361,18 +384,34 @@ pub const Renderer = struct {
         _ = positions;
     }
 
+    pub fn updateParticleMeshFaded(mesh: ParticleMesh, faded: []const f32) void {
+        _ = mesh;
+        _ = faded;
+    }
+
     pub fn destroyParticleMesh(mesh: ParticleMesh) void {
         _ = mesh;
     }
 
-    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32) void {
+    pub fn defaultSpriteTexture(r: *const Renderer) TextureHandle {
+        _ = r;
+        return .{};
+    }
+
+    pub fn submitParticles(r: *Renderer, blit_view: u8, mesh_view: u8, input_texture: TextureHandle, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, particle_params: [4]f32, particle_fx: [4]f32, glow: bool, sprite_texture: TextureHandle) void {
         _ = r;
         _ = blit_view;
         _ = mesh_view;
         _ = input_texture;
         _ = mesh;
         _ = base_color;
+        _ = cool_color;
         _ = aspect_ratio;
+        _ = fade;
+        _ = particle_params;
+        _ = particle_fx;
+        _ = glow;
+        _ = sprite_texture;
     }
 
     pub const HairMesh = struct {
@@ -470,6 +509,18 @@ pub const Renderer = struct {
     }
 
     pub fn loadBlurProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadGradeProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadBloomExtractProgram() !ProgramHandle {
+        return error.RendererUnavailable;
+    }
+
+    pub fn loadBloomCompositeProgram() !ProgramHandle {
         return error.RendererUnavailable;
     }
 

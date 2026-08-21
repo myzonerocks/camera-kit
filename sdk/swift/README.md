@@ -57,6 +57,8 @@ session:
 let photo = try engine.capturePhoto(session: session)             // preview-res PNG
 let still = try engine.captureStill(session: session,             // full-res, supersampled
     config: Engine.StillConfig(width: 8064, height: 6048, supersample: 2))
+let wide = try engine.captureStill(session: session,             // Display-P3, 16-bit PNG
+    config: Engine.StillConfig(colorSpace: .displayP3, bitDepth: 16))
 let jpeg = try engine.capturePhoto(session: session, as: .jpeg, quality: 92)
 
 try engine.startRecording(session: session, path: outPath, hevc: true)

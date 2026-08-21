@@ -77,6 +77,21 @@ export interface SessionConfig {
   frameBudgetUs?: number;
 }
 
+/// A high-resolution still capture, decoupled from the preview size. width
+/// and height 0 capture at the submitted frame's own resolution; format is
+/// PNG (0), JPEG (1) or HEIC (2); quality is 1..100 for the lossy formats.
+export interface StillConfig {
+  width?: number;
+  height?: number;
+  supersample?: number;
+  format?: number;
+  quality?: number;
+  /** 0 = sRGB, 1 = Display-P3, 2 = Rec2020 - the gamut the file is tagged with. */
+  colorSpace?: number;
+  /** 8 or 16 bits per channel; 16 is the PNG high-bit-depth path. */
+  bitDepth?: number;
+}
+
 const FRAME_FLAG_MIRROR = 0x1;
 const FRAME_ROTATION_SHIFT = 8;
 const LENS_SIGNALS_BYTES = 232;
@@ -95,6 +110,7 @@ export interface SessionEvents {
 /// the source of truth for what's actually present at runtime.
 interface EngineModule {
   HEAPU8: Uint8Array;
+  HEAP16: Int16Array;
   HEAPF32: Float32Array;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[], opts: { async: true }): Promise<number>;
@@ -392,6 +408,60 @@ export class Engine {
     return out.toDataURL("image/png");
   }
 
+  /// A high-resolution still of the composited frame at its own resolution
+  /// (width and height 0) or a requested one, decoupled from the preview
+  /// size, returned as the encoded image bytes. Wasm core only: the pure
+  /// WebGL path renders in JS and has no core encoder to reach.
+  async captureStill(session: Session | null, config: StillConfig = {}): Promise<Uint8Array> {
+    if (this.gl) throw new Error("captureStill needs the wasm renderer");
+    const cfgPtr = this.mod.ccall("goss_alloc", "number", ["number"], [28]);
+    this.mod.setValue(cfgPtr, config.width ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 4, config.height ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 8, config.supersample ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 12, config.format ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 16, config.quality ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 20, config.colorSpace ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 24, config.bitDepth ?? 8, "i32");
+    const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const widthPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const heightPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    let dataPtr = 0;
+    let capacity = 0;
+    this.captureInFlight = true;
+    try {
+      // Probe for the encoded size, then capture into a buffer of that size.
+      const probeArgs = ["number", "number", "number", "number", "number", "number", "number", "number"];
+      const probeStatus = await this.mod.ccall(
+        "goss_engine_capture_still",
+        "number",
+        probeArgs,
+        [this.handle, session?.handle ?? 0, cfgPtr, 0, 0, lenPtr, widthPtr, heightPtr],
+        { async: true },
+      );
+      capacity = this.mod.getValue(lenPtr, "i32");
+      if (probeStatus === GOSS_OK && capacity === 0) return new Uint8Array(0);
+      if (capacity <= 0) throw new Error(`goss_engine_capture_still probe failed: status ${probeStatus}`);
+      dataPtr = this.mod.ccall("goss_alloc", "number", ["number"], [capacity]);
+      const status = await this.mod.ccall(
+        "goss_engine_capture_still",
+        "number",
+        probeArgs,
+        [this.handle, session?.handle ?? 0, cfgPtr, dataPtr, capacity, lenPtr, widthPtr, heightPtr],
+        { async: true },
+      );
+      if (status !== GOSS_OK) throw new Error(`goss_engine_capture_still failed: status ${status}`);
+      const encoded = this.mod.getValue(lenPtr, "i32");
+      return this.mod.HEAPU8.slice(dataPtr, dataPtr + encoded);
+    } finally {
+      this.captureInFlight = false;
+      this.mod.ccall("goss_free", null, ["number", "number"], [cfgPtr, 28]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [widthPtr, 4]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [heightPtr, 4]);
+      if (dataPtr !== 0) this.mod.ccall("goss_free", null, ["number", "number"], [dataPtr, capacity]);
+    }
+  }
+
   async readCenterPixel(session: Session | null): Promise<Uint8Array> {
     const { pixels, width, height } = await this.capturePixels(session);
     const offset = (Math.floor(height / 2) * width + Math.floor(width / 2)) * 4;
@@ -535,6 +605,31 @@ export class Session {
       for (let at = 0; at < count; at += 1) this.mod.HEAPF32[base + at] = signals.blendshapes[at]!;
     }
     this.mod.ccall("goss_session_tick_lens", "number", ["number", "number", "number"], [this.handle, dtUs, ptr]);
+  }
+
+  /// Reads a live parameter of the active lens by name, including whatever a
+  /// script node last wrote. Null with no active lens or no such parameter.
+  parameterValue(name: string): number | null {
+    const bytes = new TextEncoder().encode(name);
+    const namePtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]);
+    this.mod.HEAPU8.set(bytes, namePtr);
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
+    const status = this.mod.ccall("goss_session_parameter_value", "number", ["number", "number", "number", "number"], [this.handle, namePtr, bytes.length, outPtr]);
+    const value = status === 0 ? this.mod.getValue(outPtr, "float") : null;
+    this.mod.ccall("goss_free", null, ["number", "number"], [namePtr, bytes.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, 4]);
+    return value;
+  }
+
+  /// Pulls the next block of mixed lens audio (frames interleaved s16) that
+  /// play_sound triggers produced, for the page to feed into WebAudio.
+  pullAudio(frames: number): Int16Array {
+    const byteLen = frames * 2;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLen]);
+    this.mod.ccall("goss_session_pull_audio", "number", ["number", "number", "number"], [this.handle, ptr, frames]);
+    const out = new Int16Array(this.mod.HEAP16.buffer, ptr, frames).slice();
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, byteLen]);
+    return out;
   }
 
   setVideoFlip(enabled: boolean): void {

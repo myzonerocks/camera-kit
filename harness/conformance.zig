@@ -800,6 +800,142 @@ fn proveTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the engine's own photo encoding and color management: the
+/// built-in JPEG decodes back through the platform and is deterministic,
+/// a wide-gamut PNG carries cHRM/gAMA and a wide-gamut JPEG carries an
+/// ICC profile, while a plain sRGB capture carries neither.
+fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/shader-tint", ".lens-packages/shader-tint".len) != .ok) {
+        std.debug.print("conformance: FAIL color-managed capture lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const capture = struct {
+        fn run(g: std.mem.Allocator, e: *abi.Engine, sess: *abi.Session, cfg: abi.CaptureConfig) ![]u8 {
+            var needed: usize = 0;
+            var cw: u32 = 0;
+            var ch: u32 = 0;
+            var probe: [1]u8 = undefined;
+            _ = abi.goss_engine_capture_still(e, sess, &cfg, &probe, 0, &needed, &cw, &ch);
+            if (needed == 0) return error.CaptureProbeFailed;
+            const buf = try g.alloc(u8, needed);
+            errdefer g.free(buf);
+            var out_len: usize = 0;
+            if (abi.goss_engine_capture_still(e, sess, &cfg, buf.ptr, buf.len, &out_len, &cw, &ch) != .ok) return error.CaptureFailed;
+            return g.realloc(buf, out_len);
+        }
+    }.run;
+
+    const base = abi.CaptureConfig{ .width = 200, .height = 150, .supersample = 0, .format = 0, .quality = 0 };
+
+    // Wide-gamut PNG carries cHRM and gAMA; the sRGB one carries neither.
+    var p3_png_cfg = base;
+    p3_png_cfg.color_space = 1;
+    const p3_png = try capture(gpa, engine, session, p3_png_cfg);
+    defer gpa.free(p3_png);
+    const srgb_png = try capture(gpa, engine, session, base);
+    defer gpa.free(srgb_png);
+    if (std.mem.indexOf(u8, p3_png, "cHRM") == null or std.mem.indexOf(u8, p3_png, "gAMA") == null) {
+        std.debug.print("conformance: FAIL Display-P3 PNG is missing its cHRM/gAMA chunks\n", .{});
+        return false;
+    }
+    if (std.mem.indexOf(u8, srgb_png, "cHRM") != null) {
+        std.debug.print("conformance: FAIL sRGB PNG unexpectedly carries a gamut chunk\n", .{});
+        return false;
+    }
+
+    // JPEG comes from the built-in encoder: it must decode back through
+    // the platform decoder, and the wide-gamut one carries an ICC.
+    var p3_jpeg_cfg = base;
+    p3_jpeg_cfg.format = 1;
+    p3_jpeg_cfg.color_space = 1;
+    p3_jpeg_cfg.quality = 90;
+    const p3_jpeg = try capture(gpa, engine, session, p3_jpeg_cfg);
+    defer gpa.free(p3_jpeg);
+    var srgb_jpeg_cfg = base;
+    srgb_jpeg_cfg.format = 1;
+    srgb_jpeg_cfg.quality = 90;
+    const srgb_jpeg = try capture(gpa, engine, session, srgb_jpeg_cfg);
+    defer gpa.free(srgb_jpeg);
+    if (std.mem.indexOf(u8, p3_jpeg, "ICC_PROFILE") == null) {
+        std.debug.print("conformance: FAIL Display-P3 JPEG is missing its ICC profile\n", .{});
+        return false;
+    }
+    if (std.mem.indexOf(u8, srgb_jpeg, "ICC_PROFILE") != null) {
+        std.debug.print("conformance: FAIL sRGB JPEG unexpectedly carries an ICC profile\n", .{});
+        return false;
+    }
+    const decoded = try gpa.alloc(u8, 200 * 150 * 4);
+    defer gpa.free(decoded);
+    var dw: u32 = 0;
+    var dh: u32 = 0;
+    abi.photoDecode(srgb_jpeg, decoded, &dw, &dh) catch {
+        std.debug.print("conformance: FAIL built-in JPEG does not decode\n", .{});
+        return false;
+    };
+    if (dw != 200 or dh != 150) {
+        std.debug.print("conformance: FAIL built-in JPEG decoded at {d}x{d}\n", .{ dw, dh });
+        return false;
+    }
+
+    // The built-in encoder is deterministic.
+    const again = try capture(gpa, engine, session, srgb_jpeg_cfg);
+    defer gpa.free(again);
+    if (!std.mem.eql(u8, srgb_jpeg, again)) {
+        std.debug.print("conformance: FAIL built-in JPEG is not deterministic\n", .{});
+        return false;
+    }
+
+    // A 16-bit PNG capture is a real 16-bit container: IHDR reports bit
+    // depth 16 (the byte past the 8-byte signature and the width/height
+    // fields), and it still decodes back at the right size.
+    var png16_cfg = base;
+    png16_cfg.bit_depth = 16;
+    const png16 = try capture(gpa, engine, session, png16_cfg);
+    defer gpa.free(png16);
+    if (png16[24] != 16) {
+        std.debug.print("conformance: FAIL 16-bit PNG IHDR reports bit depth {d}\n", .{png16[24]});
+        return false;
+    }
+    const decoded16 = image_adapter.decode(gpa, png16) catch {
+        std.debug.print("conformance: FAIL 16-bit PNG does not decode\n", .{});
+        return false;
+    };
+    defer gpa.free(decoded16.rgba);
+    if (decoded16.width != 200 or decoded16.height != 150) {
+        std.debug.print("conformance: FAIL 16-bit PNG decoded at {d}x{d}\n", .{ decoded16.width, decoded16.height });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the built-in JPEG encoder decodes through the platform and is deterministic; wide-gamut PNG/JPEG carry cHRM/gAMA and ICC, sRGB carries neither; a 16-bit PNG is a real 16-bit container\n", .{});
+    return true;
+}
+
 /// Proves a script node: the sandboxed script reads a signal and writes a
 /// lens parameter each tick, deterministically, and the host reads it back
 /// through the ABI. The scripting section's end-to-end proof.
@@ -1126,6 +1262,1059 @@ fn proveParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         }
     }
     std.debug.print("conformance: PROOF a particle fountain emits and falls deterministically, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the fading-particle path: the ember-fountain lens sets fade, so each
+/// point is alpha-blended by its remaining life through the particle program
+/// rather than drawn opaque. The fountain still develops (settled differs from
+/// initial) and the whole thing is bit-stable across runs.
+fn proveEmber(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/ember-fountain", ".lens-packages/ember-fountain".len) != .ok) {
+            std.debug.print("conformance: FAIL ember lens activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var initial_shot: []u8 = &.{};
+        defer if (initial_shot.len > 0) gpa.free(initial_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 2 or i == 85) {
+                var shot_width: u32 = 0;
+                var shot_height: u32 = 0;
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 2) initial_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, initial_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL the ember fountain did not move\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(initial_shot);
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            var png_bytes: std.ArrayList(u8) = .empty;
+            defer png_bytes.deinit(gpa);
+            try png.encodeRgba(gpa, &png_bytes, settled_shot, 400, 300);
+            try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-ember-fountain.png", .data = png_bytes.items });
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL the ember fountain is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a fading particle fountain alpha-blends each point by its life deterministically, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves a textured particle sprite: the star-fountain lens loads its own
+/// assets/star.png at activation and textures each fading sprite with it, so
+/// the fountain develops (settled differs from initial) and is bit-stable
+/// across runs - the sprite-texture path, beyond the built-in round default.
+fn proveStarSprite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/star-fountain", ".lens-packages/star-fountain".len) != .ok) {
+            std.debug.print("conformance: FAIL star-fountain lens activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var initial_shot: []u8 = &.{};
+        defer if (initial_shot.len > 0) gpa.free(initial_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 2 or i == 85) {
+                var shot_width: u32 = 0;
+                var shot_height: u32 = 0;
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 2) initial_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, initial_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL the star fountain did not move\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(initial_shot);
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL the star fountain is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a textured particle sprite loads its own image and renders deterministically, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the emission-pattern, force and colour surface renders: rain snow
+/// (drag, turbulence, pale, slow) and a spinning size-shrinking burst of
+/// confetti each develop, stay bit-stable across runs, and render a picture
+/// distinct from each other.
+fn proveParticlePatterns(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const lenses = [_][]const u8{ ".lens-packages/snow-fall", ".lens-packages/confetti-burst" };
+    var settled: [2][]u8 = .{ &.{}, &.{} };
+    defer for (settled) |s| if (s.len > 0) gpa.free(s);
+
+    for (lenses, 0..) |pkg, lens_idx| {
+        var first_hash: [64]u8 = undefined;
+        var runs: u32 = 0;
+        while (runs < 2) : (runs += 1) {
+            const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            defer settle(engine);
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL particle-pattern lens activation\n", .{});
+                return false;
+            }
+            const corpus = try loadCorpusFrame(gpa, corpus_path);
+            defer corpus.deinit();
+            const planes = try rgbaToNv12(gpa, corpus.frame);
+            defer planes.deinit(gpa);
+            const half_w = (planes.width + 1) / 2;
+
+            var initial_shot: []u8 = &.{};
+            defer if (initial_shot.len > 0) gpa.free(initial_shot);
+            var this_settled: []u8 = &.{};
+            defer if (this_settled.len > 0) gpa.free(this_settled);
+
+            for (0..90) |i| {
+                const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+                if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+                _ = abi.goss_engine_render_frame(engine, session);
+                c.glfwPollEvents();
+                if (i == 2 or i == 85) {
+                    const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                    errdefer gpa.free(shot);
+                    var w: u32 = 0;
+                    var h: u32 = 0;
+                    if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                        gpa.free(shot);
+                        return false;
+                    }
+                    if (i == 2) initial_shot = shot else this_settled = shot;
+                }
+            }
+            if (std.mem.eql(u8, initial_shot, this_settled)) {
+                std.debug.print("conformance: FAIL a particle pattern did not move\n", .{});
+                return false;
+            }
+            var digest: [32]u8 = undefined;
+            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+            hasher.update(this_settled);
+            hasher.final(&digest);
+            const hash = std.fmt.bytesToHex(digest, .lower);
+            if (runs == 0) {
+                first_hash = hash;
+            } else {
+                if (!std.mem.eql(u8, &first_hash, &hash)) {
+                    std.debug.print("conformance: FAIL a particle pattern is not bit-stable across runs\n", .{});
+                    return false;
+                }
+                settled[lens_idx] = this_settled;
+                this_settled = &.{};
+            }
+        }
+    }
+    if (std.mem.eql(u8, settled[0], settled[1])) {
+        std.debug.print("conformance: FAIL snow and confetti rendered the same picture\n", .{});
+        return false;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, settled[0], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-snow-fall.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF emission patterns, forces and colour render distinctly (rain snow vs spinning burst confetti), each bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves the AR spawn off tracked landmarks: the face-sparkle lens uses the face
+/// emission pattern, so particles spawn from the tracked face landmarks. With
+/// face tracking on the portrait corpus it develops (settled differs from
+/// initial) and is bit-stable across runs.
+fn proveFaceSparkle(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        const face_bytes = try std.Io.Dir.cwd().readFileAlloc(harness_io, face_bundle_path, gpa, .limited(16 << 20));
+        defer gpa.free(face_bytes);
+        if (abi.goss_session_enable_face_tracking(session, face_bytes.ptr, face_bytes.len, 2) != .ok) return error.EnableFaceTrackingFailed;
+        if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/face-sparkle", ".lens-packages/face-sparkle".len) != .ok) {
+            std.debug.print("conformance: FAIL face-sparkle lens activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var initial_shot: []u8 = &.{};
+        defer if (initial_shot.len > 0) gpa.free(initial_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{ .width = planes.width, .height = planes.height, .pixel_format = 0, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = @intCast((i + 1) * 33_333) };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 2 or i == 85) {
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                var w: u32 = 0;
+                var h: u32 = 0;
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &w, &h) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 2) initial_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, initial_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL face-sparkle did not move\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+            var png_bytes: std.ArrayList(u8) = .empty;
+            defer png_bytes.deinit(gpa);
+            try png.encodeRgba(gpa, &png_bytes, settled_shot, 400, 300);
+            try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-face-sparkle.png", .data = png_bytes.items });
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL face-sparkle is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF particles spawn from tracked face landmarks (the AR face pattern) and render deterministically, bit-stable across runs\n", .{});
+    return true;
+}
+
+/// Proves a post-effect lens activates from raw json, no bundle directory:
+/// goss_session_activate_lens on a blur.pass manifest builds the composite
+/// chain (the asset-free path the web uses), so the capture differs from the
+/// plain frame and is bit-stable - post-effects reach the browser too.
+fn proveJsonPostEffect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const blur_manifest =
+        \\{"glf":"1.0","id":"goss.test.json-blur","version":"1.0.0","display_name":"JSON Blur","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"b","type":"blur.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[]}
+    ;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (0..3) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (run > 0) {
+            if (abi.goss_session_activate_lens(session, blur_manifest.ptr, blur_manifest.len) != .ok) {
+                std.debug.print("conformance: FAIL json blur activation\n", .{});
+                return false;
+            }
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL json post-effect is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL a json-activated blur.pass did not change the frame\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a post-effect lens activates from raw json and renders deterministically, no bundle directory needed\n", .{});
+    return true;
+}
+
+/// Proves a particle fountain runs from raw json: goss_session_activate_lens
+/// on a particles manifest builds the CPU fountain and its sprite mesh with
+/// no bundle directory (the path the web uses), so the fountain develops
+/// (settled differs from initial) and is bit-stable across runs.
+fn proveJsonParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const particle_manifest =
+        \\{"glf":"1.0","id":"goss.test.json-particles","version":"1.0.0","display_name":"JSON Particles","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"p","type":"model.gltf","inputs":{"frame":"camera"},"params":{},"particles":{"count":150,"gravity":3.0,"speed":0.5,"lifetime":1.5,"fade":true,"size":10}}],"triggers":[]}
+    ;
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens(session, particle_manifest.ptr, particle_manifest.len) != .ok) {
+            std.debug.print("conformance: FAIL json particle activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var initial_shot: []u8 = &.{};
+        defer if (initial_shot.len > 0) gpa.free(initial_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 2 or i == 85) {
+                var shot_width: u32 = 0;
+                var shot_height: u32 = 0;
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 2) initial_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, initial_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL the json particle fountain did not move\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(initial_shot);
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL the json particle fountain is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a particle fountain runs from raw json and renders deterministically, no bundle directory needed\n", .{});
+    return true;
+}
+
+/// Proves the whole node graph composes in one lens: studio-full runs a
+/// beauty.face smooth, then grade.pass, bloom.pass and a fading ember fountain
+/// over the same frame; its settled capture differs from the plain frame and
+/// is bit-stable - beauty, post-effects and particles coexisting in one pass.
+fn proveFullStack(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_]?[]const u8{ null, ".lens-packages/studio-full", ".lens-packages/studio-full" };
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |lens_pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (lens_pkg) |pkg| {
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL studio-full lens activation\n", .{});
+                return false;
+            }
+        }
+        var shot: []u8 = &.{};
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 85) {
+                var shot_width: u32 = 0;
+                var shot_height: u32 = 0;
+                shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+            }
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL the full stack is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL the full stack did not change the frame\n", .{});
+        return false;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[1], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-studio-full.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF beauty, grade, bloom and a fading particle fountain compose in one lens deterministically, differing from the plain frame\n", .{});
+    return true;
+}
+
+/// Proves a blur.pass post-effect: the built-in separable blur softens the
+/// frame, so a blurred capture differs from the un-blurred one and is
+/// bit-stable across runs (no asset, always ready).
+fn proveBlur(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_]?[]const u8{ null, ".lens-packages/soft-blur", ".lens-packages/soft-blur" };
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |lens_pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (lens_pkg) |pkg| {
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL blur lens activation\n", .{});
+                return false;
+            }
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL blur is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL blur.pass did not change the frame\n", .{});
+        return false;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[1], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-soft-blur.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF a blur.pass softens the frame deterministically, differing from the un-blurred capture\n", .{});
+    return true;
+}
+
+/// Proves a grade.pass post-effect: the parametric color grade shifts the
+/// frame (warm, brighter, more contrast), so a graded capture differs from
+/// the un-graded one and is bit-stable across runs (no asset, ready at
+/// activation).
+fn proveGrade(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_]?[]const u8{ null, ".lens-packages/warm-grade", ".lens-packages/warm-grade" };
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |lens_pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (lens_pkg) |pkg| {
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL grade lens activation\n", .{});
+                return false;
+            }
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL grade is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL grade.pass did not change the frame\n", .{});
+        return false;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[1], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-warm-grade.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF a grade.pass shifts the frame's color deterministically, differing from the un-graded capture\n", .{});
+    return true;
+}
+
+/// Proves a bloom.pass post-effect: the bright pass, separable blur and
+/// additive composite bleed a glow from the highlights, so a bloomed
+/// capture differs from the plain one and is bit-stable across runs (no
+/// asset, ready at activation).
+fn proveBloom(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_]?[]const u8{ null, ".lens-packages/glow-bloom", ".lens-packages/glow-bloom" };
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |lens_pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (lens_pkg) |pkg| {
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL bloom lens activation\n", .{});
+                return false;
+            }
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL bloom is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL bloom.pass did not change the frame\n", .{});
+        return false;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[1], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-glow-bloom.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF a bloom.pass glows the frame's highlights deterministically, differing from the plain capture\n", .{});
+    return true;
+}
+
+/// Proves the post-effect nodes compose: a lens chaining blur.pass into
+/// grade.pass into bloom.pass runs all three in one composite chain, its
+/// capture bit-stable and differing from the plain frame - the multi-stage
+/// path (ping-pong, bloom scratch) the single-node proofs never exercise.
+fn proveStackedPostEffects(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const lenses = [_]?[]const u8{ null, ".lens-packages/studio-stack", ".lens-packages/studio-stack" };
+    var shots: [3][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+
+    for (lenses) |lens_pkg| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (lens_pkg) |pkg| {
+            if (abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len) != .ok) {
+                std.debug.print("conformance: FAIL stacked post-effect lens activation\n", .{});
+                return false;
+            }
+        }
+        for (0..3) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var shot_width: u32 = 0;
+        var shot_height: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+            gpa.free(shot);
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    if (!std.mem.eql(u8, shots[1], shots[2])) {
+        std.debug.print("conformance: FAIL the stacked post-effect chain is not bit-stable across runs\n", .{});
+        return false;
+    }
+    if (std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL the stacked post-effect chain did not change the frame\n", .{});
+        return false;
+    }
+    var png_bytes: std.ArrayList(u8) = .empty;
+    defer png_bytes.deinit(gpa);
+    try png.encodeRgba(gpa, &png_bytes, shots[1], 400, 300);
+    try std.Io.Dir.cwd().writeFile(harness_io, .{ .sub_path = "zig-out/conformance-studio-stack.png", .data = png_bytes.items });
+    std.debug.print("conformance: PROOF blur, grade and bloom compose in one chain deterministically, differing from the plain capture\n", .{});
+    return true;
+}
+
+/// Proves the post-effect chain tiles correctly under HD capture: the
+/// studio-stack lens (blur, grade, bloom) captured tile-by-tile stitches
+/// byte-identical to the single-target render, so the tile-aware post-effect
+/// path - bloom's own scratch pair included - holds across grid sizes.
+fn proveTiledPostEffect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/studio-stack", ".lens-packages/studio-stack".len) != .ok) {
+        std.debug.print("conformance: FAIL tiled post-effect lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const desc: abi.FrameDesc = .{
+        .width = planes.width,
+        .height = planes.height,
+        .pixel_format = 0,
+        .color_standard = 0,
+        .color_range = 1,
+        .flags = 0,
+        .timestamp_us = 1000,
+    };
+    const half_w = (planes.width + 1) / 2;
+    if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+        return error.SubmitFailed;
+    }
+    for (0..5) |_| {
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+    }
+
+    const cfg = abi.CaptureConfig{ .width = 400, .height = 300, .supersample = 0, .format = 0, .quality = 0 };
+    const buf_cap = 400 * 300 * 4 + 4096;
+    const whole = try gpa.alloc(u8, buf_cap);
+    defer gpa.free(whole);
+    var whole_len: usize = 0;
+    var ow: u32 = 0;
+    var oh: u32 = 0;
+    session.capture_tile_cap = 0;
+    if (abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh) != .ok or ow != 400 or oh != 300) {
+        std.debug.print("conformance: FAIL single-target capture for the post-effect tiling compare\n", .{});
+        return false;
+    }
+    const caps = [_]u32{ 200, 150 };
+    for (caps) |tcap| {
+        const tiled = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(tiled);
+        var tiled_len: usize = 0;
+        session.capture_tile_cap = tcap;
+        const status = abi.goss_engine_capture_still(engine, session, &cfg, tiled.ptr, tiled.len, &tiled_len, &ow, &oh);
+        session.capture_tile_cap = 0;
+        if (status != .ok or ow != 400 or oh != 300) {
+            std.debug.print("conformance: FAIL tiled post-effect capture at cap {d}\n", .{tcap});
+            return false;
+        }
+        if (!std.mem.eql(u8, whole[0..whole_len], tiled[0..tiled_len])) {
+            std.debug.print("conformance: FAIL tiled post-effect capture at cap {d} is not byte-identical to the single target\n", .{tcap});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF the blur/grade/bloom chain tiles byte-identical to a single-target render (2x2 and 3x2 grids)\n", .{});
+    return true;
+}
+
+/// Proves a script reads a facial blendshape: the script-expression lens maps
+/// lens.signals.jawOpen straight to a parameter, so a wide-open jaw drives it
+/// near 1 and a nearly-closed jaw near 0, deterministically - the expression
+/// surface a trigger already reaches through jawOpen.blendshape.
+fn proveExpressionScript(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/script-expression", ".lens-packages/script-expression".len) != .ok) {
+        std.debug.print("conformance: FAIL script-expression lens activation\n", .{});
+        return false;
+    }
+
+    const name = "open_amount";
+    // blendshape_names[25] is jawOpen, pinned by a face module test.
+    const jaw_open = 25;
+    var open = std.mem.zeroes(abi.LensSignals);
+    open.has_face = true;
+    open.blendshapes[jaw_open] = 0.9;
+    var closed = std.mem.zeroes(abi.LensSignals);
+    closed.has_face = true;
+    closed.blendshapes[jaw_open] = 0.1;
+
+    var v_open: f32 = -1;
+    var v_closed: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &open);
+    if (abi.goss_session_parameter_value(session, name.ptr, name.len, &v_open) != .ok) {
+        std.debug.print("conformance: FAIL reading the expression-driven parameter\n", .{});
+        return false;
+    }
+    _ = abi.goss_session_tick_lens(session, 16000, &closed);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_closed);
+    if (@abs(v_open - 0.9) > 1e-6 or @abs(v_closed - 0.1) > 1e-6) {
+        std.debug.print("conformance: FAIL script read jawOpen as {d}/{d}, wanted 0.9/0.1\n", .{ v_open, v_closed });
+        return false;
+    }
+
+    var v_again: f32 = -1;
+    _ = abi.goss_session_tick_lens(session, 16000, &open);
+    _ = abi.goss_session_parameter_value(session, name.ptr, name.len, &v_again);
+    if (v_again != v_open) {
+        std.debug.print("conformance: FAIL expression script is not deterministic ({d} vs {d})\n", .{ v_again, v_open });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF a script reads a facial blendshape (jawOpen) and drives a parameter from it deterministically (0.9 open, 0.1 closed)\n", .{});
+    return true;
+}
+
+/// Proves the session lifecycle leaks no memory: many activate/tick/destroy
+/// cycles of the adapter-heavy lenses (blur, grade, bloom, audio, script) run
+/// on a headless engine under a leak-checking allocator, which reports no leak
+/// only if every session and the engine free everything - a phone-heat gate.
+fn proveNoLeaks(gpa: std.mem.Allocator) !bool {
+    _ = gpa;
+    const leak_lenses = [_][]const u8{
+        ".lens-packages/soft-blur",
+        ".lens-packages/warm-grade",
+        ".lens-packages/glow-bloom",
+        ".lens-packages/sound-beat",
+        ".lens-packages/script-param",
+    };
+    var check: std.heap.DebugAllocator(.{}) = .init;
+    const leak_gpa = check.allocator();
+    {
+        const engine = try abi.createEngine(leak_gpa, .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+        defer abi.destroyEngine(engine);
+        var cycle: usize = 0;
+        while (cycle < 32) : (cycle += 1) {
+            for (leak_lenses) |pkg| {
+                const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+                defer abi.destroySession(session);
+                _ = abi.goss_session_activate_lens_from_directory(session, pkg.ptr, pkg.len);
+                var signals = std.mem.zeroes(abi.LensSignals);
+                signals.has_face = true;
+                var t: u32 = 0;
+                while (t < 4) : (t += 1) {
+                    _ = abi.goss_session_tick_lens(session, 33_333, &signals);
+                }
+            }
+        }
+    }
+    if (check.deinit() == .leak) {
+        std.debug.print("conformance: FAIL the session lifecycle leaked memory across activate/tick/destroy cycles\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF repeated lens activate/tick/destroy cycles leak no memory (blur, grade, bloom, audio, script)\n", .{});
+    return true;
+}
+
+/// Wraps an allocator to track bytes currently in use, so the per-frame
+/// gate can watch the heap footprint settle instead of timing the wall
+/// clock (which drifts machine to machine).
+const CountingAllocator = struct {
+    backing: std.mem.Allocator,
+    in_use: usize = 0,
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        self.in_use += len;
+        return p;
+    }
+    fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.backing.rawResize(buf, alignment, new_len, ra)) return false;
+        self.in_use = self.in_use - buf.len + new_len;
+        return true;
+    }
+    fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.backing.rawRemap(buf, alignment, new_len, ra) orelse return null;
+        self.in_use = self.in_use - buf.len + new_len;
+        return p;
+    }
+    fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(buf, alignment, ra);
+        self.in_use -= buf.len;
+    }
+};
+
+/// Enforces bounded per-frame work: the heaviest reference stack (blur,
+/// grade, bloom and particles at once) renders many frames while the heap
+/// footprint is sampled each frame. Past warm-up the in-use bytes must
+/// hold flat - steady growth is the accumulation that overheats a phone.
+fn provePerFrameBudget(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingAllocator) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/studio-full", ".lens-packages/studio-full".len) != .ok) {
+        std.debug.print("conformance: FAIL per-frame budget lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const total_frames: usize = 120;
+    const warmup: usize = 40;
+    var steady_min: usize = std.math.maxInt(usize);
+    var steady_max: usize = 0;
+    for (0..total_frames) |frame| {
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = @as(i64, @intCast(frame + 1)) * 33_333,
+        };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (frame >= warmup) {
+            if (counter.in_use < steady_min) steady_min = counter.in_use;
+            if (counter.in_use > steady_max) steady_max = counter.in_use;
+        }
+    }
+
+    // Steady-state footprint must be flat: no bytes accumulate frame to
+    // frame once the pools and caches have filled.
+    if (steady_max != steady_min) {
+        std.debug.print("conformance: FAIL per-frame footprint grew {d} bytes over steady state (min {d}, max {d}) - per-frame accumulation\n", .{ steady_max - steady_min, steady_min, steady_max });
+        return false;
+    }
+    std.debug.print("conformance: PROOF the full stack holds a flat {d}-byte per-frame footprint over {d} frames (no accumulation)\n", .{ steady_min, total_frames - warmup });
     return true;
 }
 
@@ -1472,7 +2661,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "gosslens conformance", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
 
-    const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+    // The engine runs under a counting allocator so the per-frame budget
+    // gate can watch its heap footprint settle across a render loop.
+    var frame_counter = CountingAllocator{ .backing = gpa };
+    const engine = try abi.createEngine(frame_counter.allocator(), .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
     defer abi.destroyEngine(engine);
 
     const renderer_desc: abi.RendererDesc = .{
@@ -1524,7 +2716,23 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveHairSim(gpa, engine)) return 1;
     if (!try proveHighResCapture(gpa, engine)) return 1;
     if (!try proveTiledCapture(gpa, engine)) return 1;
+    if (!try proveColorManagedCapture(gpa, engine)) return 1;
     if (!try proveScript(gpa, engine)) return 1;
     if (!try proveAudio(gpa, engine)) return 1;
+    if (!try proveBlur(gpa, engine)) return 1;
+    if (!try proveGrade(gpa, engine)) return 1;
+    if (!try proveBloom(gpa, engine)) return 1;
+    if (!try proveStackedPostEffects(gpa, engine)) return 1;
+    if (!try proveExpressionScript(gpa, engine)) return 1;
+    if (!try proveEmber(gpa, engine)) return 1;
+    if (!try proveStarSprite(gpa, engine)) return 1;
+    if (!try proveParticlePatterns(gpa, engine)) return 1;
+    if (!try proveFaceSparkle(gpa, engine)) return 1;
+    if (!try proveJsonPostEffect(gpa, engine)) return 1;
+    if (!try proveJsonParticles(gpa, engine)) return 1;
+    if (!try proveFullStack(gpa, engine)) return 1;
+    if (!try proveTiledPostEffect(gpa, engine)) return 1;
+    if (!try proveNoLeaks(gpa)) return 1;
+    if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;
     return 0;
 }

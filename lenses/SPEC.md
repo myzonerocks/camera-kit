@@ -175,20 +175,66 @@ all are optional with engine defaults. Like cloth it needs no glb
 asset, and without a tracked head the strands hang from their initial
 pose, the standard capability degradation.
 
-A model.gltf node may instead carry a `"particles": {"count", "gravity",
-"speed", "lifetime"}` field: the node becomes a particle fountain instead
-of a glb mesh. `count` (1 to 4096) particles emit from the origin with an
-index-spread velocity, integrate under `gravity`, and respawn when their
-`lifetime` runs out, drawn as points over the frame. The sim is a
-deterministic CPU integration - no clock, no randomness - so the same
-field and frame count produce the same picture, conformance bit-stable; it
-needs no glb asset.
+A model.gltf node may instead carry a `"particles"` field: the node becomes
+a particle system instead of a glb mesh, drawn over the frame. The sim is a
+deterministic CPU integration - no clock, no randomness, every particle a
+pure function of its index and elapsed steps - so the same field and frame
+count produce the same picture, conformance bit-stable; it needs no glb
+asset. `count` is how many (1 to 4096); the rest of the field tunes emission,
+motion, and appearance:
+
+- Emission `"pattern"`: `fountain` (default), `rain`, `burst`, `ring`,
+  `cone`, `sphere`, `box`, `disc`, `hemisphere`, or `face` - the last spawns
+  from the tracked face landmarks (sparkles off the face), degrading to
+  nothing without a tracked subject.
+- Motion: `"gravity"`, `"speed"` and `"lifetime"` (each with a 0..1
+  `"speed_spread"` / `"lifetime_spread"` to vary it per particle), `"drag"`
+  (air resistance), `"wind": [x, y, z]`, `"turbulence"` (swirl), `"attract":
+  [x, y, z]` with `"attract_strength"` (a gravity well), `"vortex"` (orbital
+  swirl), `"floor"` (a height particles bounce off), and `"oneshot"` (emit
+  once and die out rather than looping).
+- Appearance (with `"fade": true` each particle is a camera-facing sprite,
+  otherwise a one-pixel point): `"size"` px at birth with an optional
+  `"size_end"`, `"color": [r, g, b]` crossing to a `"cool"` colour over life,
+  `"spin"` turns over life, `"stretch"` along the screen velocity (streaks),
+  `"glow": true` for additive blending, a `"sprite": "<stem>"` textured with
+  `assets/<stem>.png`, and `"frames"` to flip-book through a square sprite
+  sheet over life.
+
+A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
+reaches it with the engine's built-in separable box blur and passes the
+result down the chain, the same primitive `beauty.face`'s smooth step uses,
+here exposed as its own node so a lens can blur the full frame without a
+beauty filter. It reads `shaders/*.glsl` nothing and ships no asset - the
+program is kit-authored and fixed - so it is always ready and never
+degrades. Place it anywhere in the chain; it blurs its input and hands the
+softened frame to the next node.
+
+A `"grade.pass"` node is a parametric color grade post-effect. It carries a
+`"grade": {"exposure", "contrast", "saturation", "temperature"}` block and
+shifts whatever frame reaches it - exposure in stops, contrast and
+saturation as multipliers around 1, temperature a warm/cool push - then
+hands the graded frame down the chain. Every field is optional and defaults
+to the identity, so a `grade.pass` with an empty block leaves the frame
+untouched. Like `blur.pass` it ships no asset and is always ready; it lets a
+lens warm, cool, brighten or push contrast without authoring a LUT.
+
+A `"bloom.pass"` node is a glow post-effect. It carries a `"bloom":
+{"threshold", "intensity"}` block: it extracts the frame's highlights - what
+sits above `threshold` in luma - blurs them, and adds that blurred glow back
+over the frame scaled by `intensity`, so bright areas bleed a soft halo.
+Both fields are optional with engine defaults. Like `blur.pass` and
+`grade.pass` it ships no asset and is always ready.
 
 A `"script"` node carries an inline `"source"` string of JavaScript that
 defines a global `update(lens)` function. It draws nothing and never joins
 the composite chain; instead the host runs it once per tick, before triggers
 and ramps, exposing the current signals as `lens.signals.<name>` (read) and
-the lens parameters as `lens.params.<name>` (read and write). Whatever it
+the lens parameters as `lens.params.<name>` (read and write). The signal
+surface is the six live signals (`face_present`, `hands_present`,
+`audio_level`, `audio_beat`, `world_tracking_state`, `tap`) plus every ARKit
+blendshape by name (`lens.signals.jawOpen`, `mouthSmileLeft`, and the rest),
+so a script reacts to an expression the way a trigger reads `jawOpen.blendshape`. Whatever it
 writes to a parameter flows into that tick like any other parameter change.
 The runtime is sandboxed and deterministic: no filesystem, network, wall
 clock, or randomness is in scope (`Date` and `Math.random` are removed), and

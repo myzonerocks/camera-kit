@@ -96,15 +96,20 @@ pub const Renderer = struct {
     width: u32,
     height: u32,
     layout: c.bgfx_vertex_layout_t,
+    billboard_layout: c.bgfx_vertex_layout_t,
     rgba_program: c.bgfx_program_handle_t,
     nv12_program: c.bgfx_program_handle_t,
     lut_program: c.bgfx_program_handle_t,
     blend_program: c.bgfx_program_handle_t,
     blur_program: c.bgfx_program_handle_t,
+    grade_program: c.bgfx_program_handle_t,
+    bloom_extract_program: c.bgfx_program_handle_t,
+    bloom_composite_program: c.bgfx_program_handle_t,
     beauty_face_program: c.bgfx_program_handle_t,
     beauty_reshape_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
+    billboard_program: c.bgfx_program_handle_t,
     /// The 176-triangle face-makeup mesh's fixed index buffer -
     /// makeup_mesh.triangle_indices, uploaded once, never changes.
     makeup_index_buffer: c.bgfx_index_buffer_handle_t,
@@ -126,6 +131,7 @@ pub const Renderer = struct {
     tex_y: c.bgfx_uniform_handle_t,
     tex_uv: c.bgfx_uniform_handle_t,
     tex_lut: c.bgfx_uniform_handle_t,
+    tex_sprite: c.bgfx_uniform_handle_t,
     tex_background: c.bgfx_uniform_handle_t,
     tex_mask: c.bgfx_uniform_handle_t,
     tex_mean: c.bgfx_uniform_handle_t,
@@ -135,6 +141,9 @@ pub const Renderer = struct {
     tex_lookup_custom: c.bgfx_uniform_handle_t,
     tex_makeup: c.bgfx_uniform_handle_t,
     blur_step_uniform: c.bgfx_uniform_handle_t,
+    grade_params_uniform: c.bgfx_uniform_handle_t,
+    bloom_params_uniform: c.bgfx_uniform_handle_t,
+    tex_bloom: c.bgfx_uniform_handle_t,
     beauty_params_uniform: c.bgfx_uniform_handle_t,
     reshape_params_uniform: c.bgfx_uniform_handle_t,
     makeup_params_uniform: c.bgfx_uniform_handle_t,
@@ -142,12 +151,16 @@ pub const Renderer = struct {
     /// fs_beauty_reshape.sc's own u_facePoints packing.
     face_points_uniform: c.bgfx_uniform_handle_t,
     model_color_uniform: c.bgfx_uniform_handle_t,
+    particle_cool_uniform: c.bgfx_uniform_handle_t,
+    particle_size_uniform: c.bgfx_uniform_handle_t,
+    particle_fx_uniform: c.bgfx_uniform_handle_t,
     /// Solid white 1x1: blend.pass's mask input when segmentation is
     /// unavailable. A mask of 1.0 everywhere means "always foreground,"
     /// so binding this reproduces the SPEC's degradation rule exactly -
     /// the pass draws the frame through unblended rather than blocking
     /// the chain or sampling an unbound texture.
     default_mask_texture: c.bgfx_texture_handle_t,
+    default_sprite_texture: c.bgfx_texture_handle_t,
     /// The absence-of-signal mask: a named mask channel with no live
     /// data samples zero so the effect draws nothing, never everywhere.
     zero_mask_texture: c.bgfx_texture_handle_t,
@@ -239,6 +252,16 @@ pub const Renderer = struct {
         _ = c.bgfx_vertex_layout_add(&layout, c.BGFX_ATTRIB_TEXCOORD0, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
         c.bgfx_vertex_layout_end(&layout);
 
+        // The fading-sprite mesh carries per vertex, alongside the particle
+        // centre: a corner index, remaining-life fraction and spin seed
+        // (texcoord0), then the world velocity xy for the stretch (texcoord1).
+        var billboard_layout: c.bgfx_vertex_layout_t = undefined;
+        _ = c.bgfx_vertex_layout_begin(&billboard_layout, c.BGFX_RENDERER_TYPE_NOOP);
+        _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_POSITION, 3, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_TEXCOORD0, 3, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        _ = c.bgfx_vertex_layout_add(&billboard_layout, c.BGFX_ATTRIB_TEXCOORD1, 2, c.BGFX_ATTRIB_TYPE_FLOAT, false, false);
+        c.bgfx_vertex_layout_end(&billboard_layout);
+
         const backend = c.bgfx_get_renderer_type();
         const rgba_program, const nv12_program = switch (backend) {
             c.BGFX_RENDERER_TYPE_METAL => .{
@@ -262,10 +285,14 @@ pub const Renderer = struct {
         const lut_program = try loadLutProgram();
         const blend_program = try loadBlendProgram();
         const blur_program = try loadBlurProgram();
+        const grade_program = try loadGradeProgram();
+        const bloom_extract_program = try loadBloomExtractProgram();
+        const bloom_composite_program = try loadBloomCompositeProgram();
         const beauty_face_program = try loadBeautyFaceProgram();
         const beauty_reshape_program = try loadBeautyReshapeProgram();
         const makeup_program = try loadMakeupProgram();
         const model_program = try loadModelProgram();
+        const billboard_program = try loadBillboardProgram();
 
         var makeup_position_layout: c.bgfx_vertex_layout_t = undefined;
         _ = c.bgfx_vertex_layout_begin(&makeup_position_layout, c.BGFX_RENDERER_TYPE_NOOP);
@@ -311,15 +338,20 @@ pub const Renderer = struct {
             .width = options.width,
             .height = options.height,
             .layout = layout,
+            .billboard_layout = billboard_layout,
             .rgba_program = rgba_program,
             .nv12_program = nv12_program,
             .lut_program = lut_program,
             .blend_program = blend_program,
             .blur_program = blur_program,
+            .grade_program = grade_program,
+            .bloom_extract_program = bloom_extract_program,
+            .bloom_composite_program = bloom_composite_program,
             .beauty_face_program = beauty_face_program,
             .beauty_reshape_program = beauty_reshape_program,
             .makeup_program = makeup_program,
             .model_program = model_program,
+            .billboard_program = billboard_program,
             .makeup_index_buffer = makeup_index_buffer,
             .face_mesh_index_buffer = face_mesh_index_buffer,
             .face_mesh_uv_buffer = face_mesh_uv_buffer,
@@ -331,6 +363,7 @@ pub const Renderer = struct {
             .tex_y = c.bgfx_create_uniform("s_texY", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_uv = c.bgfx_create_uniform("s_texUV", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_lut = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_sprite = c.bgfx_create_uniform("s_texSprite", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_background = c.bgfx_create_uniform("s_texBackground", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_mask = c.bgfx_create_uniform("s_texMask", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_mean = c.bgfx_create_uniform("s_texMean", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
@@ -340,13 +373,20 @@ pub const Renderer = struct {
             .tex_lookup_custom = c.bgfx_create_uniform("s_texLookupCustom", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_makeup = c.bgfx_create_uniform("s_texMakeup", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .blur_step_uniform = c.bgfx_create_uniform("u_blurStep", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .grade_params_uniform = c.bgfx_create_uniform("u_grade", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .bloom_params_uniform = c.bgfx_create_uniform("u_bloom", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .tex_bloom = c.bgfx_create_uniform("s_texBloom", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .beauty_params_uniform = c.bgfx_create_uniform("u_beautyParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .reshape_params_uniform = c.bgfx_create_uniform("u_reshapeParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .makeup_params_uniform = c.bgfx_create_uniform("u_makeupParams", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .particle_cool_uniform = c.bgfx_create_uniform("u_particleCool", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .particle_size_uniform = c.bgfx_create_uniform("u_particleSize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .particle_fx_uniform = c.bgfx_create_uniform("u_particleFx", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .default_mask_texture = createMaskTexture(1, 1, &[_]u8{255}),
             .zero_mask_texture = createMaskTexture(1, 1, &[_]u8{0}),
+            .default_sprite_texture = createStaticTexture(1, 1, &[_]u8{ 255, 255, 255, 255 }),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
         };
     }
@@ -429,6 +469,42 @@ pub const Renderer = struct {
         };
     }
 
+    /// grade.pass's own fixed parametric-grade program every lens shares -
+    /// kit-authored like lut_program, same reasoning.
+    pub fn loadGradeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_grade_pass_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_grade_pass_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_grade_pass_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_grade_pass_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// bloom.pass's bright-extract program every lens shares - kit-authored
+    /// like lut_program, same reasoning.
+    pub fn loadBloomExtractProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_bloom_extract_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_bloom_extract_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_bloom_extract_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_bloom_extract_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
+    /// bloom.pass's additive-composite program every lens shares -
+    /// kit-authored like lut_program, same reasoning.
+    pub fn loadBloomCompositeProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_bloom_composite_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_bloom_composite_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_bloom_composite_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_bloom_composite_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     /// The one fixed beauty.face program every lens shares - kit-authored
     /// like lut_program, same reasoning.
     pub fn loadBeautyFaceProgram() !c.bgfx_program_handle_t {
@@ -482,6 +558,18 @@ pub const Renderer = struct {
         };
     }
 
+    /// The fading-sprite program every lens shares - its own vertex stage
+    /// expands each particle centre into a camera-facing quad, kit-authored.
+    pub fn loadBillboardProgram() !c.bgfx_program_handle_t {
+        return switch (c.bgfx_get_renderer_type()) {
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_billboard_metal, blobs.fs_billboard_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_billboard_spirv, blobs.fs_billboard_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_billboard_essl, blobs.fs_billboard_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_billboard_wgsl, blobs.fs_billboard_wgsl),
+            else => error.RendererUnsupported,
+        };
+    }
+
     pub fn destroyProgram(program: c.bgfx_program_handle_t) void {
         c.bgfx_destroy_program(program);
     }
@@ -506,10 +594,12 @@ pub const Renderer = struct {
         }
         c.bgfx_destroy_texture(r.default_mask_texture);
         c.bgfx_destroy_texture(r.zero_mask_texture);
+        c.bgfx_destroy_texture(r.default_sprite_texture);
         c.bgfx_destroy_uniform(r.tex_color);
         c.bgfx_destroy_uniform(r.tex_y);
         c.bgfx_destroy_uniform(r.tex_uv);
         c.bgfx_destroy_uniform(r.tex_lut);
+        c.bgfx_destroy_uniform(r.tex_sprite);
         c.bgfx_destroy_uniform(r.tex_background);
         c.bgfx_destroy_uniform(r.tex_mask);
         c.bgfx_destroy_uniform(r.tex_mean);
@@ -519,21 +609,31 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.tex_lookup_custom);
         c.bgfx_destroy_uniform(r.tex_makeup);
         c.bgfx_destroy_uniform(r.blur_step_uniform);
+        c.bgfx_destroy_uniform(r.grade_params_uniform);
+        c.bgfx_destroy_uniform(r.bloom_params_uniform);
+        c.bgfx_destroy_uniform(r.tex_bloom);
         c.bgfx_destroy_uniform(r.beauty_params_uniform);
         c.bgfx_destroy_uniform(r.reshape_params_uniform);
         c.bgfx_destroy_uniform(r.makeup_params_uniform);
         c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.model_color_uniform);
+        c.bgfx_destroy_uniform(r.particle_cool_uniform);
+        c.bgfx_destroy_uniform(r.particle_size_uniform);
+        c.bgfx_destroy_uniform(r.particle_fx_uniform);
         c.bgfx_destroy_uniform(r.yuv_uniform);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
         c.bgfx_destroy_program(r.lut_program);
         c.bgfx_destroy_program(r.blend_program);
         c.bgfx_destroy_program(r.blur_program);
+        c.bgfx_destroy_program(r.grade_program);
+        c.bgfx_destroy_program(r.bloom_extract_program);
+        c.bgfx_destroy_program(r.bloom_composite_program);
         c.bgfx_destroy_program(r.beauty_face_program);
         c.bgfx_destroy_program(r.beauty_reshape_program);
         c.bgfx_destroy_program(r.makeup_program);
         c.bgfx_destroy_program(r.model_program);
+        c.bgfx_destroy_program(r.billboard_program);
         c.bgfx_destroy_index_buffer(r.makeup_index_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.makeup_position_buffer);
         c.bgfx_destroy_vertex_buffer(r.makeup_lipstick_uv_buffer);
@@ -864,6 +964,41 @@ pub const Renderer = struct {
         c.bgfx_submit(view_id, r.blur_program, 0, c.BGFX_DISCARD_ALL);
     }
 
+    /// Draws one lens grade.pass node as a full-screen pass into view_id:
+    /// the frame on unit 0, its four grade params (exposure, contrast,
+    /// saturation, temperature) in u_grade, the one fixed grade_program
+    /// every grade.pass node shares.
+    pub fn submitGradePass(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, grade: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.grade_params_uniform, &grade, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.grade_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// bloom.pass's bright-extract stage into view_id: the frame on unit 0,
+    /// the bloom params (threshold, intensity) in u_bloom, writing only the
+    /// highlights that clear the threshold into the bloom scratch target.
+    pub fn submitBloomExtract(r: *Renderer, view_id: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, input_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.bloom_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.bloom_extract_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// bloom.pass's composite stage into view_id: the original frame on
+    /// unit 0, the blurred bright pass on unit 1, added back over the base
+    /// scaled by intensity (u_bloom.y).
+    pub fn submitBloomComposite(r: *Renderer, view_id: c.bgfx_view_id_t, base_texture: c.bgfx_texture_handle_t, bloom_texture: c.bgfx_texture_handle_t, params: [4]f32) void {
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, base_texture, std.math.maxInt(u32));
+        c.bgfx_set_texture(1, r.tex_bloom, bloom_texture, std.math.maxInt(u32));
+        c.bgfx_set_uniform(r.bloom_params_uniform, &params, 1);
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.bloom_composite_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
     /// Draws one beauty.face node (smooth+whiten) as a full-screen pass
     /// into view_id: the frame and its separable blur on units 0-1, the
     /// four whitening LUTs on units 2-5, matching gpupixel's own
@@ -1118,8 +1253,9 @@ pub const Renderer = struct {
         vertex_count: u32,
     };
 
-    pub fn createParticleMesh(r: *Renderer, count: u32) !ParticleMesh {
-        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(count, &r.layout, c.BGFX_BUFFER_ALLOW_RESIZE);
+    pub fn createParticleMesh(r: *Renderer, count: u32, fade: bool) !ParticleMesh {
+        const vlayout = if (fade) &r.billboard_layout else &r.layout;
+        const position_buffer = c.bgfx_create_dynamic_vertex_buffer(count, vlayout, c.BGFX_BUFFER_ALLOW_RESIZE);
         return .{ .position_buffer = position_buffer, .vertex_count = count };
     }
 
@@ -1133,12 +1269,27 @@ pub const Renderer = struct {
         c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
     }
 
+    /// Uploads already-interleaved sprite vertices (position, corner index,
+    /// life, seed, velocity xy per vertex - eight floats) straight into the
+    /// mesh; the writeBillboards output.
+    pub fn updateParticleMeshFaded(mesh: ParticleMesh, faded: []const f32) void {
+        const count = @min(faded.len / 8, mesh.vertex_count);
+        c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(faded.ptr, @intCast(count * 8 * @sizeOf(f32))));
+    }
+
     pub fn destroyParticleMesh(mesh: ParticleMesh) void {
         c.bgfx_destroy_dynamic_vertex_buffer(mesh.position_buffer);
     }
 
-    /// Draws particles as points over the frame through the model program.
-    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, aspect_ratio: f32) void {
+    /// Draws particles over the frame. Opaque one-pixel points through the
+    /// model program by default; when fade is set, each particle is a
+    /// camera-facing alpha-blended sprite of sprite_size_ndc (ndc half-extent
+    /// per axis) through the billboard program, dimmed by its remaining life.
+    pub fn defaultSpriteTexture(r: *const Renderer) c.bgfx_texture_handle_t {
+        return r.default_sprite_texture;
+    }
+
+    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, particle_params: [4]f32, particle_fx: [4]f32, glow: bool, sprite_texture: c.bgfx_texture_handle_t) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
@@ -1149,8 +1300,20 @@ pub const Renderer = struct {
         _ = c.bgfx_set_transform(&model.cols, 1);
         c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
-        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_PT_POINTS, 0);
-        c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
+        if (fade) {
+            c.bgfx_set_texture(0, r.tex_sprite, sprite_texture, std.math.maxInt(u32));
+            c.bgfx_set_uniform(r.particle_cool_uniform, &cool_color, 1);
+            c.bgfx_set_uniform(r.particle_size_uniform, &particle_params, 1);
+            c.bgfx_set_uniform(r.particle_fx_uniform, &particle_fx, 1);
+            // Glow blends additively (overlaps brighten); otherwise a plain
+            // src-alpha composite.
+            const dst = if (glow) c.BGFX_STATE_BLEND_ONE else c.BGFX_STATE_BLEND_INV_SRC_ALPHA;
+            c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_BLEND_FUNC(c.BGFX_STATE_BLEND_SRC_ALPHA, dst), 0);
+            c.bgfx_submit(mesh_view, r.billboard_program, 0, c.BGFX_DISCARD_ALL);
+        } else {
+            c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_PT_POINTS, 0);
+            c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
+        }
     }
 
     /// Draws one model.gltf node: blit_view first blits the current

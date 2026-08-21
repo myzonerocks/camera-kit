@@ -87,6 +87,69 @@ pub const ParticleField = struct {
     gravity: f32,
     speed: f32,
     lifetime: f32,
+    /// When true, each point fades out over its life (alpha-blended) rather
+    /// than drawing at full opacity until it respawns.
+    fade: bool = false,
+    /// The rgb a point cools toward as it dies; set, a point starts at the
+    /// node colour and crosses to this by the end of its life (an ember
+    /// glowing hot then cooling). Null keeps the node colour throughout.
+    cool: ?[3]f32 = null,
+    /// Sprite size in pixels (1 to 64) for a fading fountain, drawn as
+    /// camera-facing quads; 0 lets the engine pick a visible default.
+    size: u32 = 0,
+    /// When true, fading sprites blend additively so overlaps brighten - a
+    /// glowing fire look rather than a flat alpha composite.
+    glow: bool = false,
+    /// The stem of a sprite image (assets/<stem>.png) each fading sprite is
+    /// textured with, shaping the point beyond the soft round default. Null
+    /// draws the built-in soft round sprite.
+    sprite: ?[]const u8 = null,
+    /// The emission shape: fountain (default), rain, burst, ring, cone, sphere.
+    pattern: []const u8 = "fountain",
+    /// The rgb each particle is drawn at; null uses the engine's warm default.
+    color: ?[3]f32 = null,
+    /// 0..1 fractions varying launch speed and lifetime per particle.
+    speed_spread: f32 = 0,
+    lifetime_spread: f32 = 0,
+    /// Velocity damping per second (drag) and a constant wind force.
+    drag: f32 = 0,
+    wind: [3]f32 = .{ 0, 0, 0 },
+    /// A deterministic swirl amplitude added to velocity.
+    turbulence: f32 = 0,
+    /// A point particles are pulled toward and how strongly (a gravity well).
+    attract: ?[3]f32 = null,
+    attract_strength: f32 = 0,
+    /// Orbital swirl strength around the vertical axis.
+    vortex: f32 = 0,
+    /// A floor height particles bounce off; null falls through.
+    floor: ?f32 = null,
+    /// How far a sprite stretches along its screen velocity (streaks); 0 round.
+    stretch: f32 = 0,
+    /// Frames in a square sprite sheet flip-booked over life; 1 is a still.
+    frames: u32 = 1,
+    /// Emit everything once and let it die out, rather than looping.
+    oneshot: bool = false,
+    /// Sprite size in pixels at death, if the size changes over life.
+    size_end: ?u32 = null,
+    /// Turns a textured sprite spins over its life.
+    spin: f32 = 0,
+};
+
+pub const GradeField = struct {
+    /// A grade.pass node's parametric color grade. Defaults are the
+    /// identity (nothing changes): exposure in stops, contrast and
+    /// saturation as multipliers around 1, temperature a warm/cool shift.
+    exposure: f32 = 0,
+    contrast: f32 = 1,
+    saturation: f32 = 1,
+    temperature: f32 = 0,
+};
+
+pub const BloomField = struct {
+    /// A bloom.pass node's glow: threshold is the luma above which a pixel
+    /// blooms, intensity how strongly the blurred highlights add back.
+    threshold: f32 = 0.7,
+    intensity: f32 = 0.6,
 };
 
 pub const PhysicsBody = struct {
@@ -123,6 +186,10 @@ pub const Node = struct {
     hair: ?HairField = null,
     /// Set when the node is a particle fountain instead of a glb.
     particles: ?ParticleField = null,
+    /// Set only on a grade.pass node: its parametric color grade.
+    grade: ?GradeField = null,
+    /// Set only on a bloom.pass node: its glow threshold and intensity.
+    bloom: ?BloomField = null,
     /// The inline script source, set only for a "script" node. It runs each
     /// tick to drive parameters and never joins the composite chain.
     script: ?[]const u8 = null,
@@ -684,9 +751,97 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "gravity")) |v| field.gravity = @floatCast(numberOf(v) orelse field.gravity);
                 if (getField(pv.object, "speed")) |v| field.speed = @floatCast(numberOf(v) orelse field.speed);
                 if (getField(pv.object, "lifetime")) |v| field.lifetime = @floatCast(numberOf(v) orelse field.lifetime);
+                if (getField(pv.object, "fade")) |v| {
+                    if (v == .bool) field.fade = v.bool;
+                }
+                if (getField(pv.object, "color")) |v| {
+                    var rgb: [3]f32 = .{ 0, 0, 0 };
+                    if (readVec3(v, &rgb)) field.color = rgb else try diags.add(path.slice(), "particles color must be three numbers", .{});
+                }
+                if (getField(pv.object, "cool")) |v| {
+                    var rgb: [3]f32 = .{ 0, 0, 0 };
+                    if (readVec3(v, &rgb)) field.cool = rgb else try diags.add(path.slice(), "particles cool must be three numbers", .{});
+                }
+                if (getField(pv.object, "size")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= 64) field.size = @intCast(v.integer) else try diags.add(path.slice(), "particles size must be an integer 1..64", .{});
+                }
+                if (getField(pv.object, "glow")) |v| {
+                    if (v == .bool) field.glow = v.bool;
+                }
+                if (getField(pv.object, "sprite")) |v| {
+                    if (try expectString(diags, path, v)) |stem| field.sprite = try arena.dupe(u8, stem);
+                }
+                if (getField(pv.object, "pattern")) |v| {
+                    if (try expectString(diags, path, v)) |name| {
+                        const known = [_][]const u8{ "fountain", "rain", "burst", "ring", "cone", "sphere", "box", "disc", "hemisphere", "face" };
+                        var ok = false;
+                        for (known) |k| {
+                            if (std.mem.eql(u8, name, k)) ok = true;
+                        }
+                        if (ok) field.pattern = try arena.dupe(u8, name) else try diags.add(path.slice(), "unknown particles pattern '{s}'", .{name});
+                    }
+                }
+                if (getField(pv.object, "speed_spread")) |v| field.speed_spread = @floatCast(numberOf(v) orelse field.speed_spread);
+                if (getField(pv.object, "lifetime_spread")) |v| field.lifetime_spread = @floatCast(numberOf(v) orelse field.lifetime_spread);
+                if (getField(pv.object, "drag")) |v| field.drag = @floatCast(numberOf(v) orelse field.drag);
+                if (getField(pv.object, "turbulence")) |v| field.turbulence = @floatCast(numberOf(v) orelse field.turbulence);
+                if (getField(pv.object, "spin")) |v| field.spin = @floatCast(numberOf(v) orelse field.spin);
+                if (getField(pv.object, "vortex")) |v| field.vortex = @floatCast(numberOf(v) orelse field.vortex);
+                if (getField(pv.object, "attract_strength")) |v| field.attract_strength = @floatCast(numberOf(v) orelse field.attract_strength);
+                if (getField(pv.object, "stretch")) |v| field.stretch = @floatCast(numberOf(v) orelse field.stretch);
+                if (getField(pv.object, "floor")) |v| field.floor = @floatCast(numberOf(v) orelse 0.0);
+                if (getField(pv.object, "attract")) |v| {
+                    var target: [3]f32 = .{ 0, 0, 0 };
+                    if (readVec3(v, &target)) field.attract = target else try diags.add(path.slice(), "particles attract must be three numbers", .{});
+                }
+                if (getField(pv.object, "frames")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= 64) field.frames = @intCast(v.integer) else try diags.add(path.slice(), "particles frames must be an integer 1..64", .{});
+                }
+                if (getField(pv.object, "wind")) |v| {
+                    var w: [3]f32 = .{ 0, 0, 0 };
+                    if (readVec3(v, &w)) field.wind = w else try diags.add(path.slice(), "particles wind must be three numbers", .{});
+                }
+                if (getField(pv.object, "oneshot")) |v| {
+                    if (v == .bool) field.oneshot = v.bool;
+                }
+                if (getField(pv.object, "size_end")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= 64) field.size_end = @intCast(v.integer) else try diags.add(path.slice(), "particles size_end must be an integer 1..64", .{});
+                }
                 particle_field = field;
             }
             path.pop(pmark);
+        }
+        var grade_field: ?GradeField = null;
+        if (getField(object, "grade")) |gv| {
+            const gmark = path.push("grade");
+            if (!std.mem.eql(u8, node_type, "grade.pass")) {
+                try diags.add(path.slice(), "grade is a grade.pass field, found it on '{s}'", .{node_type});
+            } else if (gv != .object) {
+                try diags.add(path.slice(), "grade must be an object", .{});
+            } else {
+                var field: GradeField = .{};
+                if (getField(gv.object, "exposure")) |v| field.exposure = @floatCast(numberOf(v) orelse field.exposure);
+                if (getField(gv.object, "contrast")) |v| field.contrast = @floatCast(numberOf(v) orelse field.contrast);
+                if (getField(gv.object, "saturation")) |v| field.saturation = @floatCast(numberOf(v) orelse field.saturation);
+                if (getField(gv.object, "temperature")) |v| field.temperature = @floatCast(numberOf(v) orelse field.temperature);
+                grade_field = field;
+            }
+            path.pop(gmark);
+        }
+        var bloom_field: ?BloomField = null;
+        if (getField(object, "bloom")) |bv| {
+            const bmark = path.push("bloom");
+            if (!std.mem.eql(u8, node_type, "bloom.pass")) {
+                try diags.add(path.slice(), "bloom is a bloom.pass field, found it on '{s}'", .{node_type});
+            } else if (bv != .object) {
+                try diags.add(path.slice(), "bloom must be an object", .{});
+            } else {
+                var field: BloomField = .{};
+                if (getField(bv.object, "threshold")) |v| field.threshold = @floatCast(numberOf(v) orelse field.threshold);
+                if (getField(bv.object, "intensity")) |v| field.intensity = @floatCast(numberOf(v) orelse field.intensity);
+                bloom_field = field;
+            }
+            path.pop(bmark);
         }
         if (getField(object, "hair")) |hair_value| {
             const hair_mark = path.push("hair");
@@ -889,6 +1044,8 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
             .cloth = cloth_field,
             .hair = hair_field,
             .particles = particle_field,
+            .grade = grade_field,
+            .bloom = bloom_field,
             .script = script_source,
         });
     }

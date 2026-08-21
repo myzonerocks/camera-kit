@@ -59,18 +59,26 @@ extension Engine {
     /// resolution or a requested one, independent of the preview size.
     public struct StillConfig {
         public enum Format: UInt32 { case png = 0, jpeg = 1, heic = 2 }
+        /// The gamut the file is tagged with: PNG carries cHRM/gAMA,
+        /// JPEG carries the matching ICC profile.
+        public enum ColorSpace: UInt32 { case sRGB = 0, displayP3 = 1, rec2020 = 2 }
         /// Zero captures at the submitted frame's own resolution.
         public var width: UInt32
         public var height: UInt32
         public var supersample: UInt32
         public var format: Format
         public var quality: UInt32
-        public init(width: UInt32 = 0, height: UInt32 = 0, supersample: UInt32 = 0, format: Format = .png, quality: UInt32 = 0) {
+        public var colorSpace: ColorSpace
+        /// 8 or 16 bits per channel; 16 is the PNG high-bit-depth path.
+        public var bitDepth: UInt32
+        public init(width: UInt32 = 0, height: UInt32 = 0, supersample: UInt32 = 0, format: Format = .png, quality: UInt32 = 0, colorSpace: ColorSpace = .sRGB, bitDepth: UInt32 = 8) {
             self.width = width
             self.height = height
             self.supersample = supersample
             self.format = format
             self.quality = quality
+            self.colorSpace = colorSpace
+            self.bitDepth = bitDepth
         }
     }
 
@@ -78,7 +86,7 @@ extension Engine {
     /// frame's own size by default - decoupled from the preview swap
     /// chain, so a full-sensor still is not clamped to preview size.
     public func captureStill(session: Session?, config: StillConfig = StillConfig()) throws -> (data: [UInt8], width: UInt32, height: UInt32) {
-        var raw = goss_capture_config(width: config.width, height: config.height, supersample: config.supersample, format: config.format.rawValue, quality: config.quality)
+        var raw = goss_capture_config(width: config.width, height: config.height, supersample: config.supersample, format: config.format.rawValue, quality: config.quality, color_space: config.colorSpace.rawValue, bit_depth: config.bitDepth)
         var needed = 0
         var outWidth: UInt32 = 0
         var outHeight: UInt32 = 0

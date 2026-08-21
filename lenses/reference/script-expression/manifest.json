@@ -1,0 +1,16 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.script-expression",
+  "version": "1.0.0",
+  "display_name": "Script Expression",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [
+    {"name": "open_amount", "type": "float", "default": 0.0, "min": 0.0, "max": 1.0}
+  ],
+  "nodes": [
+    {"id": "drive", "type": "script", "params": {},
+     "source": "function update(lens) { lens.params.open_amount = lens.signals.jawOpen; }"}
+  ],
+  "triggers": []
+}

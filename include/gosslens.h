@@ -352,13 +352,16 @@ typedef struct goss_capture_config {
   uint32_t supersample; /* reserved; 0 or 1 is 1:1 today */
   uint32_t format;      /* 0 = PNG, 1 = JPEG, 2 = HEIC */
   uint32_t quality;     /* 1..100 for lossy formats, 0 = backend default */
+  uint32_t color_space; /* 0 = sRGB, 1 = Display-P3, 2 = Rec2020 */
+  uint32_t bit_depth;   /* 8 or 16; 16 is the PNG high-bit-depth path */
 } goss_capture_config;
 
 /* Composites the still at the configured resolution - the submitted
  * frame's own size when width and height are zero - independent of the
  * preview swap chain, and encodes it. out_len always receives the
- * encoded size. PNG has no size ceiling; JPEG/HEIC need the platform
- * photo backend. */
+ * encoded size. PNG has no size ceiling and carries the color-space
+ * tag; JPEG is the engine's own encoder on every target; HEIC needs the
+ * platform photo backend. */
 goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height);
 
 /* Graph thread. config may be null for defaults. */
