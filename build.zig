@@ -1497,7 +1497,7 @@ fn physicsModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         addCTargetSysroot(b, module, target);
         module.addCSourceFile(.{
             .file = b.path("adapters/physics/jolt_shim.cpp"),
-            .flags = &.{ "-std=c++17", "-fno-sanitize=undefined", "-DJPH_USE_CPU_COMPUTE" },
+            .flags = joltFlags(b, target),
         });
         module.linkLibrary(buildJoltLib(b, target, optimize));
     }
@@ -2297,6 +2297,18 @@ fn buildGpupixelLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
 // samples and their proprietary Assets/ never enter the build (see the
 // decisions record). Single-threaded determinism is the harness's own
 // job-system choice at runtime, not a compile flag.
+// Jolt's compile flags, plus on the web tier a force-include of the
+// single-thread std threading stubs ahead of its headers.
+fn joltFlags(b: *std.Build, target: std.Build.ResolvedTarget) []const []const u8 {
+    var flags: std.ArrayList([]const u8) = .empty;
+    flags.appendSlice(b.allocator, &.{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" }) catch @panic("OOM");
+    if (target.result.os.tag == .emscripten) {
+        flags.append(b.allocator, "-include") catch @panic("OOM");
+        flags.append(b.allocator, b.pathFromRoot("adapters/physics/em_thread_stub.h")) catch @panic("OOM");
+    }
+    return flags.items;
+}
+
 fn buildJoltLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
     const module = b.createModule(.{ .target = target, .optimize = optimize });
     module.link_libc = true;
@@ -2310,9 +2322,9 @@ fn buildJoltLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
             return std.mem.lessThan(u8, x, y);
         }
     }.lessThan);
-    const flags = [_][]const u8{ "-std=c++17", "-fno-sanitize=undefined", "-w", "-DJPH_USE_CPU_COMPUTE" };
+    const flags = joltFlags(b, target);
     for (sources.items) |file| {
-        module.addCSourceFile(.{ .file = b.path(file), .flags = &flags });
+        module.addCSourceFile(.{ .file = b.path(file), .flags = flags });
     }
     return b.addLibrary(.{ .name = "jolt", .linkage = .static, .root_module = module });
 }
@@ -3708,7 +3720,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
-    abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, false));
+    abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("particles", particlesModule(b, em_target, .ReleaseSmall));
