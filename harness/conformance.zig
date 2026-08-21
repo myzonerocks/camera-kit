@@ -2229,6 +2229,95 @@ fn proveNoLeaks(gpa: std.mem.Allocator) !bool {
     return true;
 }
 
+/// Wraps an allocator to track bytes currently in use, so the per-frame
+/// gate can watch the heap footprint settle instead of timing the wall
+/// clock (which drifts machine to machine).
+const CountingAllocator = struct {
+    backing: std.mem.Allocator,
+    in_use: usize = 0,
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        self.in_use += len;
+        return p;
+    }
+    fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.backing.rawResize(buf, alignment, new_len, ra)) return false;
+        self.in_use = self.in_use - buf.len + new_len;
+        return true;
+    }
+    fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        const p = self.backing.rawRemap(buf, alignment, new_len, ra) orelse return null;
+        self.in_use = self.in_use - buf.len + new_len;
+        return p;
+    }
+    fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(buf, alignment, ra);
+        self.in_use -= buf.len;
+    }
+};
+
+/// Enforces bounded per-frame work: the heaviest reference stack (blur,
+/// grade, bloom and particles at once) renders many frames while the heap
+/// footprint is sampled each frame. Past warm-up the in-use bytes must
+/// hold flat - steady growth is the accumulation that overheats a phone.
+fn provePerFrameBudget(gpa: std.mem.Allocator, engine: *abi.Engine, counter: *CountingAllocator) !bool {
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    defer settle(engine);
+
+    if (abi.goss_session_activate_lens_from_directory(session, ".lens-packages/studio-full", ".lens-packages/studio-full".len) != .ok) {
+        std.debug.print("conformance: FAIL per-frame budget lens activation\n", .{});
+        return false;
+    }
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    const total_frames: usize = 120;
+    const warmup: usize = 40;
+    var steady_min: usize = std.math.maxInt(usize);
+    var steady_max: usize = 0;
+    for (0..total_frames) |frame| {
+        const desc: abi.FrameDesc = .{
+            .width = planes.width,
+            .height = planes.height,
+            .pixel_format = 0,
+            .color_standard = 0,
+            .color_range = 1,
+            .flags = 0,
+            .timestamp_us = @as(i64, @intCast(frame + 1)) * 33_333,
+        };
+        if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+            return error.SubmitFailed;
+        }
+        _ = abi.goss_engine_render_frame(engine, session);
+        c.glfwPollEvents();
+        if (frame >= warmup) {
+            if (counter.in_use < steady_min) steady_min = counter.in_use;
+            if (counter.in_use > steady_max) steady_max = counter.in_use;
+        }
+    }
+
+    // Steady-state footprint must be flat: no bytes accumulate frame to
+    // frame once the pools and caches have filled.
+    if (steady_max != steady_min) {
+        std.debug.print("conformance: FAIL per-frame footprint grew {d} bytes over steady state (min {d}, max {d}) - per-frame accumulation\n", .{ steady_max - steady_min, steady_min, steady_max });
+        return false;
+    }
+    std.debug.print("conformance: PROOF the full stack holds a flat {d}-byte per-frame footprint over {d} frames (no accumulation)\n", .{ steady_min, total_frames - warmup });
+    return true;
+}
+
 /// Proves lens strand hair: the strands hang and settle deterministically
 /// across frames (the head pose drives them live on device; here a fixed
 /// pose gives a bit-stable host proof), settled differing from initial.
@@ -2572,7 +2661,10 @@ pub fn main(init_args: std.process.Init) !u8 {
     const window = c.glfwCreateWindow(@intCast(width), @intCast(height), "gosslens conformance", null, null) orelse return error.WindowCreate;
     defer c.glfwDestroyWindow(window);
 
-    const engine = try abi.createEngine(gpa, .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
+    // The engine runs under a counting allocator so the per-frame budget
+    // gate can watch its heap footprint settle across a render loop.
+    var frame_counter = CountingAllocator{ .backing = gpa };
+    const engine = try abi.createEngine(frame_counter.allocator(), .{ .texture_pool_capacity = 4, .staging_pool_capacity = 4 });
     defer abi.destroyEngine(engine);
 
     const renderer_desc: abi.RendererDesc = .{
@@ -2641,5 +2733,6 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveFullStack(gpa, engine)) return 1;
     if (!try proveTiledPostEffect(gpa, engine)) return 1;
     if (!try proveNoLeaks(gpa)) return 1;
+    if (!try provePerFrameBudget(gpa, engine, &frame_counter)) return 1;
     return 0;
 }

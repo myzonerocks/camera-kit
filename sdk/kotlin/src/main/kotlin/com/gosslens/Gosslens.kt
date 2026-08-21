@@ -216,12 +216,10 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
         return encoded
     }
 
-    /** A high-resolution still: the composited frame at its own resolution
-     * (width and height 0) or a requested one, decoupled from the preview
-     * swap chain, encoded as PNG (format 0), JPEG (1) or HEIC (2). colorSpace
-     * tags the gamut (0 sRGB, 1 Display-P3, 2 Rec2020); bitDepth 16 is the
-     * PNG high-bit-depth path. Sized by a probe call first. Null when the
-     * renderer or photo backend is away. */
+    /** A high-resolution still: the composited frame at its own or a
+     * requested resolution, encoded as PNG (0), JPEG (1) or HEIC (2).
+     * colorSpace tags the gamut (0 sRGB, 1 P3, 2 Rec2020); bitDepth 16 is
+     * the PNG high-bit-depth path. Null when the renderer/backend is away. */
     fun captureStill(session: Session?, width: Int = 0, height: Int = 0, supersample: Int = 0, format: Int = 0, quality: Int = 0, colorSpace: Int = 0, bitDepth: Int = 8): ByteArray? {
         val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
         val probe = ByteBuffer.allocateDirect(1)
