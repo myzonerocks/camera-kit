@@ -345,3 +345,114 @@ export class PoseTracker {
     this.exports.goss_tracking_free(this.resultPtr, this.exports.goss_pose_result_size());
   }
 }
+
+export const HAND_LANDMARK_COUNT = 21;
+export const MAX_HANDS = 2;
+const HAND_STRIDE = 16 + HAND_LANDMARK_COUNT * 3 * 4; // one Hand, bytes
+
+export interface Hand {
+  presence: number;
+  /** the model's score that this is a right hand. */
+  handedness: number;
+  /** index into the canned gesture set; 0 when none/unavailable. */
+  gesture: number;
+  gestureScore: number;
+  landmarks: Float32Array;
+}
+
+export interface HandResult {
+  frameSerial: bigint;
+  timestampUs: bigint;
+  handCount: number;
+  hands: Hand[];
+}
+
+interface HandExports {
+  memory: WebAssembly.Memory;
+  goss_tracking_alloc(size: number): number;
+  goss_tracking_free(ptr: number, size: number): void;
+  goss_hand_result_size(): number;
+  goss_hand_create(taskPtr: number, taskLen: number): number;
+  goss_hand_destroy(instance: number): void;
+  goss_hand_process(instance: number, rgba: number, width: number, height: number, timestampUs: bigint): number;
+  goss_hand_result(instance: number, out: number): number;
+}
+
+/// The web hand tracker: the wasm module's hand pipeline, run in a Worker.
+/// A hand landmarker or gesture-recognizer bundle in, up to two tracked
+/// hands out - landmarks, handedness, and a canned gesture when present.
+export class HandTracker {
+  private constructor(
+    private exports: HandExports,
+    private instance: number,
+    private resultPtr: number,
+    private framePtr: number,
+    private frameCapacity: number,
+  ) {}
+
+  static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<HandTracker> {
+    let memory: WebAssembly.Memory | undefined;
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {
+      wasi_snapshot_preview1: totalWasi(() => memory!),
+    });
+    const exports = instance.exports as unknown as HandExports;
+    memory = exports.memory;
+
+    const taskPtr = exports.goss_tracking_alloc(taskBundle.length);
+    if (taskPtr === 0) throw new Error("hand module allocation failed");
+    new Uint8Array(exports.memory.buffer, taskPtr, taskBundle.length).set(taskBundle);
+    const handle = exports.goss_hand_create(taskPtr, taskBundle.length);
+    exports.goss_tracking_free(taskPtr, taskBundle.length);
+    if (handle === 0) throw new Error("hand bundle rejected");
+
+    const resultPtr = exports.goss_tracking_alloc(exports.goss_hand_result_size());
+    if (resultPtr === 0) throw new Error("hand module allocation failed");
+    return new HandTracker(exports, handle, resultPtr, 0, 0);
+  }
+
+  process(rgba: Uint8Array, width: number, height: number, timestampUs: bigint): HandResult | null {
+    const needed = width * height * 4;
+    if (rgba.length < needed) throw new Error("frame shorter than its dimensions");
+    if (this.frameCapacity < needed) {
+      if (this.framePtr !== 0) this.exports.goss_tracking_free(this.framePtr, this.frameCapacity);
+      this.framePtr = this.exports.goss_tracking_alloc(needed);
+      if (this.framePtr === 0) throw new Error("hand module allocation failed");
+      this.frameCapacity = needed;
+    }
+    new Uint8Array(this.exports.memory.buffer, this.framePtr, needed).set(rgba.subarray(0, needed));
+    if (this.exports.goss_hand_process(this.instance, this.framePtr, width, height, timestampUs) !== 0) {
+      throw new Error("hand process refused the frame");
+    }
+    return this.latest();
+  }
+
+  latest(): HandResult | null {
+    if (this.exports.goss_hand_result(this.instance, this.resultPtr) !== 0) return null;
+    const buffer = this.exports.memory.buffer;
+    const view = new DataView(buffer, this.resultPtr);
+    const handCount = view.getUint32(16, true);
+    const hands: Hand[] = [];
+    for (let h = 0; h < handCount && h < MAX_HANDS; h += 1) {
+      const base = 24 + h * HAND_STRIDE;
+      hands.push({
+        presence: view.getFloat32(base, true),
+        handedness: view.getFloat32(base + 4, true),
+        gesture: view.getUint32(base + 8, true),
+        gestureScore: view.getFloat32(base + 12, true),
+        landmarks: new Float32Array(buffer, this.resultPtr + base + 16, HAND_LANDMARK_COUNT * 3).slice(),
+      });
+    }
+    return {
+      frameSerial: view.getBigUint64(0, true),
+      timestampUs: view.getBigInt64(8, true),
+      handCount,
+      hands,
+    };
+  }
+
+  destroy(): void {
+    this.exports.goss_hand_destroy(this.instance);
+    if (this.framePtr !== 0) this.exports.goss_tracking_free(this.framePtr, this.frameCapacity);
+    this.exports.goss_tracking_free(this.resultPtr, this.exports.goss_hand_result_size());
+  }
+}
