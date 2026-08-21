@@ -152,6 +152,22 @@ jobs:
             ~/.cache/zig
           key: zigcache-android-${{ runner.os }}-${{ hashFiles('.zigversion') }}-${{ github.sha }}
 
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: install
+        run: bun install
+        working-directory: sdk/ts
+      - name: build
+        run: bun run build
+        working-directory: sdk/ts
+      - name: test
+        run: bun test
+        working-directory: sdk/ts
+
   lens-shaders:
     runs-on: ubuntu-latest
     timeout-minutes: 45
