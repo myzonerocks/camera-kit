@@ -73,6 +73,22 @@ The `.task`/`.tflite` bundles (`face_landmarker.task`, `gesture_recognizer.task`
 `pose_landmarker_full.task`, `selfie_multiclass.tflite`) are the ones
 `fetch-models` writes; host and fetch the ones your lenses use.
 
+## Lives and calls
+
+The web is the easy case: the rendered canvas is already a live video source.
+`canvas.captureStream()` hands you a `MediaStreamTrack` of the composited,
+lens-baked output with no readback and no copy - publish it straight to
+LiveKit or any WebRTC peer:
+
+    const track = canvas.captureStream(30).getVideoTracks()[0];
+    // publish `track` through your LiveKit room or RTCPeerConnection
+
+Keep the render loop running (`renderFrame` per frame) and the track carries
+every composited frame. Reach for `captureLiveFrame` only when you need the
+raw pixels (BGRA by default) rather than a track. For audio, `submitAudio`
+feeds mic samples in for audio-reactive lenses and `pullAudio` pulls a lens's
+own sound out to mix into your outgoing WebRTC audio track.
+
 ## Method names
 
 The operation names match the other SDKs: `GossEngine.create(gosslens)`,

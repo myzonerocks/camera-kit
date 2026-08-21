@@ -1929,6 +1929,51 @@ pub export fn goss_engine_capture_frame(engine: ?*Engine, session: ?*Session, ou
     return .ok;
 }
 
+/// Swaps the red and blue channels of a packed 8-bit-per-channel image in
+/// place - RGBA to BGRA and back, the one difference a WebRTC source needs.
+fn swapRedBlue(pixels: []u8) void {
+    var i: usize = 0;
+    while (i + 3 < pixels.len) : (i += 4) {
+        const red = pixels[i];
+        pixels[i] = pixels[i + 2];
+        pixels[i + 2] = red;
+    }
+}
+
+/// The supported per-frame composited output for a live broadcast source:
+/// renders the current frame with the lens chain baked in and reads it back
+/// in a WebRTC-friendly format (rgba8 or bgra8), so a LiveKit or WebRTC
+/// custom source publishes it directly. out_data holds width * height * 4.
+pub export fn goss_engine_capture_live_frame(engine: ?*Engine, session: ?*Session, format: u32, out_data: ?[*]u8, out_capacity: usize, out_width: ?*u32, out_height: ?*u32) Status {
+    if (format != pixel_format_rgba8 and format != pixel_format_bgra8) return .invalid_argument;
+    const e = engine orelse return .invalid_argument;
+    const s = session orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    const data = out_data orelse return .invalid_argument;
+    const w = out_width orelse return .invalid_argument;
+    const h = out_height orelse return .invalid_argument;
+
+    const target = renderForCapture(e, r, s) orelse return .renderer_unavailable;
+    w.* = e.capture_width;
+    h.* = e.capture_height;
+    const full_size = @as(usize, e.capture_width) * @as(usize, e.capture_height) * 4;
+    if (full_size == 0) return .ok;
+    if (out_capacity < full_size) return .invalid_argument;
+
+    const staging = e.capture_staging orelse return .renderer_unavailable;
+    render.Renderer.blitTexture(capture_blit_view, staging, target.texture, e.capture_width, e.capture_height);
+    const ready_frame = render.Renderer.readTexture(staging, data);
+    while (r.frame() < ready_frame) {}
+    if (format == pixel_format_bgra8) swapRedBlue(data[0..full_size]);
+    return .ok;
+}
+
+test "swapRedBlue turns rgba into bgra" {
+    var pixels = [_]u8{ 10, 20, 30, 40, 50, 60, 70, 80 };
+    swapRedBlue(&pixels);
+    try std.testing.expectEqualSlices(u8, &.{ 30, 20, 10, 40, 70, 60, 50, 80 }, &pixels);
+}
+
 /// Captures the composited frame and encodes it as a PNG into out_data.
 /// out_len always receives the encoded size, so a too-small buffer
 /// (invalid_argument) tells the caller exactly what to retry with.
