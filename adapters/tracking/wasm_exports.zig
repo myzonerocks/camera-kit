@@ -12,6 +12,7 @@ const sampler = @import("sampler");
 const face = @import("face");
 const tracker = @import("tracker");
 const pose = @import("pose");
+const hand = @import("hand");
 const segmentation_core = @import("segmentation_core");
 
 const gpa = std.heap.wasm_allocator;
@@ -462,5 +463,293 @@ pub export fn goss_pose_result(instance: ?*PoseInstance, out: ?[*]u8) i32 {
     const destination = out orelse return status_invalid;
     if (!p.has_result) return status_again;
     @memcpy(destination[0..@sizeOf(pose.Result)], std.mem.asBytes(&p.result));
+    return status_ok;
+}
+
+// A palm detector then the landmark model over up to two tracked hands,
+// with handedness, and gestures when the bundle nests the recognizer's
+// embedder/classifier pair. RGBA frames in, hand.Result out. The
+// synchronous twin of the hand worker.
+
+const hand_max_candidates = 8;
+const hand_presence_floor = 0.5;
+const hand_association_overlap = 0.5;
+
+fn floatCount(engine: *const runtime.Engine, index: i32, input: bool) usize {
+    const tensor = if (input)
+        runtime.c.TfLiteInterpreterGetInputTensor(engine.interpreter, index)
+    else
+        runtime.c.TfLiteInterpreterGetOutputTensor(engine.interpreter, index);
+    const t = tensor orelse return 0;
+    return runtime.c.TfLiteTensorByteSize(t) / @sizeOf(f32);
+}
+
+const HandInstance = struct {
+    task_bytes: []u8,
+    landmarker_container: ?bundle.Payload,
+    gesture_container: ?bundle.Payload,
+    detector_payload: bundle.Payload,
+    landmarks_payload: bundle.Payload,
+    embedder_payload: ?bundle.Payload,
+    classifier_payload: ?bundle.Payload,
+    detector_engine: runtime.Engine,
+    landmarks_engine: runtime.Engine,
+    embedder_engine: ?runtime.Engine,
+    classifier_engine: ?runtime.Engine,
+    detector_side: u32,
+    landmark_side: u32,
+    anchors: []detector.Anchor,
+    detector_tensor: []f32,
+    landmark_tensor: []f32,
+    locks: [hand.max_hands]?sampler.Region = @splat(null),
+    result: hand.Result = std.mem.zeroes(hand.Result),
+    has_result: bool = false,
+    serial: u64 = 0,
+};
+
+pub export fn goss_hand_result_size() usize {
+    return @sizeOf(hand.Result);
+}
+
+pub export fn goss_hand_create(task_ptr: ?[*]const u8, task_len: usize) ?*HandInstance {
+    const task_source = task_ptr orelse return null;
+    if (task_len == 0) return null;
+
+    const p = gpa.create(HandInstance) catch return null;
+    errdefer gpa.destroy(p);
+    const owned = gpa.dupe(u8, task_source[0..task_len]) catch return null;
+    errdefer gpa.free(owned);
+
+    const task = bundle.Bundle.open(owned) catch return null;
+    var landmarker_container: ?bundle.Payload = null;
+    errdefer if (landmarker_container) |payload| payload.deinit(gpa);
+    var gesture_container: ?bundle.Payload = null;
+    errdefer if (gesture_container) |payload| payload.deinit(gpa);
+
+    const landmarker = blk: {
+        if (task.find("hand_detector.tflite")) |_| break :blk task else |_| {}
+        const nested = task.find("hand_landmarker.task") catch return null;
+        landmarker_container = task.payload(gpa, nested) catch return null;
+        break :blk bundle.Bundle.open(landmarker_container.?.bytes) catch return null;
+    };
+
+    const detector_entry = landmarker.find("hand_detector.tflite") catch return null;
+    const landmarks_entry = landmarker.find("hand_landmarks_detector.tflite") catch return null;
+    const detector_payload = landmarker.payload(gpa, detector_entry) catch return null;
+    errdefer detector_payload.deinit(gpa);
+    const landmarks_payload = landmarker.payload(gpa, landmarks_entry) catch return null;
+    errdefer landmarks_payload.deinit(gpa);
+
+    var detector_engine = runtime.Engine.init(detector_payload.bytes, 1) catch return null;
+    errdefer detector_engine.deinit();
+    var landmarks_engine = runtime.Engine.init(landmarks_payload.bytes, 1) catch return null;
+    errdefer landmarks_engine.deinit();
+
+    const detector_side = engineInputSide(&detector_engine) orelse return null;
+    const landmark_side = engineInputSide(&landmarks_engine) orelse return null;
+    const total = anchorTotal(&detector_engine) orelse return null;
+    const plan = detector.planForModel(detector_side, total) orelse return null;
+    if (floatCount(&landmarks_engine, 0, false) != hand.landmark_count * 3) return null;
+
+    var embedder_payload: ?bundle.Payload = null;
+    errdefer if (embedder_payload) |payload| payload.deinit(gpa);
+    var classifier_payload: ?bundle.Payload = null;
+    errdefer if (classifier_payload) |payload| payload.deinit(gpa);
+    var embedder_engine: ?runtime.Engine = null;
+    errdefer if (embedder_engine) |*engine| engine.deinit();
+    var classifier_engine: ?runtime.Engine = null;
+    errdefer if (classifier_engine) |*engine| engine.deinit();
+
+    if (task.find("hand_gesture_recognizer.task")) |gesture_entry| {
+        gesture_container = task.payload(gpa, gesture_entry) catch return null;
+        const gesture = bundle.Bundle.open(gesture_container.?.bytes) catch return null;
+        const embedder_entry = gesture.find("gesture_embedder.tflite") catch return null;
+        const classifier_entry = gesture.find("canned_gesture_classifier.tflite") catch return null;
+        embedder_payload = gesture.payload(gpa, embedder_entry) catch return null;
+        classifier_payload = gesture.payload(gpa, classifier_entry) catch return null;
+        embedder_engine = runtime.Engine.init(embedder_payload.?.bytes, 1) catch return null;
+        classifier_engine = runtime.Engine.init(classifier_payload.?.bytes, 1) catch return null;
+    } else |_| {}
+
+    const anchors = gpa.alloc(detector.Anchor, total) catch return null;
+    errdefer gpa.free(anchors);
+    detector.generateAnchors(detector_side, plan, anchors);
+    const detector_tensor = gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3) catch return null;
+    errdefer gpa.free(detector_tensor);
+    const landmark_tensor = gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3) catch return null;
+    errdefer gpa.free(landmark_tensor);
+
+    p.* = .{
+        .task_bytes = owned,
+        .landmarker_container = landmarker_container,
+        .gesture_container = gesture_container,
+        .detector_payload = detector_payload,
+        .landmarks_payload = landmarks_payload,
+        .embedder_payload = embedder_payload,
+        .classifier_payload = classifier_payload,
+        .detector_engine = detector_engine,
+        .landmarks_engine = landmarks_engine,
+        .embedder_engine = embedder_engine,
+        .classifier_engine = classifier_engine,
+        .detector_side = detector_side,
+        .landmark_side = landmark_side,
+        .anchors = anchors,
+        .detector_tensor = detector_tensor,
+        .landmark_tensor = landmark_tensor,
+    };
+    return p;
+}
+
+pub export fn goss_hand_destroy(instance: ?*HandInstance) void {
+    const p = instance orelse return;
+    if (p.classifier_engine) |*e| e.deinit();
+    if (p.embedder_engine) |*e| e.deinit();
+    p.landmarks_engine.deinit();
+    p.detector_engine.deinit();
+    gpa.free(p.landmark_tensor);
+    gpa.free(p.detector_tensor);
+    gpa.free(p.anchors);
+    if (p.classifier_payload) |payload| payload.deinit(gpa);
+    if (p.embedder_payload) |payload| payload.deinit(gpa);
+    p.landmarks_payload.deinit(gpa);
+    p.detector_payload.deinit(gpa);
+    if (p.gesture_container) |payload| payload.deinit(gpa);
+    if (p.landmarker_container) |payload| payload.deinit(gpa);
+    gpa.free(p.task_bytes);
+    gpa.destroy(p);
+}
+
+fn handRegionOverlap(a: sampler.Region, b: sampler.Region) f32 {
+    const ax0 = a.center_x - a.side * 0.5;
+    const ay0 = a.center_y - a.side * 0.5;
+    const bx0 = b.center_x - b.side * 0.5;
+    const by0 = b.center_y - b.side * 0.5;
+    const x0 = @max(ax0, bx0);
+    const y0 = @max(ay0, by0);
+    const x1 = @min(ax0 + a.side, bx0 + b.side);
+    const y1 = @min(ay0 + a.side, by0 + b.side);
+    if (x1 <= x0 or y1 <= y0) return 0;
+    const shared = (x1 - x0) * (y1 - y0);
+    const total = a.side * a.side + b.side * b.side - shared;
+    if (total <= 0) return 0;
+    return shared / total;
+}
+
+fn handDetect(p: *HandInstance, image: sampler.Frame) void {
+    const square = sampler.frameSquare(image.width, image.height);
+    sampler.sampleRegion(image, square, .unit, p.detector_side, p.detector_tensor);
+    p.detector_engine.writeInput(0, std.mem.sliceAsBytes(p.detector_tensor)) catch return;
+    p.detector_engine.invoke() catch return;
+    const raw_boxes = p.detector_engine.outputFloats(0) catch return;
+    const raw_scores = p.detector_engine.outputFloats(1) catch return;
+    var candidates: [hand_max_candidates]detector.palm.Detection = undefined;
+    const found = detector.palm.decode(raw_boxes, raw_scores, p.anchors, @floatFromInt(p.detector_side), 0.5, &candidates);
+    for (found) |detection| {
+        const region = hand.regionFromDetection(detection, square);
+        var duplicate = false;
+        for (p.locks) |maybe_lock| {
+            const lock = maybe_lock orelse continue;
+            if (handRegionOverlap(region, lock) >= hand_association_overlap) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        for (&p.locks) |*slot| {
+            if (slot.* == null) {
+                slot.* = region;
+                break;
+            }
+        }
+    }
+}
+
+fn handGesture(p: *HandInstance, landmarks: *const [hand.landmark_count]hand.Landmark, handedness: f32, rotation: f32, width: u32, height: u32, slot: *hand.Hand) void {
+    if (p.embedder_engine == null or p.classifier_engine == null) return;
+    const embedder = &p.embedder_engine.?;
+    const classifier = &p.classifier_engine.?;
+    const raw_world = p.landmarks_engine.outputFloats(3) catch return;
+    var screen_input: [hand.landmark_count * 3]f32 = undefined;
+    hand.gestureLandmarkInput(landmarks, @floatFromInt(width), @floatFromInt(height), rotation, &screen_input);
+    var world_input: [hand.landmark_count * 3]f32 = undefined;
+    hand.gestureWorldInput(raw_world, rotation, &world_input);
+    var handedness_input = [1]f32{handedness};
+    embedder.writeInput(0, std.mem.sliceAsBytes(&screen_input)) catch return;
+    embedder.writeInput(1, std.mem.sliceAsBytes(&handedness_input)) catch return;
+    embedder.writeInput(2, std.mem.sliceAsBytes(&world_input)) catch return;
+    embedder.invoke() catch return;
+    const embedding = embedder.outputFloats(0) catch return;
+    classifier.writeInput(0, std.mem.sliceAsBytes(embedding)) catch return;
+    classifier.invoke() catch return;
+    const scores = classifier.outputFloats(0) catch return;
+    var best: usize = 0;
+    for (scores, 0..) |score, at| {
+        if (score > scores[best]) best = at;
+    }
+    slot.gesture = @intCast(best);
+    slot.gesture_score = presenceScore(scores[best]);
+}
+
+pub export fn goss_hand_process(instance: ?*HandInstance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
+    const p = instance orelse return status_invalid;
+    const pixels = rgba orelse return status_invalid;
+    if (width == 0 or height == 0) return status_invalid;
+    const image: sampler.Frame = .{
+        .width = width,
+        .height = height,
+        .pixels = .{ .rgba8 = pixels[0 .. @as(usize, width) * height * 4] },
+    };
+
+    var free_slots: usize = 0;
+    for (p.locks) |maybe_lock| {
+        if (maybe_lock == null) free_slots += 1;
+    }
+    if (free_slots > 0) handDetect(p, image);
+
+    var result: hand.Result = std.mem.zeroes(hand.Result);
+    p.serial += 1;
+    result.frame_serial = p.serial;
+    result.timestamp_us = timestamp_us;
+
+    for (&p.locks) |*maybe_lock| {
+        const crop = maybe_lock.* orelse continue;
+        sampler.sampleRegion(image, crop, .unit, p.landmark_side, p.landmark_tensor);
+        p.landmarks_engine.writeInput(0, std.mem.sliceAsBytes(p.landmark_tensor)) catch continue;
+        p.landmarks_engine.invoke() catch continue;
+        const raw_landmarks = p.landmarks_engine.outputFloats(0) catch continue;
+        const presence = presenceScore((p.landmarks_engine.outputFloats(1) catch continue)[0]);
+        if (presence < hand_presence_floor) {
+            maybe_lock.* = null;
+            continue;
+        }
+        const handedness = presenceScore((p.landmarks_engine.outputFloats(2) catch continue)[0]);
+        var landmarks: [hand.landmark_count]hand.Landmark = undefined;
+        hand.decodeLandmarks(raw_landmarks, crop, @floatFromInt(p.landmark_side), &landmarks);
+        maybe_lock.* = hand.regionFromLandmarks(&landmarks);
+
+        const slot = &result.hands[result.hand_count];
+        slot.presence = presence;
+        slot.handedness = handedness;
+        slot.gesture = 0;
+        slot.gesture_score = 0;
+        handGesture(p, &landmarks, handedness, crop.rotation, width, height, slot);
+        for (landmarks, 0..) |landmark, at| {
+            slot.landmarks[at * 3] = landmark.x;
+            slot.landmarks[at * 3 + 1] = landmark.y;
+            slot.landmarks[at * 3 + 2] = landmark.z;
+        }
+        result.hand_count += 1;
+    }
+
+    p.result = result;
+    p.has_result = true;
+    return status_ok;
+}
+
+pub export fn goss_hand_result(instance: ?*HandInstance, out: ?[*]u8) i32 {
+    const p = instance orelse return status_invalid;
+    const destination = out orelse return status_invalid;
+    if (!p.has_result) return status_again;
+    @memcpy(destination[0..@sizeOf(hand.Result)], std.mem.asBytes(&p.result));
     return status_ok;
 }
