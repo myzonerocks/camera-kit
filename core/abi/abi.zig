@@ -3105,6 +3105,11 @@ pub export fn goss_session_activate_lens(session: ?*Session, manifest_json: ?[*]
     // that need packaged assets stay not-ready until a directory load.
     createGradeParams(s, gpa) catch {};
     createBloomParams(s, gpa) catch {};
+    // A particle fountain also needs no bundle (the CPU sim and its mesh are
+    // built from the field alone), so create it here too; the empty bundle
+    // path just means a glTF model's own asset never loads, degrading it,
+    // while the fountain runs. A sprite image would need a directory.
+    createModelLoaders(s, gpa, "") catch {};
     buildChainOrder(s, gpa) catch {};
     return .ok;
 }

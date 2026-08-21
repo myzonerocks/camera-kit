@@ -1351,6 +1351,84 @@ fn proveJsonPostEffect(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves a particle fountain runs from raw json: goss_session_activate_lens
+/// on a particles manifest builds the CPU fountain and its sprite mesh with
+/// no bundle directory (the path the web uses), so the fountain develops
+/// (settled differs from initial) and is bit-stable across runs.
+fn proveJsonParticles(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const particle_manifest =
+        \\{"glf":"1.0","id":"goss.test.json-particles","version":"1.0.0","display_name":"JSON Particles","engine_compat":">=0.5","capabilities":[],"parameters":[],"nodes":[{"id":"p","type":"model.gltf","inputs":{"frame":"camera"},"params":{},"particles":{"count":150,"gravity":3.0,"speed":0.5,"lifetime":1.5,"fade":true,"size":10}}],"triggers":[]}
+    ;
+    var first_hash: [64]u8 = undefined;
+    var runs: u32 = 0;
+    while (runs < 2) : (runs += 1) {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+
+        if (abi.goss_session_activate_lens(session, particle_manifest.ptr, particle_manifest.len) != .ok) {
+            std.debug.print("conformance: FAIL json particle activation\n", .{});
+            return false;
+        }
+        const corpus = try loadCorpusFrame(gpa, corpus_path);
+        defer corpus.deinit();
+        const planes = try rgbaToNv12(gpa, corpus.frame);
+        defer planes.deinit(gpa);
+        const half_w = (planes.width + 1) / 2;
+
+        var initial_shot: []u8 = &.{};
+        defer if (initial_shot.len > 0) gpa.free(initial_shot);
+        var settled_shot: []u8 = &.{};
+        defer if (settled_shot.len > 0) gpa.free(settled_shot);
+
+        for (0..90) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+            if (i == 2 or i == 85) {
+                var shot_width: u32 = 0;
+                var shot_height: u32 = 0;
+                const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+                errdefer gpa.free(shot);
+                if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &shot_width, &shot_height) != .ok) {
+                    gpa.free(shot);
+                    return false;
+                }
+                if (i == 2) initial_shot = shot else settled_shot = shot;
+            }
+        }
+        if (std.mem.eql(u8, initial_shot, settled_shot)) {
+            std.debug.print("conformance: FAIL the json particle fountain did not move\n", .{});
+            return false;
+        }
+        var digest: [32]u8 = undefined;
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(initial_shot);
+        hasher.update(settled_shot);
+        hasher.final(&digest);
+        const hash = std.fmt.bytesToHex(digest, .lower);
+        if (runs == 0) {
+            first_hash = hash;
+        } else if (!std.mem.eql(u8, &first_hash, &hash)) {
+            std.debug.print("conformance: FAIL the json particle fountain is not bit-stable across runs\n", .{});
+            return false;
+        }
+    }
+    std.debug.print("conformance: PROOF a particle fountain runs from raw json and renders deterministically, no bundle directory needed\n", .{});
+    return true;
+}
+
 /// Proves the whole node graph composes in one lens: studio-full runs a
 /// beauty.face smooth, then grade.pass, bloom.pass and a fading ember fountain
 /// over the same frame; its settled capture differs from the plain frame and
@@ -2268,6 +2346,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveEmber(gpa, engine)) return 1;
     if (!try proveStarSprite(gpa, engine)) return 1;
     if (!try proveJsonPostEffect(gpa, engine)) return 1;
+    if (!try proveJsonParticles(gpa, engine)) return 1;
     if (!try proveFullStack(gpa, engine)) return 1;
     if (!try proveTiledPostEffect(gpa, engine)) return 1;
     if (!try proveNoLeaks(gpa)) return 1;
