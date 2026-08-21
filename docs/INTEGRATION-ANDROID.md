@@ -25,7 +25,9 @@ The Kotlin SDK is an Android library module that packages the `.so` for you -
 its gradle reads `jniLibs.srcDir("../../zig-out/android")`, so once you have run
 `zig build android`, the archive it produces carries the native library.
 
-For local work, add this project as an included build and depend on it:
+The SDK is not published to Maven Central (or anywhere) yet, so add this
+project as an included build and depend on it - gradle substitutes the module
+for the coordinate, no registry involved:
 
     // settings.gradle.kts
     includeBuild("../gosslens/sdk/kotlin")
@@ -35,11 +37,11 @@ For local work, add this project as an included build and depend on it:
         implementation("com.myzonerocks:gosslens")
     }
 
-Publishing the AAR to a Maven coordinate works the same way, as long as the
+Publishing an AAR to a coordinate later works the same way, as long as the
 `.so` exists at publish time - so a publish step runs `zig build android`
 first. A source-only service like JitPack does not run that step and would ship
 an AAR with no native library, which crashes on `System.loadLibrary`; the
-included build above is the path that works today.
+included build above is the only path that works today.
 
 ## The render loop
 
