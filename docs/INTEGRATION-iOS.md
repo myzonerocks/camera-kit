@@ -10,11 +10,11 @@ The SDK is thin Swift over a static engine. Build the engine for the slices
 you target; the output lands in `zig-out`.
 
     zig build ios
-    zig build ios-simulator -Dios-simulator-sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+    zig build ios-simulator
 
-The device step reads the SDK from your `--sysroot`; the simulator step needs
-the SDK path passed in, and its error message prints the exact `xcrun` line if
-you leave it out. Each step writes `libgosslens.a` and the vendored archives
+On a Mac with Xcode both steps find their SDK through `xcrun` on their own;
+pass `-Dios-sdk`/`-Dios-simulator-sdk` (or `--sysroot`) only to point at a
+specific one. Each step writes `libgosslens.a` and the vendored archives
 (bgfx, the inference stack, ANGLE, QuickJS, Jolt) into `zig-out/ios` and
 `zig-out/ios-simulator`, all aligned and ready to link.
 
