@@ -16,9 +16,10 @@ CaptureOutput, Events.
 | Lens runtime | demonstrated on device | built, no hardware yet | demonstrated in browser, beauty-baseline only |
 | Photo capture (deterministic PNG) | proven in the host harness | built, no hardware yet | not wired |
 | Video recording | proven in the host harness on the Apple encoder | built on MediaCodec, no hardware yet | backend not landed, reports unsupported |
-| Platform photo formats (JPEG, HEIC) | proven in the host harness | backend not landed, reports unsupported | backend not landed, reports unsupported |
-| High-resolution still capture (decoupled from preview, supersampled) | proven in the host harness: full-sensor size, anti-aliased supersampling, deterministic | Swift wrapper landed | binding pending |
-| Tiled still composition (break the texture-size ceiling, stitch, byte-identical) | proven in the host harness: 2x2 and 3x2 grids byte-identical to a single target | Swift wrapper path | binding pending |
+| Photo formats (JPEG built-in, HEIC platform) | JPEG and HEIC proven in the host harness | JPEG from the engine's own encoder, built; HEIC backend not landed | JPEG from the engine's own encoder, built; HEIC backend not landed |
+| Color-managed stills (Display-P3/Rec2020 tags, 16-bit PNG) | proven in the host harness: wide-gamut PNG carries cHRM/gAMA and JPEG an ICC, sRGB carries neither, 16-bit PNG reports bit depth 16 | core encoder, every target | core encoder, every target |
+| High-resolution still capture (decoupled from preview, supersampled) | proven in the host harness: full-sensor size, anti-aliased supersampling, deterministic | Kotlin wrapper landed, no hardware yet | web wrapper landed over the wasm core |
+| Tiled still composition (2D + 3D sub-frustum, streamed) | proven in the host harness: 2D grids byte-identical to a single target; 3D content tiles past the texture cap (mesh byte-identical, particles within a sub-pixel); the tiled PNG streams a band at a time, peak heap a full render buffer below the full-buffer path | Kotlin wrapper landed, no hardware yet | web wrapper landed over the wasm core |
 | Audio triggers (level, beat) | proven in the host harness | built, no hardware yet | not wired |
 | Recording audio track + A/V sync | proven in the host harness, zero end drift | video-only until the audio encoder lands | backend not landed |
 | World tracking (pose, planes, anchors, light) | ARKit source built, no hardware yet; seam proven on the replay track in the host harness | ARCore demo feeder built, no hardware yet | WebXR source built and typechecked, no browser run yet |
@@ -26,8 +27,9 @@ CaptureOutput, Events.
 | Lens physics chains (constraints on anchors) | proven in the host harness, deterministic swing | stub, holds initial pose | stub, holds initial pose |
 | Lens cloth (soft-body sheets) | proven in the host harness, deterministic drape | stub, holds initial pose | stub, holds initial pose |
 | Lens strand hair (Jolt compute) | proven in the host harness, deterministic settle | stub, holds initial pose | stub, holds initial pose |
-| Lens scripting (QuickJS-ng, sandboxed, deterministic) | proven in the host harness: a script drives a parameter from a signal, bit-stable | stub until the backend is linked | stub until the backend is linked |
-| Lens audio playback (miniaudio, deterministic mixer) | proven in the host harness: a play_sound trigger mixes a voice, silent before, bit-stable after | stub until the backend is linked | stub until the backend is linked |
+| Lens scripting (QuickJS-ng, sandboxed, deterministic) | proven in the host harness: a script drives a parameter from a signal, bit-stable | built, QuickJS-ng linked, no hardware yet | built, QuickJS-ng linked for wasm |
+| Lens audio playback (miniaudio, deterministic mixer) | proven in the host harness: a play_sound trigger mixes a voice, silent before, bit-stable after | built, miniaudio linked, no hardware yet | built, miniaudio linked for wasm |
+| Post-effect nodes (blur, parametric grade, bloom) | proven in the host harness, each with a reference lens and a conformance proof | built, no hardware yet | built |
 | Lens particles (deterministic CPU fountain, GPU points) | proven in the host harness: the fountain falls, settled differs from initial, bit-stable across runs | pure-Zig sim, runs on device | pure-Zig sim, runs in browser |
 
 "Demonstrated" means executed on the real target through the public
