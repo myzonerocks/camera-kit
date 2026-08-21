@@ -283,6 +283,9 @@ pub const Session = struct {
     hair_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.HairMesh) = .empty,
     particle_systems: std.AutoHashMapUnmanaged(graph.NodeIndex, particles.System) = .empty,
     particle_meshes: std.AutoHashMapUnmanaged(graph.NodeIndex, render.Renderer.ParticleMesh) = .empty,
+    /// A fading fountain's own sprite texture, loaded once at activation from
+    /// assets/<stem>.png when the particles field names one.
+    particle_sprite_textures: std.AutoHashMapUnmanaged(graph.NodeIndex, render.TextureHandle) = .empty,
     hair_vcount: std.AutoHashMapUnmanaged(graph.NodeIndex, u32) = .empty,
     physics_last_us: i64 = 0,
 
@@ -1172,7 +1175,8 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
                         }
                     }
                     const aspect_ratio: f32 = @as(f32, @floatFromInt(rect_w)) / @as(f32, @floatFromInt(rect_h));
-                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, sprite_size_ndc, glow);
+                    const sprite_texture = s.particle_sprite_textures.get(entry.graph_index) orelse r.defaultSpriteTexture();
+                    r.submitParticles(blit_view, mesh_view, input_texture, particle_mesh, base_color, cool_color, aspect_ratio, fade, sprite_size_ndc, glow, sprite_texture);
                     if (output) |target| {
                         input_texture = target.texture;
                         if (!is_final) next_slot += 1;
@@ -1467,6 +1471,7 @@ pub fn destroySession(session: *Session) void {
     session.hair_vcount.deinit(session.engine.gpa);
     session.particle_meshes.deinit(session.engine.gpa);
     session.particle_systems.deinit(session.engine.gpa);
+    session.particle_sprite_textures.deinit(session.engine.gpa);
     destroyModelState(session);
     session.model_loaders.deinit(session.engine.gpa);
     session.model_meshes.deinit(session.engine.gpa);
@@ -2869,14 +2874,16 @@ fn destroyMeshFaceState(session: *Session) void {
         while (hm_it.next()) |mesh| render.Renderer.destroyHairMesh(mesh.*);
     }
     if (session.engine.renderer) |*r| {
-        _ = r;
         var pm_it = session.particle_meshes.valueIterator();
         while (pm_it.next()) |mesh| render.Renderer.destroyParticleMesh(mesh.*);
+        var sprite_it = session.particle_sprite_textures.valueIterator();
+        while (sprite_it.next()) |tex| r.destroyTexture(tex.*);
     }
     var ps_it = session.particle_systems.valueIterator();
     while (ps_it.next()) |sys| sys.deinit();
     session.particle_meshes.clearRetainingCapacity();
     session.particle_systems.clearRetainingCapacity();
+    session.particle_sprite_textures.clearRetainingCapacity();
     session.hair_meshes.clearRetainingCapacity();
     session.hair_ids.clearRetainingCapacity();
     session.hair_vcount.clearRetainingCapacity();
@@ -3295,6 +3302,24 @@ fn pollMeshFaceLoaders(session: *Session, r: *render.Renderer, gpa: std.mem.Allo
     }
 }
 
+/// Loads a fading fountain's sprite texture synchronously at activation - a
+/// small image, so no background loader: assets/<stem>.png decoded to a
+/// static texture, best-effort, leaving the node on the built-in soft round
+/// default when the sprite is missing or unreadable.
+fn loadParticleSprite(session: *Session, gpa: std.mem.Allocator, bundle_path: []const u8, graph_index: graph.NodeIndex, stem: []const u8) void {
+    if (comptime !has_file_io) return;
+    const path = std.fmt.allocPrint(gpa, "{s}/assets/{s}.png", .{ bundle_path, stem }) catch return;
+    defer gpa.free(path);
+    const bytes = std.Io.Dir.cwd().readFileAlloc(defaultIo(), path, gpa, .limited(4 * 1024 * 1024)) catch return;
+    defer gpa.free(bytes);
+    const decoded = image.decode(gpa, bytes) catch return;
+    defer gpa.free(decoded.rgba);
+    const texture = render.Renderer.createStaticTexture(@intCast(decoded.width), @intCast(decoded.height), decoded.rgba);
+    session.particle_sprite_textures.put(gpa, graph_index, texture) catch {
+        if (session.engine.renderer) |*r| r.destroyTexture(texture);
+    };
+}
+
 /// Starts a background load for every spliced model.gltf node's .glb
 /// (assets/<stem>.glb) - mirrors createLutLoaders/createBlendLoaders
 /// exactly, one node type over.
@@ -3321,6 +3346,7 @@ fn createModelLoaders(session: *Session, gpa: std.mem.Allocator, bundle_path: []
                             s2.deinit();
                         };
                         session.particle_meshes.put(gpa, model.graph_index, mesh) catch {};
+                        if (pf.sprite) |stem| loadParticleSprite(session, gpa, bundle_path, model.graph_index, stem);
                     } else |_| {
                         var s2 = sys;
                         s2.deinit();

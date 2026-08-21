@@ -1,0 +1,14 @@
+{
+  "glf": "1.0",
+  "id": "goss.reference.star-fountain",
+  "version": "1.0.0",
+  "display_name": "Star Fountain",
+  "engine_compat": ">=0.5",
+  "capabilities": [],
+  "parameters": [],
+  "nodes": [
+    {"id": "star", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
+     "particles": {"count": 150, "gravity": 3.0, "speed": 0.5, "lifetime": 1.5, "fade": true, "size": 12, "sprite": "star"}}
+  ],
+  "triggers": []
+}

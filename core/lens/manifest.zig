@@ -100,6 +100,10 @@ pub const ParticleField = struct {
     /// When true, fading sprites blend additively so overlaps brighten - a
     /// glowing fire look rather than a flat alpha composite.
     glow: bool = false,
+    /// The stem of a sprite image (assets/<stem>.png) each fading sprite is
+    /// textured with, shaping the point beyond the soft round default. Null
+    /// draws the built-in soft round sprite.
+    sprite: ?[]const u8 = null,
 };
 
 pub const GradeField = struct {
@@ -730,6 +734,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "glow")) |v| {
                     if (v == .bool) field.glow = v.bool;
+                }
+                if (getField(pv.object, "sprite")) |v| {
+                    if (try expectString(diags, path, v)) |stem| field.sprite = try arena.dupe(u8, stem);
                 }
                 particle_field = field;
             }

@@ -130,6 +130,7 @@ pub const Renderer = struct {
     tex_y: c.bgfx_uniform_handle_t,
     tex_uv: c.bgfx_uniform_handle_t,
     tex_lut: c.bgfx_uniform_handle_t,
+    tex_sprite: c.bgfx_uniform_handle_t,
     tex_background: c.bgfx_uniform_handle_t,
     tex_mask: c.bgfx_uniform_handle_t,
     tex_mean: c.bgfx_uniform_handle_t,
@@ -157,6 +158,7 @@ pub const Renderer = struct {
     /// the pass draws the frame through unblended rather than blocking
     /// the chain or sampling an unbound texture.
     default_mask_texture: c.bgfx_texture_handle_t,
+    default_sprite_texture: c.bgfx_texture_handle_t,
     /// The absence-of-signal mask: a named mask channel with no live
     /// data samples zero so the effect draws nothing, never everywhere.
     zero_mask_texture: c.bgfx_texture_handle_t,
@@ -348,6 +350,7 @@ pub const Renderer = struct {
             .tex_y = c.bgfx_create_uniform("s_texY", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_uv = c.bgfx_create_uniform("s_texUV", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_lut = c.bgfx_create_uniform("s_texLut", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
+            .tex_sprite = c.bgfx_create_uniform("s_texSprite", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_background = c.bgfx_create_uniform("s_texBackground", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_mask = c.bgfx_create_uniform("s_texMask", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
             .tex_mean = c.bgfx_create_uniform("s_texMean", c.BGFX_UNIFORM_TYPE_SAMPLER, 1),
@@ -369,6 +372,7 @@ pub const Renderer = struct {
             .particle_size_uniform = c.bgfx_create_uniform("u_particleSize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .default_mask_texture = createMaskTexture(1, 1, &[_]u8{255}),
             .zero_mask_texture = createMaskTexture(1, 1, &[_]u8{0}),
+            .default_sprite_texture = createStaticTexture(1, 1, &[_]u8{ 255, 255, 255, 255 }),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
         };
     }
@@ -576,10 +580,12 @@ pub const Renderer = struct {
         }
         c.bgfx_destroy_texture(r.default_mask_texture);
         c.bgfx_destroy_texture(r.zero_mask_texture);
+        c.bgfx_destroy_texture(r.default_sprite_texture);
         c.bgfx_destroy_uniform(r.tex_color);
         c.bgfx_destroy_uniform(r.tex_y);
         c.bgfx_destroy_uniform(r.tex_uv);
         c.bgfx_destroy_uniform(r.tex_lut);
+        c.bgfx_destroy_uniform(r.tex_sprite);
         c.bgfx_destroy_uniform(r.tex_background);
         c.bgfx_destroy_uniform(r.tex_mask);
         c.bgfx_destroy_uniform(r.tex_mean);
@@ -1262,7 +1268,11 @@ pub const Renderer = struct {
     /// model program by default; when fade is set, each particle is a
     /// camera-facing alpha-blended sprite of sprite_size_ndc (ndc half-extent
     /// per axis) through the billboard program, dimmed by its remaining life.
-    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, sprite_size_ndc: [2]f32, glow: bool) void {
+    pub fn defaultSpriteTexture(r: *const Renderer) c.bgfx_texture_handle_t {
+        return r.default_sprite_texture;
+    }
+
+    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, sprite_size_ndc: [2]f32, glow: bool, sprite_texture: c.bgfx_texture_handle_t) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
@@ -1274,6 +1284,7 @@ pub const Renderer = struct {
         c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
         if (fade) {
+            c.bgfx_set_texture(0, r.tex_sprite, sprite_texture, std.math.maxInt(u32));
             c.bgfx_set_uniform(r.particle_cool_uniform, &cool_color, 1);
             const size_vec4 = [4]f32{ sprite_size_ndc[0], sprite_size_ndc[1], 0.0, 0.0 };
             c.bgfx_set_uniform(r.particle_size_uniform, &size_vec4, 1);

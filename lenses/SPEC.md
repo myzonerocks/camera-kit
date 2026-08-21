@@ -189,7 +189,9 @@ respawns - at `"size"` pixels (1 to 64, a visible default when omitted);
 add `"cool": [r, g, b]` and a fading sprite also crosses from the draw
 colour at birth toward that colour by death, an ember glowing hot then
 cooling; add `"glow": true` and the sprites blend additively so overlaps
-brighten, a fire glow rather than a flat composite.
+brighten, a fire glow rather than a flat composite; add `"sprite":
+"<stem>"` and each sprite is textured with `assets/<stem>.png`, shaping the
+point into a star, spark or any image beyond the built-in soft round.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the
