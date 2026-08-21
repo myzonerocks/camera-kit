@@ -249,3 +249,99 @@ export class Segmenter {
     this.exports.goss_tracking_free(this.maskPtr, this.maskSide * this.maskSide * 4);
   }
 }
+
+export const POSE_LANDMARK_COUNT = 33;
+
+export interface PoseResult {
+  frameSerial: bigint;
+  timestampUs: bigint;
+  presence: number;
+  landmarkCount: number;
+  /** x, y frame pixels and z, three floats per landmark. */
+  landmarks: Float32Array;
+  visibilities: Float32Array;
+  presences: Float32Array;
+}
+
+interface PoseExports {
+  memory: WebAssembly.Memory;
+  goss_tracking_alloc(size: number): number;
+  goss_tracking_free(ptr: number, size: number): void;
+  goss_pose_result_size(): number;
+  goss_pose_create(taskPtr: number, taskLen: number): number;
+  goss_pose_destroy(instance: number): void;
+  goss_pose_process(instance: number, rgba: number, width: number, height: number, timestampUs: bigint): number;
+  goss_pose_result(instance: number, out: number): number;
+}
+
+/// The web pose tracker: the wasm module's pose pipeline, run in a Worker.
+/// A pose task bundle in, the 33-landmark pose result out per frame.
+export class PoseTracker {
+  private constructor(
+    private exports: PoseExports,
+    private instance: number,
+    private resultPtr: number,
+    private framePtr: number,
+    private frameCapacity: number,
+  ) {}
+
+  static async create(moduleBytes: ArrayBuffer, taskBundle: Uint8Array): Promise<PoseTracker> {
+    let memory: WebAssembly.Memory | undefined;
+    const { instance } = await WebAssembly.instantiate(moduleBytes, {
+      wasi_snapshot_preview1: totalWasi(() => memory!),
+    });
+    const exports = instance.exports as unknown as PoseExports;
+    memory = exports.memory;
+
+    const taskPtr = exports.goss_tracking_alloc(taskBundle.length);
+    if (taskPtr === 0) throw new Error("pose module allocation failed");
+    new Uint8Array(exports.memory.buffer, taskPtr, taskBundle.length).set(taskBundle);
+    const handle = exports.goss_pose_create(taskPtr, taskBundle.length);
+    exports.goss_tracking_free(taskPtr, taskBundle.length);
+    if (handle === 0) throw new Error("pose bundle rejected");
+
+    const resultPtr = exports.goss_tracking_alloc(exports.goss_pose_result_size());
+    if (resultPtr === 0) throw new Error("pose module allocation failed");
+    return new PoseTracker(exports, handle, resultPtr, 0, 0);
+  }
+
+  process(rgba: Uint8Array, width: number, height: number, timestampUs: bigint): PoseResult | null {
+    const needed = width * height * 4;
+    if (rgba.length < needed) throw new Error("frame shorter than its dimensions");
+    if (this.frameCapacity < needed) {
+      if (this.framePtr !== 0) this.exports.goss_tracking_free(this.framePtr, this.frameCapacity);
+      this.framePtr = this.exports.goss_tracking_alloc(needed);
+      if (this.framePtr === 0) throw new Error("pose module allocation failed");
+      this.frameCapacity = needed;
+    }
+    new Uint8Array(this.exports.memory.buffer, this.framePtr, needed).set(rgba.subarray(0, needed));
+    if (this.exports.goss_pose_process(this.instance, this.framePtr, width, height, timestampUs) !== 0) {
+      throw new Error("pose process refused the frame");
+    }
+    return this.latest();
+  }
+
+  latest(): PoseResult | null {
+    if (this.exports.goss_pose_result(this.instance, this.resultPtr) !== 0) return null;
+    const buffer = this.exports.memory.buffer;
+    const view = new DataView(buffer, this.resultPtr);
+    const landmarks = new Float32Array(buffer, this.resultPtr + 24, POSE_LANDMARK_COUNT * 3).slice();
+    const visibilities = new Float32Array(buffer, this.resultPtr + 24 + POSE_LANDMARK_COUNT * 3 * 4, POSE_LANDMARK_COUNT).slice();
+    const presences = new Float32Array(buffer, this.resultPtr + 24 + POSE_LANDMARK_COUNT * 4 * 4, POSE_LANDMARK_COUNT).slice();
+    return {
+      frameSerial: view.getBigUint64(0, true),
+      timestampUs: view.getBigInt64(8, true),
+      presence: view.getFloat32(16, true),
+      landmarkCount: view.getUint32(20, true),
+      landmarks,
+      visibilities,
+      presences,
+    };
+  }
+
+  destroy(): void {
+    this.exports.goss_pose_destroy(this.instance);
+    if (this.framePtr !== 0) this.exports.goss_tracking_free(this.framePtr, this.frameCapacity);
+    this.exports.goss_tracking_free(this.resultPtr, this.exports.goss_pose_result_size());
+  }
+}

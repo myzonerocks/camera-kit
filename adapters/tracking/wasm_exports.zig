@@ -11,6 +11,7 @@ const detector = @import("detector");
 const sampler = @import("sampler");
 const face = @import("face");
 const tracker = @import("tracker");
+const pose = @import("pose");
 const segmentation_core = @import("segmentation_core");
 
 const gpa = std.heap.wasm_allocator;
@@ -292,5 +293,174 @@ pub export fn goss_segmentation_read_class_mask(core: ?*segmentation_core.Core, 
     const c = core orelse return status_invalid;
     const dst = out orelse return status_invalid;
     if (!c.classMask(class_index, @ptrCast(dst))) return status_again;
+    return status_ok;
+}
+
+// --- Pose ---
+// The pose pipeline, the face module's twin for a different bundle: a
+// pose detector then the landmark model, decoded to pose.Result. Stands
+// on its own instance; RGBA frames in, the pose result out.
+
+const pose_max_candidates = 8;
+const pose_presence_floor = 0.5;
+
+const PoseInstance = struct {
+    task_bytes: []u8,
+    detector_payload: bundle.Payload,
+    landmarks_payload: bundle.Payload,
+    detector_engine: runtime.Engine,
+    landmarks_engine: runtime.Engine,
+    detector_side: u32,
+    landmark_side: u32,
+    anchors: []detector.Anchor,
+    detector_tensor: []f32,
+    landmark_tensor: []f32,
+    lock: ?sampler.Region = null,
+    result: pose.Result = std.mem.zeroes(pose.Result),
+    has_result: bool = false,
+    serial: u64 = 0,
+};
+
+pub export fn goss_pose_result_size() usize {
+    return @sizeOf(pose.Result);
+}
+
+pub export fn goss_pose_create(task_ptr: ?[*]const u8, task_len: usize) ?*PoseInstance {
+    const task_source = task_ptr orelse return null;
+    if (task_len == 0) return null;
+
+    const instance = gpa.create(PoseInstance) catch return null;
+    errdefer gpa.destroy(instance);
+    const owned = gpa.dupe(u8, task_source[0..task_len]) catch return null;
+    errdefer gpa.free(owned);
+
+    const task = bundle.Bundle.open(owned) catch return null;
+    const detector_entry = task.find("pose_detector.tflite") catch return null;
+    const landmarks_entry = task.find("pose_landmarks_detector.tflite") catch return null;
+    const detector_payload = task.payload(gpa, detector_entry) catch return null;
+    errdefer detector_payload.deinit(gpa);
+    const landmarks_payload = task.payload(gpa, landmarks_entry) catch return null;
+    errdefer landmarks_payload.deinit(gpa);
+
+    var detector_engine = runtime.Engine.init(detector_payload.bytes, 1) catch return null;
+    errdefer detector_engine.deinit();
+    var landmarks_engine = runtime.Engine.init(landmarks_payload.bytes, 1) catch return null;
+    errdefer landmarks_engine.deinit();
+
+    const detector_side = engineInputSide(&detector_engine) orelse return null;
+    const landmark_side = engineInputSide(&landmarks_engine) orelse return null;
+    const total = anchorTotal(&detector_engine) orelse return null;
+    const plan = detector.planForModel(detector_side, total) orelse return null;
+
+    const anchors = gpa.alloc(detector.Anchor, total) catch return null;
+    errdefer gpa.free(anchors);
+    detector.generateAnchors(detector_side, plan, anchors);
+    const detector_tensor = gpa.alloc(f32, @as(usize, detector_side) * detector_side * 3) catch return null;
+    errdefer gpa.free(detector_tensor);
+    const landmark_tensor = gpa.alloc(f32, @as(usize, landmark_side) * landmark_side * 3) catch return null;
+    errdefer gpa.free(landmark_tensor);
+
+    instance.* = .{
+        .task_bytes = owned,
+        .detector_payload = detector_payload,
+        .landmarks_payload = landmarks_payload,
+        .detector_engine = detector_engine,
+        .landmarks_engine = landmarks_engine,
+        .detector_side = detector_side,
+        .landmark_side = landmark_side,
+        .anchors = anchors,
+        .detector_tensor = detector_tensor,
+        .landmark_tensor = landmark_tensor,
+    };
+    return instance;
+}
+
+pub export fn goss_pose_destroy(instance: ?*PoseInstance) void {
+    const p = instance orelse return;
+    p.detector_engine.deinit();
+    p.landmarks_engine.deinit();
+    gpa.free(p.landmark_tensor);
+    gpa.free(p.detector_tensor);
+    gpa.free(p.anchors);
+    p.landmarks_payload.deinit(gpa);
+    p.detector_payload.deinit(gpa);
+    gpa.free(p.task_bytes);
+    gpa.destroy(p);
+}
+
+fn poseEmpty(p: *PoseInstance, timestamp_us: i64) void {
+    p.serial += 1;
+    p.result = std.mem.zeroes(pose.Result);
+    p.result.frame_serial = p.serial;
+    p.result.timestamp_us = timestamp_us;
+    p.has_result = true;
+}
+
+pub export fn goss_pose_process(instance: ?*PoseInstance, rgba: ?[*]const u8, width: u32, height: u32, timestamp_us: i64) i32 {
+    const p = instance orelse return status_invalid;
+    const pixels = rgba orelse return status_invalid;
+    if (width == 0 or height == 0) return status_invalid;
+    const image: sampler.Frame = .{
+        .width = width,
+        .height = height,
+        .pixels = .{ .rgba8 = pixels[0 .. @as(usize, width) * height * 4] },
+    };
+
+    const crop = p.lock orelse detect: {
+        const square = sampler.frameSquare(width, height);
+        sampler.sampleRegion(image, square, .symmetric, p.detector_side, p.detector_tensor);
+        p.detector_engine.writeInput(0, std.mem.sliceAsBytes(p.detector_tensor)) catch return status_invalid;
+        p.detector_engine.invoke() catch return status_invalid;
+        const raw_boxes = p.detector_engine.outputFloats(0) catch return status_invalid;
+        const raw_scores = p.detector_engine.outputFloats(1) catch return status_invalid;
+        var candidates: [pose_max_candidates]detector.pose.Detection = undefined;
+        const found = detector.pose.decode(raw_boxes, raw_scores, p.anchors, @floatFromInt(p.detector_side), 0.5, &candidates);
+        if (found.len == 0) {
+            poseEmpty(p, timestamp_us);
+            return status_ok;
+        }
+        const region = pose.regionFromDetection(found[0], square);
+        p.lock = region;
+        break :detect region;
+    };
+
+    sampler.sampleRegion(image, crop, .unit, p.landmark_side, p.landmark_tensor);
+    p.landmarks_engine.writeInput(0, std.mem.sliceAsBytes(p.landmark_tensor)) catch return status_invalid;
+    p.landmarks_engine.invoke() catch return status_invalid;
+    const raw_landmarks = p.landmarks_engine.outputFloats(0) catch return status_invalid;
+    const presence = presenceScore((p.landmarks_engine.outputFloats(1) catch return status_invalid)[0]);
+    if (presence < pose_presence_floor) {
+        p.lock = null;
+        poseEmpty(p, timestamp_us);
+        return status_ok;
+    }
+
+    var landmarks: [pose.raw_landmark_count]pose.Landmark = undefined;
+    var visibilities: [pose.raw_landmark_count]f32 = undefined;
+    var presences: [pose.raw_landmark_count]f32 = undefined;
+    pose.decodeLandmarks(raw_landmarks, crop, @floatFromInt(p.landmark_side), &landmarks, &visibilities, &presences);
+    p.lock = pose.regionFromLandmarks(&landmarks);
+
+    p.serial += 1;
+    p.result.frame_serial = p.serial;
+    p.result.timestamp_us = timestamp_us;
+    p.result.presence = presence;
+    p.result.landmark_count_out = pose.landmark_count;
+    for (0..pose.landmark_count) |at| {
+        p.result.landmarks[at * 3] = landmarks[at].x;
+        p.result.landmarks[at * 3 + 1] = landmarks[at].y;
+        p.result.landmarks[at * 3 + 2] = landmarks[at].z;
+        p.result.visibilities[at] = visibilities[at];
+        p.result.presences[at] = presences[at];
+    }
+    p.has_result = true;
+    return status_ok;
+}
+
+pub export fn goss_pose_result(instance: ?*PoseInstance, out: ?[*]u8) i32 {
+    const p = instance orelse return status_invalid;
+    const destination = out orelse return status_invalid;
+    if (!p.has_result) return status_again;
+    @memcpy(destination[0..@sizeOf(pose.Result)], std.mem.asBytes(&p.result));
     return status_ok;
 }
