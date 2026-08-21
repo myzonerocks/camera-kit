@@ -24,7 +24,18 @@ use, from your own static host.
 
 ## Install
 
-    npm i @gosslens/core
+`@gosslens/core` is not published to a registry yet. Consume it from this
+checkout as a workspace dependency (the demo does), pointing your workspace at
+`sdk/ts`:
+
+    { "dependencies": { "@gosslens/core": "workspace:*" } }
+
+or a direct path while you develop:
+
+    { "dependencies": { "@gosslens/core": "file:../gosslens/sdk/ts" } }
+
+Run `bun run build` in `sdk/ts` first so `dist/` exists. The imports below use
+the package name either way.
 
 ## The render loop
 
