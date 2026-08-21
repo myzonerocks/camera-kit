@@ -224,6 +224,13 @@ pub const Engine = struct {
     /// Window-binding backends only: the encoder surface the composite
     /// re-presents into, separate from the sampleable frame target.
     recording_window_target: ?render.Renderer.OffscreenTarget = null,
+    /// Live-output surfaces, keyed by the caller's native texture pointer -
+    /// the zero-copy broadcast path renders the composite straight into these
+    /// instead of reading it back. Same slot shape as recording's.
+    live_output_slots: std.AutoHashMapUnmanaged(usize, RecordingSlot) = .empty,
+    /// The live surface the current frame renders into, once its wrap lands.
+    live_output_target: ?render.Renderer.OffscreenTarget = null,
+    live_output_requested: bool = false,
 };
 
 const WorldStore = struct {
@@ -546,6 +553,12 @@ pub fn destroyEngine(engine: *Engine) void {
     if (engine.capture_staging) |staging| {
         if (engine.renderer) |*r| r.destroyTexture(staging);
     }
+    var live_it = engine.live_output_slots.valueIterator();
+    while (live_it.next()) |slot| {
+        if (slot.target) |target| render.Renderer.destroyOffscreenTarget(target);
+        slot.persistent.deinit();
+    }
+    engine.live_output_slots.deinit(engine.gpa);
     if (engine.renderer) |*r| r.deinit();
     engine.texture_pool.deinit();
     engine.staging_pool.deinit();
@@ -1432,6 +1445,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
 /// after the frame completes.
 fn finalTarget(e: *Engine, s: *Session) ?render.Renderer.OffscreenTarget {
     if (s.capture_requested) return e.capture_target;
+    if (e.live_output_requested) return e.live_output_target;
     return e.recording_frame_target;
 }
 
@@ -1972,6 +1986,57 @@ test "swapRedBlue turns rgba into bgra" {
     var pixels = [_]u8{ 10, 20, 30, 40, 50, 60, 70, 80 };
     swapRedBlue(&pixels);
     try std.testing.expectEqualSlices(u8, &.{ 30, 20, 10, 40, 70, 60, 50, 80 }, &pixels);
+}
+
+/// Renders the current frame with the lens chain baked in, landing the final
+/// composite in whatever finalTarget routes it to - here the live-output
+/// surface - with no readback tail. The zero-copy sibling of renderForCapture.
+fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
+    pollLutLoaders(s, r, s.engine.gpa);
+    pollBlendLoaders(s, r, s.engine.gpa);
+    pollModelLoaders(s, r, s.engine.gpa);
+    pollSegmentationMask(s);
+    if (s.current) |current| {
+        const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
+        const mirror = current.desc.flags & frame_flag_mirror != 0;
+        renderCompositeChain(e, r, s, current, rotation, mirror) catch {
+            r.submitPreview(0, current.preview, rotation * 90, mirror);
+        };
+    } else {
+        r.touch();
+    }
+    _ = r.frame();
+}
+
+/// Renders the composited frame straight into a caller-supplied external
+/// texture (an id<MTLTexture> over an IOSurface-backed CVPixelBuffer on Apple),
+/// zero-copy - the mechanism recording already uses, for a live source. Returns
+/// .again while a new handle or size warms up bgfx's override; re-submit next.
+pub export fn goss_engine_render_to_live_texture(engine: ?*Engine, session: ?*Session, native_handle: u64, width: u32, height: u32) Status {
+    const e = engine orelse return .invalid_argument;
+    const s = session orelse return .invalid_argument;
+    const r = if (e.renderer) |*r| r else return .renderer_unavailable;
+    if (native_handle == 0 or width == 0 or height == 0) return .invalid_argument;
+
+    const w: u16 = @intCast(width);
+    const h: u16 = @intCast(height);
+    const key: usize = @intCast(native_handle);
+    const slot = e.live_output_slots.getOrPut(e.gpa, key) catch return .out_of_memory;
+    if (!slot.found_existing) slot.value_ptr.* = .{};
+
+    const wrapped = r.wrapExternalRenderTarget(&slot.value_ptr.persistent, w, h, render.c.BGFX_TEXTURE_FORMAT_BGRA8, key) orelse return .again;
+    if (slot.value_ptr.target == null) {
+        slot.value_ptr.target = render.Renderer.createExternalTarget(wrapped) catch return .renderer_unavailable;
+    }
+
+    e.live_output_target = slot.value_ptr.target;
+    e.live_output_requested = true;
+    defer {
+        e.live_output_requested = false;
+        e.live_output_target = null;
+    }
+    renderLiveComposite(e, r, s);
+    return .ok;
 }
 
 /// Captures the composited frame and encodes it as a PNG into out_data.

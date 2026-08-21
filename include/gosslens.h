@@ -285,6 +285,12 @@ goss_status goss_engine_capture_frame(goss_engine *engine, goss_session *session
  * out_data holds out_width * out_height * 4. The blessed live path, not debug. */
 goss_status goss_engine_capture_live_frame(goss_engine *engine, goss_session *session, uint32_t format, uint8_t *out_data, size_t out_capacity, uint32_t *out_width, uint32_t *out_height);
 
+/* The zero-copy live output: renders the composited frame straight into a
+ * caller-supplied external texture (an id<MTLTexture> over an IOSurface-backed
+ * CVPixelBuffer on Apple) instead of reading it back. Returns GOSS_AGAIN while a
+ * new handle or size warms up bgfx's override; re-submit next frame. Metal today. */
+goss_status goss_engine_render_to_live_texture(goss_engine *engine, goss_session *session, uint64_t native_handle, uint32_t width, uint32_t height);
+
 /* Captures the composited frame and encodes it as a PNG into out_data.
  * out_len always receives the encoded size, so a too-small buffer
  * (invalid_argument) tells the caller exactly what to retry with. The

@@ -153,6 +153,15 @@ extension GossEngine {
         }
     }
 
+    /// Renders the composited frame straight into an external BGRA MTLTexture
+    /// (over an IOSurface-backed CVPixelBuffer), zero-copy. texture is the
+    /// id<MTLTexture> pointer. False means warming up (skip this frame, retry)
+    /// or an error; GossLiveOutput wraps this with a pixel-buffer pool.
+    public func renderToLiveTexture(session: GossSession, texture: UnsafeMutableRawPointer, width: UInt32, height: UInt32) -> Bool {
+        let native = UInt64(UInt(bitPattern: texture))
+        return goss_engine_render_to_live_texture(handle, session.handle, native, width, height) == GOSS_OK
+    }
+
     /// The composited frame as packed bytes in a WebRTC format (BGRA by
     /// default), the supported per-frame output for a live broadcast source -
     /// feed it to a LiveKit or WebRTC custom video source.
