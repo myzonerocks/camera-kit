@@ -2878,6 +2878,21 @@ pub export fn goss_session_set_face_landmarks(session: ?*Session, points: ?[*]co
     return .ok;
 }
 
+/// Feeds a segmentation mask the web tracking module computed into the
+/// session, uploaded as the subject texture the blend and mask channels
+/// sample - the web counterpart to the in-engine segmentation worker. A
+/// zero length clears it; the mask is mask_side x mask_side floats.
+pub export fn goss_session_set_segmentation_mask(session: ?*Session, mask: ?[*]const f32, mask_len: u32) Status {
+    if (!is_web) return .unsupported;
+    const s = session orelse return .invalid_argument;
+    destroySegmentationTexture(s);
+    if (mask_len == 0) return .ok;
+    if (mask_len != segmentation.mask_len) return .invalid_argument;
+    const m = mask orelse return .invalid_argument;
+    s.segmentation_texture = maskToTexture(@ptrCast(m));
+    return .ok;
+}
+
 /// Runs the beauty chain over one RGBA frame on the calling thread,
 /// reading the newest tracking result for the landmark driven effects
 /// when face tracking is enabled. The stated CPU path: live preview
