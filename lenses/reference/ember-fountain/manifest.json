@@ -7,8 +7,28 @@
   "capabilities": [],
   "parameters": [],
   "nodes": [
-    {"id": "ember", "type": "model.gltf", "inputs": {"frame": "camera"}, "params": {},
-     "particles": {"count": 200, "gravity": 3.0, "speed": 0.5, "lifetime": 1.5, "fade": true, "cool": [0.7, 0.05, 0.0], "size": 8}}
+    {
+      "id": "ember",
+      "type": "model.gltf",
+      "inputs": {
+        "frame": "camera"
+      },
+      "params": {},
+      "particles": {
+        "count": 200,
+        "gravity": 3.0,
+        "speed": 0.5,
+        "lifetime": 1.5,
+        "fade": true,
+        "cool": [
+          0.7,
+          0.05,
+          0.0
+        ],
+        "size": 8,
+        "glow": true
+      }
+    }
   ],
   "triggers": []
 }

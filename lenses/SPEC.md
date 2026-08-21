@@ -188,7 +188,8 @@ life, dimming to nothing as it ages rather than popping out when it
 respawns - at `"size"` pixels (1 to 64, a visible default when omitted);
 add `"cool": [r, g, b]` and a fading sprite also crosses from the draw
 colour at birth toward that colour by death, an ember glowing hot then
-cooling.
+cooling; add `"glow": true` and the sprites blend additively so overlaps
+brighten, a fire glow rather than a flat composite.
 
 A `"blur.pass"` node is a standalone post-effect: it softens whatever frame
 reaches it with the engine's built-in separable box blur and passes the

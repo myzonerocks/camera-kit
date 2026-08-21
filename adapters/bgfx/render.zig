@@ -1262,7 +1262,7 @@ pub const Renderer = struct {
     /// model program by default; when fade is set, each particle is a
     /// camera-facing alpha-blended sprite of sprite_size_ndc (ndc half-extent
     /// per axis) through the billboard program, dimmed by its remaining life.
-    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, sprite_size_ndc: [2]f32) void {
+    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, sprite_size_ndc: [2]f32, glow: bool) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
@@ -1277,7 +1277,10 @@ pub const Renderer = struct {
             c.bgfx_set_uniform(r.particle_cool_uniform, &cool_color, 1);
             const size_vec4 = [4]f32{ sprite_size_ndc[0], sprite_size_ndc[1], 0.0, 0.0 };
             c.bgfx_set_uniform(r.particle_size_uniform, &size_vec4, 1);
-            c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_BLEND_FUNC(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA), 0);
+            // Glow blends additively (overlaps brighten); otherwise a plain
+            // src-alpha composite.
+            const dst = if (glow) c.BGFX_STATE_BLEND_ONE else c.BGFX_STATE_BLEND_INV_SRC_ALPHA;
+            c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_BLEND_FUNC(c.BGFX_STATE_BLEND_SRC_ALPHA, dst), 0);
             c.bgfx_submit(mesh_view, r.billboard_program, 0, c.BGFX_DISCARD_ALL);
         } else {
             c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_PT_POINTS, 0);

@@ -18,6 +18,9 @@ pub const Field = struct {
     /// Rendering hint the sim ignores: fading sprite size in pixels; 0 lets
     /// the caller pick a visible default.
     size: u32 = 0,
+    /// Rendering hint the sim ignores: blend fading sprites additively so
+    /// overlaps brighten (a glowing fire look).
+    glow: bool = false,
 };
 
 pub const Particle = struct {

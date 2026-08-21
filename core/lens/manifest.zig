@@ -97,6 +97,9 @@ pub const ParticleField = struct {
     /// Sprite size in pixels (1 to 64) for a fading fountain, drawn as
     /// camera-facing quads; 0 lets the engine pick a visible default.
     size: u32 = 0,
+    /// When true, fading sprites blend additively so overlaps brighten - a
+    /// glowing fire look rather than a flat alpha composite.
+    glow: bool = false,
 };
 
 pub const GradeField = struct {
@@ -724,6 +727,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 }
                 if (getField(pv.object, "size")) |v| {
                     if (v == .integer and v.integer >= 1 and v.integer <= 64) field.size = @intCast(v.integer) else try diags.add(path.slice(), "particles size must be an integer 1..64", .{});
+                }
+                if (getField(pv.object, "glow")) |v| {
+                    if (v == .bool) field.glow = v.bool;
                 }
                 particle_field = field;
             }
