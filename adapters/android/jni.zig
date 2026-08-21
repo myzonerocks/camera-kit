@@ -308,7 +308,7 @@ export fn Java_com_gosslens_Gosslens_nativeCapturePhoto(env: *JniEnv, cls: jobje
     return @intFromEnum(status);
 }
 
-export fn Java_com_gosslens_Gosslens_nativeCaptureStill(env: *JniEnv, cls: jobject, engine: i64, session: i64, width: i32, height: i32, supersample: i32, format: i32, quality: i32, data_buffer: jobject, data_capacity: i64, info_buffer: jobject) i32 {
+export fn Java_com_gosslens_Gosslens_nativeCaptureStill(env: *JniEnv, cls: jobject, engine: i64, session: i64, width: i32, height: i32, supersample: i32, format: i32, quality: i32, color_space: i32, bit_depth: i32, data_buffer: jobject, data_capacity: i64, info_buffer: jobject) i32 {
     _ = cls;
     const info_bytes = getDirectBufferAddress(env, info_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
     const info: *extern struct { encoded_len: u64, width: u32, height: u32 } = @ptrCast(@alignCast(info_bytes));
@@ -319,6 +319,8 @@ export fn Java_com_gosslens_Gosslens_nativeCaptureStill(env: *JniEnv, cls: jobje
         .supersample = @intCast(@max(supersample, 0)),
         .format = @intCast(@max(format, 0)),
         .quality = @intCast(@max(quality, 0)),
+        .color_space = @intCast(@max(color_space, 0)),
+        .bit_depth = @intCast(@max(bit_depth, 0)),
     };
     var encoded_len: usize = 0;
     var out_width: u32 = 0;

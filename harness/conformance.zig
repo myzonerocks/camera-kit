@@ -911,7 +911,28 @@ fn proveColorManagedCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
         return false;
     }
 
-    std.debug.print("conformance: PROOF the built-in JPEG encoder decodes through the platform and is deterministic; wide-gamut PNG/JPEG carry cHRM/gAMA and ICC, sRGB carries neither\n", .{});
+    // A 16-bit PNG capture is a real 16-bit container: IHDR reports bit
+    // depth 16 (the byte past the 8-byte signature and the width/height
+    // fields), and it still decodes back at the right size.
+    var png16_cfg = base;
+    png16_cfg.bit_depth = 16;
+    const png16 = try capture(gpa, engine, session, png16_cfg);
+    defer gpa.free(png16);
+    if (png16[24] != 16) {
+        std.debug.print("conformance: FAIL 16-bit PNG IHDR reports bit depth {d}\n", .{png16[24]});
+        return false;
+    }
+    const decoded16 = image_adapter.decode(gpa, png16) catch {
+        std.debug.print("conformance: FAIL 16-bit PNG does not decode\n", .{});
+        return false;
+    };
+    defer gpa.free(decoded16.rgba);
+    if (decoded16.width != 200 or decoded16.height != 150) {
+        std.debug.print("conformance: FAIL 16-bit PNG decoded at {d}x{d}\n", .{ decoded16.width, decoded16.height });
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the built-in JPEG encoder decodes through the platform and is deterministic; wide-gamut PNG/JPEG carry cHRM/gAMA and ICC, sRGB carries neither; a 16-bit PNG is a real 16-bit container\n", .{});
     return true;
 }
 

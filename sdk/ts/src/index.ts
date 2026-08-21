@@ -86,6 +86,10 @@ export interface StillConfig {
   supersample?: number;
   format?: number;
   quality?: number;
+  /** 0 = sRGB, 1 = Display-P3, 2 = Rec2020 - the gamut the file is tagged with. */
+  colorSpace?: number;
+  /** 8 or 16 bits per channel; 16 is the PNG high-bit-depth path. */
+  bitDepth?: number;
 }
 
 const FRAME_FLAG_MIRROR = 0x1;
@@ -410,12 +414,14 @@ export class Engine {
   /// WebGL path renders in JS and has no core encoder to reach.
   async captureStill(session: Session | null, config: StillConfig = {}): Promise<Uint8Array> {
     if (this.gl) throw new Error("captureStill needs the wasm renderer");
-    const cfgPtr = this.mod.ccall("goss_alloc", "number", ["number"], [20]);
+    const cfgPtr = this.mod.ccall("goss_alloc", "number", ["number"], [28]);
     this.mod.setValue(cfgPtr, config.width ?? 0, "i32");
     this.mod.setValue(cfgPtr + 4, config.height ?? 0, "i32");
     this.mod.setValue(cfgPtr + 8, config.supersample ?? 0, "i32");
     this.mod.setValue(cfgPtr + 12, config.format ?? 0, "i32");
     this.mod.setValue(cfgPtr + 16, config.quality ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 20, config.colorSpace ?? 0, "i32");
+    this.mod.setValue(cfgPtr + 24, config.bitDepth ?? 8, "i32");
     const lenPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
     const widthPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
     const heightPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]);
@@ -448,7 +454,7 @@ export class Engine {
       return this.mod.HEAPU8.slice(dataPtr, dataPtr + encoded);
     } finally {
       this.captureInFlight = false;
-      this.mod.ccall("goss_free", null, ["number", "number"], [cfgPtr, 20]);
+      this.mod.ccall("goss_free", null, ["number", "number"], [cfgPtr, 28]);
       this.mod.ccall("goss_free", null, ["number", "number"], [lenPtr, 4]);
       this.mod.ccall("goss_free", null, ["number", "number"], [widthPtr, 4]);
       this.mod.ccall("goss_free", null, ["number", "number"], [heightPtr, 4]);
