@@ -800,6 +800,109 @@ fn proveTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves 3D content tiles past the texture cap through per-tile
+/// off-center sub-frustums: mesh geometry (cloth) byte-identical to the
+/// single target, particles deterministic and within a sub-pixel (their
+/// billboards expand in clip space after the crop). The full-AR unlock.
+fn prove3DTiledCapture(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const cases = [_]struct { lens: []const u8, exact: bool }{
+        .{ .lens = ".lens-packages/cloth-flag", .exact = true },
+        .{ .lens = ".lens-packages/ember-fountain", .exact = false },
+    };
+    const cfg = abi.CaptureConfig{ .width = 400, .height = 300, .supersample = 0, .format = 0, .quality = 0 };
+    const buf_cap = 400 * 300 * 4 + 4096;
+    const corpus = try loadCorpusFrame(gpa, corpus_path);
+    defer corpus.deinit();
+    const planes = try rgbaToNv12(gpa, corpus.frame);
+    defer planes.deinit(gpa);
+    const half_w = (planes.width + 1) / 2;
+
+    for (cases) |case| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_activate_lens_from_directory(session, case.lens.ptr, case.lens.len) != .ok) {
+            std.debug.print("conformance: FAIL 3D tiled lens activation ({s})\n", .{case.lens});
+            return false;
+        }
+        for (0..30) |i| {
+            const desc: abi.FrameDesc = .{
+                .width = planes.width,
+                .height = planes.height,
+                .pixel_format = 0,
+                .color_standard = 0,
+                .color_range = 1,
+                .flags = 0,
+                .timestamp_us = @intCast((i + 1) * 33_333),
+            };
+            if (abi.goss_session_submit_frame_copy(session, &desc, planes.y.ptr, planes.width, planes.uv.ptr, half_w * 2) != .ok) {
+                return error.SubmitFailed;
+            }
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+
+        var ow: u32 = 0;
+        var oh: u32 = 0;
+        const whole = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(whole);
+        var whole_len: usize = 0;
+        session.capture_tile_cap = 0;
+        if (abi.goss_engine_capture_still(engine, session, &cfg, whole.ptr, whole.len, &whole_len, &ow, &oh) != .ok or ow != 400 or oh != 300) {
+            std.debug.print("conformance: FAIL 3D single-target capture ({s})\n", .{case.lens});
+            return false;
+        }
+        // A 200 cap forces a 2x2 grid; each tile draws the 3D content
+        // through its own sub-frustum and the tiles stitch on the CPU.
+        const tiled = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(tiled);
+        var tiled_len: usize = 0;
+        session.capture_tile_cap = 200;
+        if (abi.goss_engine_capture_still(engine, session, &cfg, tiled.ptr, tiled.len, &tiled_len, &ow, &oh) != .ok or ow != 400 or oh != 300) {
+            session.capture_tile_cap = 0;
+            std.debug.print("conformance: FAIL 3D tiled capture ({s})\n", .{case.lens});
+            return false;
+        }
+        const tiled2 = try gpa.alloc(u8, buf_cap);
+        defer gpa.free(tiled2);
+        var tiled2_len: usize = 0;
+        _ = abi.goss_engine_capture_still(engine, session, &cfg, tiled2.ptr, tiled2.len, &tiled2_len, &ow, &oh);
+        session.capture_tile_cap = 0;
+        if (!std.mem.eql(u8, tiled[0..tiled_len], tiled2[0..tiled2_len])) {
+            std.debug.print("conformance: FAIL 3D tiled capture is not deterministic ({s})\n", .{case.lens});
+            return false;
+        }
+
+        if (case.exact) {
+            if (!std.mem.eql(u8, whole[0..whole_len], tiled[0..tiled_len])) {
+                std.debug.print("conformance: FAIL 3D mesh tiled is not byte-identical to the single target ({s})\n", .{case.lens});
+                return false;
+            }
+        } else {
+            const dec_whole = image_adapter.decode(gpa, whole[0..whole_len]) catch return false;
+            defer gpa.free(dec_whole.rgba);
+            const dec_tiled = image_adapter.decode(gpa, tiled[0..tiled_len]) catch return false;
+            defer gpa.free(dec_tiled.rgba);
+            var total_error: u64 = 0;
+            var differing: u64 = 0;
+            for (dec_whole.rgba, dec_tiled.rgba) |a, b| {
+                const d = @abs(@as(i32, a) - @as(i32, b));
+                total_error += @intCast(d);
+                if (d != 0) differing += 1;
+            }
+            const mean_error = @as(f64, @floatFromInt(total_error)) / @as(f64, @floatFromInt(dec_whole.rgba.len));
+            const differing_frac = @as(f64, @floatFromInt(differing)) / @as(f64, @floatFromInt(dec_whole.rgba.len));
+            if (mean_error > 0.5 or differing_frac > 0.02) {
+                std.debug.print("conformance: FAIL 3D particle tiled diverges (mean {d:.3}, {d:.2}% differ) ({s})\n", .{ mean_error, differing_frac * 100.0, case.lens });
+                return false;
+            }
+        }
+    }
+
+    std.debug.print("conformance: PROOF 3D content tiles past the texture cap through per-tile sub-frustums: cloth mesh byte-identical to the single target, particles deterministic and within a sub-pixel of it - full-AR stills\n", .{});
+    return true;
+}
+
 /// Proves the engine's own photo encoding and color management: the
 /// built-in JPEG decodes back through the platform and is deterministic,
 /// a wide-gamut PNG carries cHRM/gAMA and a wide-gamut JPEG carries an
@@ -2716,6 +2819,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveHairSim(gpa, engine)) return 1;
     if (!try proveHighResCapture(gpa, engine)) return 1;
     if (!try proveTiledCapture(gpa, engine)) return 1;
+    if (!try prove3DTiledCapture(gpa, engine)) return 1;
     if (!try proveColorManagedCapture(gpa, engine)) return 1;
     if (!try proveScript(gpa, engine)) return 1;
     if (!try proveAudio(gpa, engine)) return 1;

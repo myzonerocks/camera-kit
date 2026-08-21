@@ -1216,7 +1216,7 @@ pub const Renderer = struct {
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
         const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
-        const proj = math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one);
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
         c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
         const model = math.Mat4.identity;
         _ = c.bgfx_set_transform(&model.cols, 1);
@@ -1235,7 +1235,7 @@ pub const Renderer = struct {
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
         const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
-        const proj = math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one);
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
         c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
         const model = math.Mat4.identity;
         _ = c.bgfx_set_transform(&model.cols, 1);
@@ -1289,12 +1289,29 @@ pub const Renderer = struct {
         return r.default_sprite_texture;
     }
 
+    /// Applies the active capture tile as an off-center sub-frustum crop
+    /// on a 3D projection, so a tiled 3D draw rasterizes only its tile's
+    /// slice at the tile's resolution. The 2D passes crop by UV; 3D
+    /// content crops in clip space, off the same tile rect.
+    fn tiledProjection(r: *const Renderer, base: math.Mat4) math.Mat4 {
+        const tl = r.tile orelse return base;
+        const uw = tl.u1 - tl.u0;
+        const vh = tl.v1 - tl.v0;
+        const crop: math.Mat4 = .{ .cols = .{
+            .{ 1.0 / uw, 0.0, 0.0, 0.0 },
+            .{ 0.0, 1.0 / vh, 0.0, 0.0 },
+            .{ 0.0, 0.0, 1.0, 0.0 },
+            .{ (1.0 - tl.u0 - tl.u1) / uw, (tl.v0 + tl.v1 - 1.0) / vh, 0.0, 1.0 },
+        } };
+        return crop.mul(base);
+    }
+
     pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, particle_params: [4]f32, particle_fx: [4]f32, glow: bool, sprite_texture: c.bgfx_texture_handle_t) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
         const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
-        const proj = math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one);
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
         c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
         const model = math.Mat4.identity;
         _ = c.bgfx_set_transform(&model.cols, 1);
@@ -1335,7 +1352,7 @@ pub const Renderer = struct {
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
         const view = math.Mat4.lookAt(eye, .{ 0.0, 0.0, 0.0 }, .{ 0.0, 1.0, 0.0 });
-        const proj = math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one);
+        const proj = r.tiledProjection(math.Mat4.perspective(math.scalar.radians(45.0), aspect_ratio, 0.1, 10.0, .zero_to_one));
         c.bgfx_set_view_transform(mesh_view, &view.cols, &proj.cols);
         _ = c.bgfx_set_transform(&model_matrix.cols, 1);
         c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
@@ -1351,7 +1368,8 @@ pub const Renderer = struct {
     pub fn submitModelWithCamera(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ModelMesh, model_matrix: math.Mat4, view: math.Mat4, projection: math.Mat4, base_color: [4]f32) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
-        c.bgfx_set_view_transform(mesh_view, &view.cols, &projection.cols);
+        const projection_tiled = r.tiledProjection(projection);
+        c.bgfx_set_view_transform(mesh_view, &view.cols, &projection_tiled.cols);
         _ = c.bgfx_set_transform(&model_matrix.cols, 1);
         c.bgfx_set_vertex_buffer(0, mesh.vertex_buffer, 0, std.math.maxInt(u32));
         c.bgfx_set_index_buffer(mesh.index_buffer, 0, mesh.index_count);
