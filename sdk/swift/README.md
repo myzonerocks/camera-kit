@@ -9,6 +9,10 @@ This SDK owns capture ingress, GPU surface handoff, and platform
 tracking. The frame graph, lens runtime, and effect pipeline live in the
 core.
 
+[docs/INTEGRATION-iOS.md](../../docs/INTEGRATION-iOS.md) is the start-to-finish
+guide: build the slices, add the package, set the two search paths, and the
+minimal render loop.
+
 ## Install
 
 ```swift
