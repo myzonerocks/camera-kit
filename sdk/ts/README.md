@@ -2,7 +2,7 @@
 
 TypeScript SDK for [Gosslens](../../include/gosslens.h), a camera engine
 with a Zig core behind one C ABI, compiled to `wasm32`. Wraps it as
-`Engine`, `Session`, and `Gosslens` — the same names the
+`GossEngine`, `GossSession`, and `Gosslens` — the same names the
 [Swift](../swift/README.md) and [Kotlin](../kotlin/README.md) SDKs use.
 
 This SDK owns camera capture through `getUserMedia`, the render loop,
@@ -23,12 +23,12 @@ point at - not bundled, since WebGPU and WebGL2 are separate artifacts
 ## Use
 
 ```ts
-import { Gosslens, Engine, Session, PreviewSession } from "@gosslens/core";
+import { Gosslens, GossEngine, GossSession, GossPreviewSession } from "@gosslens/core";
 
 const gosslens = await Gosslens.load(canvas, wasmJsUrl);
-const engine = Engine.create(gosslens);
+const engine = GossEngine.create(gosslens);
 await engine.initRenderer(canvas);
-const session = Session.create(engine);
+const session = GossSession.create(engine);
 
 session.submitFrameRgbaCopy(rgba, width * 4, width, height);
 engine.renderFrame(session);
@@ -37,7 +37,7 @@ session.setWhiten(0.6);
 session.activateLens(manifestJson);
 ```
 
-`PreviewSession.create(canvas, wasmJsUrl, events)` does all three setup
+`GossPreviewSession.create(canvas, wasmJsUrl, events)` does all three setup
 steps and owns the capture loop too — most app code wants this one.
 
 WebGPU and WebGL2 are two separate build artifacts, not a runtime
@@ -47,11 +47,11 @@ adapter.
 Capture reads a PNG back, and world tracking feeds WebXR frames in:
 
 ```ts
-import { WebXRWorldSource } from "@gosslens/core";
+import { GossWebXRWorldSource } from "@gosslens/core";
 
 const png = await engine.captureFrame(session);   // data URL
 
-const world = new WebXRWorldSource(session);
+const world = new GossWebXRWorldSource(session);
 // in the XR animation loop:
 world.onFrame(xrFrame, referenceSpace, timestampUs);
 ```

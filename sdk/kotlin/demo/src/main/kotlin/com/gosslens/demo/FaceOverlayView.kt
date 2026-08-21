@@ -5,31 +5,31 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.view.View
-import com.gosslens.FaceResult
-import com.gosslens.HandResult
-import com.gosslens.PoseResult
-import com.gosslens.Session
+import com.gosslens.GossFaceResult
+import com.gosslens.GossHandResult
+import com.gosslens.GossPoseResult
+import com.gosslens.GossSession
 
 /** Draws the latest tracking result over the preview. Landmarks arrive in
  * sensor pixels; the view rotates them by the frame's quarter turns and
  * scales into its own bounds, the same mapping the preview quad uses. */
 class FaceOverlayView(context: Context) : View(context) {
-    private val result = FaceResult()
+    private val result = GossFaceResult()
     private var hasResult = false
     private var lastSerial = 0L
 
     /** The latest polled result and whether one has ever arrived - read
      * by MainActivity to drive the active lens's face-present signal. */
-    val latestFaceResult: FaceResult get() = result
+    val latestFaceResult: GossFaceResult get() = result
     val hasFaceResult: Boolean get() = hasResult
 
-    private val hands = HandResult()
+    private val hands = GossHandResult()
     private var lastHandSerial = 0L
 
     /** Read by MainActivity to drive the lens's hands-present signal. */
     val handCount: Int get() = hands.handCount
 
-    private val body = PoseResult()
+    private val body = GossPoseResult()
     private var lastPoseSerial = 0L
 
     private var frameWidth = 0
@@ -54,7 +54,7 @@ class FaceOverlayView(context: Context) : View(context) {
     }
 
     /** Called once per render tick from the choreographer thread. */
-    fun poll(session: Session) {
+    fun poll(session: GossSession) {
         var fresh = false
         if (session.faceResult(result) && result.frameSerial != lastSerial) {
             lastSerial = result.frameSerial

@@ -2,7 +2,7 @@
 /// planes, and tracked anchors off each XR frame and feeds them into
 /// the session. The page owns the XR session; this source only reads.
 
-import type { Session, WorldPlane, WorldAnchorInput } from "./index";
+import type { GossSession, GossWorldPlane, GossWorldAnchorInput } from "./index";
 
 // WebXR's types live outside the DOM lib; the narrow slice this source
 // reads is declared here so no type package enters the build.
@@ -32,23 +32,23 @@ interface XRPoseLike {
   transform: XRRigidTransformLike;
 }
 
-export interface XRFrameLike {
+export interface GossXRFrameLike {
   getViewerPose(referenceSpace: unknown): XRViewerPoseLike | null;
   getPose(space: unknown, referenceSpace: unknown): XRPoseLike | null;
   detectedPlanes?: Set<XRPlaneLike>;
   trackedAnchors?: Set<XRAnchorLike>;
 }
 
-export class WebXRWorldSource {
+export class GossWebXRWorldSource {
   private planeIds = new Map<XRPlaneLike, number>();
   private anchorIds = new Map<XRAnchorLike, number>();
   private nextId = 1;
 
-  constructor(private readonly session: Session) {}
+  constructor(private readonly session: GossSession) {}
 
   /// Call once per XR animation frame with the frame and the reference
   /// space the page renders against.
-  onFrame(frame: XRFrameLike, referenceSpace: unknown, timestampUs: number): void {
+  onFrame(frame: GossXRFrameLike, referenceSpace: unknown, timestampUs: number): void {
     const viewer = frame.getViewerPose(referenceSpace);
     if (!viewer || viewer.views.length === 0) {
       this.session.submitWorld({
@@ -60,7 +60,7 @@ export class WebXRWorldSource {
       return;
     }
 
-    const planes: WorldPlane[] = [];
+    const planes: GossWorldPlane[] = [];
     if (frame.detectedPlanes) {
       for (const plane of frame.detectedPlanes) {
         const pose = frame.getPose(plane.planeSpace, referenceSpace);
@@ -74,7 +74,7 @@ export class WebXRWorldSource {
         });
       }
     }
-    const anchors: WorldAnchorInput[] = [];
+    const anchors: GossWorldAnchorInput[] = [];
     if (frame.trackedAnchors) {
       for (const anchor of frame.trackedAnchors) {
         const pose = frame.getPose(anchor.anchorSpace, referenceSpace);

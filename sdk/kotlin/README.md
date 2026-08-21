@@ -1,7 +1,7 @@
 # Gosslens — Kotlin SDK
 
 Kotlin SDK for [Gosslens](../../include/gosslens.h), a camera engine with a
-Zig core behind one C ABI. Wraps it as `Engine`, `Session`, and
+Zig core behind one C ABI. Wraps it as `GossEngine`, `GossSession`, and
 `Gosslens` — the same names the [Swift](../swift/README.md) and
 [TypeScript](../ts/README.md) SDKs use.
 
@@ -34,10 +34,10 @@ dependencies {
 ## Use
 
 ```kotlin
-val engine = Engine.create()
+val engine = GossEngine.create()
 engine.initRenderer(surface, width, height)
 
-val session = Session.create(engine)
+val session = GossSession.create(engine)
 session.enableBeauty(resourceDir)
 
 session.submitFrameCopy(yBuffer, yStride, uvBuffer, uvStride, width, height, rotationDegrees = 90, mirrored = false, timestampUs)

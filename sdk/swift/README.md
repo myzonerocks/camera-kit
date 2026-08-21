@@ -1,7 +1,7 @@
 # Gosslens — Swift SDK
 
 Swift SDK for [Gosslens](../../include/gosslens.h), a camera engine with a
-Zig core behind one C ABI. Wraps it as `Engine`, `Session`, and
+Zig core behind one C ABI. Wraps it as `GossEngine`, `GossSession`, and
 `Gosslens` — the same names the [Kotlin](../kotlin/README.md) and
 [TypeScript](../ts/README.md) SDKs use.
 
@@ -30,13 +30,13 @@ produces the native `.a` archives, and your app target needs its own
 ## Use
 
 ```swift
-let engine = try Engine.create()
+let engine = try GossEngine.create()
 try engine.initRenderer(surface: metalLayer, width: width, height: height)
 
-let session = try Session.create(engine: engine)
+let session = try GossSession.create(engine: engine)
 try session.enableBeauty(resourceDir: Bundle.main.bundlePath)
 
-let desc = FrameDesc(
+let desc = GossFrameDesc(
     width: width, height: height, pixelFormat: .nv12,
     rotationDegrees: 90, timestampUs: timestampUs
 )
@@ -56,9 +56,9 @@ session:
 ```swift
 let photo = try engine.capturePhoto(session: session)             // preview-res PNG
 let still = try engine.captureStill(session: session,             // full-res, supersampled
-    config: Engine.StillConfig(width: 8064, height: 6048, supersample: 2))
+    config: GossEngine.StillConfig(width: 8064, height: 6048, supersample: 2))
 let wide = try engine.captureStill(session: session,             // Display-P3, 16-bit PNG
-    config: Engine.StillConfig(colorSpace: .displayP3, bitDepth: 16))
+    config: GossEngine.StillConfig(colorSpace: .displayP3, bitDepth: 16))
 let jpeg = try engine.capturePhoto(session: session, as: .jpeg, quality: 92)
 
 try engine.startRecording(session: session, path: outPath, hevc: true)
@@ -66,7 +66,7 @@ try engine.submitAudio(session: session, samples: pcm, frameCount: n,
                        sampleRate: 48000, channels: 1, timestampUs: ts)
 try engine.stopRecording()
 
-let world = WorldSource(session: session)   // ARKit, an ARSessionDelegate
+let world = GossWorldSource(session: session)   // ARKit, an ARSessionDelegate
 arSession.delegate = world
 world.start()
 ```

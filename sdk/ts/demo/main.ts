@@ -1,5 +1,5 @@
-import { PreviewSession, pickEngineUrl } from "../src/index.ts";
-import { FACE_LANDMARK_COUNT } from "../src/tracking.ts";
+import { GossPreviewSession, pickEngineUrl } from "../src/index.ts";
+import { GOSS_FACE_LANDMARK_COUNT } from "../src/tracking.ts";
 
 const status = document.getElementById("status")!;
 const canvas = document.getElementById("preview") as HTMLCanvasElement;
@@ -84,7 +84,7 @@ function drawOverlay(reply: TrackingReply, frameWidth: number, frameHeight: numb
   }
 }
 
-async function startTracking(preview: PreviewSession): Promise<void> {
+async function startTracking(preview: GossPreviewSession): Promise<void> {
   const link = await TrackerLink.create();
   const scratch = document.createElement("canvas");
   const ctx = scratch.getContext("2d", { willReadFrequently: true })!;
@@ -163,7 +163,7 @@ async function startTracking(preview: PreviewSession): Promise<void> {
     return {
       presence: reply.presence,
       landmarkCount: reply.landmarkCount,
-      expected: FACE_LANDMARK_COUNT,
+      expected: GOSS_FACE_LANDMARK_COUNT,
     };
   };
   // Same still-image path, but for reshape's own proof: tracks the image
@@ -197,7 +197,7 @@ async function run(): Promise<void> {
   const forcedEngine = new URLSearchParams(location.search).get("engine");
   const wasmJsUrl =
     forcedEngine === "webgpu" ? webgpuUrl : forcedEngine === "webgl2" ? webgl2Url : await pickEngineUrl(webgpuUrl, webgl2Url);
-  const preview = await PreviewSession.create(canvas, wasmJsUrl, {
+  const preview = await GossPreviewSession.create(canvas, wasmJsUrl, {
     onState(state) {
       status.textContent = `capture ${state}`;
       document.title = `gosslens ${state}`;

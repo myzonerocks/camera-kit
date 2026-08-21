@@ -5,13 +5,13 @@ import CGosslens
 /// Feeds ARKit's world understanding into the engine: camera pose and
 /// projection, plane anchors, world anchors, and the light estimate,
 /// one submit per rendered AR frame.
-public final class WorldSource: NSObject, ARSessionDelegate {
+public final class GossWorldSource: NSObject, ARSessionDelegate {
     private let arSession = ARSession()
-    private weak var engineSession: Session?
+    private weak var engineSession: GossSession?
     private var planes: [goss_world_plane] = []
     private var anchors: [goss_world_anchor] = []
 
-    public init(session: Session) {
+    public init(session: GossSession) {
         self.engineSession = session
         super.init()
         arSession.delegate = self

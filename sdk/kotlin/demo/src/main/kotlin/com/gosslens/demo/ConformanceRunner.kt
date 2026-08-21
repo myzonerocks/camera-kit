@@ -8,15 +8,15 @@ import android.view.Surface
 import java.io.File
 import java.nio.ByteBuffer
 import java.security.MessageDigest
-import com.gosslens.Engine
+import com.gosslens.GossEngine
 import com.gosslens.Gosslens
-import com.gosslens.Session
+import com.gosslens.GossSession
 
 // Mirrors harness/conformance.zig's own determinism check (the same
 // reference lens, the same corpus frame, rendered twice through the
 // real ABI, byte-identical screenshots) but driven from the real Kotlin
 // SDK instead of a desktop GLFW window - the same real
-// Engine.initRenderer/Session.activateLens/Engine.renderFrame path
+// GossEngine.initRenderer/GossSession.activateLens/GossEngine.renderFrame path
 // MainActivity's live preview already runs, just fed a bundled corpus
 // frame instead of the camera. Reached only behind the GossConformance
 // intent extra; a normal launch never touches this file. Emulator
@@ -148,10 +148,10 @@ object ConformanceRunner {
     // own renderOnce - proves activation and teardown aren't hiding state
     // that would make a second run trivially match the first.
     private fun renderOnce(context: Context, surface: Surface, width: Int, height: Int, corpus: Nv12Corpus, outPath: String): String? {
-        val engine = Engine.create()
+        val engine = GossEngine.create()
         try {
             engine.initRenderer(surface, width, height)
-            val session = Session.create(engine)
+            val session = GossSession.create(engine)
             try {
                 val resourceRoot = extractBeautyResources(context) ?: return null
                 if (!session.enableBeauty(resourceRoot)) return null

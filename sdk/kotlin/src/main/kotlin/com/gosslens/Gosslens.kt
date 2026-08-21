@@ -5,7 +5,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 // The Kotlin face of the goss_ ABI. The native names mirror the C surface one
-// to one and carry no logic; Session and Engine below are the idiomatic
+// to one and carry no logic; GossSession and GossEngine below are the idiomatic
 // wrappers the app consumes.
 object Gosslens {
     init {
@@ -134,24 +134,24 @@ object Gosslens {
 
 /** Pool capacities for the engine's texture and staging pools; the
  * core clamps and defaults exactly as the C config does. */
-data class EngineConfig(val texturePoolCapacity: Int, val stagingPoolCapacity: Int)
+data class GossEngineConfig(val texturePoolCapacity: Int, val stagingPoolCapacity: Int)
 
 /** frameBudgetUs is the whole-pipeline frame time the degradation
  * policy holds the session to; zero means the built-in 30 fps budget. */
-data class SessionConfig(val frameBudgetUs: Int)
+data class GossSessionConfig(val frameBudgetUs: Int)
 
-class Engine private constructor(internal val handle: Long) : AutoCloseable {
+class GossEngine private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
 
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
-        fun create(config: EngineConfig? = null): Engine {
+        fun create(config: GossEngineConfig? = null): GossEngine {
             val handle = Gosslens.nativeEngineCreate(
                 config?.texturePoolCapacity ?: -1,
                 config?.stagingPoolCapacity ?: -1,
             )
             check(handle != 0L) { "engine create failed" }
-            return Engine(handle)
+            return GossEngine(handle)
         }
     }
 
@@ -173,13 +173,13 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
         return Gosslens.nativeRequestScreenshot(handle, buffer, bytes.size) == 0
     }
 
-    fun renderFrame(session: Session?): Boolean =
+    fun renderFrame(session: GossSession?): Boolean =
         Gosslens.nativeRenderFrame(handle, session?.handle ?: 0L) == 0
 
     /** Starts recording the session's rendered frames, effects baked
      * in, into an MP4 at [path]. One recording per engine; every
      * rendered frame appends until [stopRecording]. */
-    fun startRecording(session: Session, path: String, width: Int = 0, height: Int = 0, bitrate: Int = 0, hevc: Boolean = false): Boolean {
+    fun startRecording(session: GossSession, path: String, width: Int = 0, height: Int = 0, bitrate: Int = 0, hevc: Boolean = false): Boolean {
         val bytes = path.toByteArray(Charsets.UTF_8)
         val buffer = ByteBuffer.allocateDirect(bytes.size)
         buffer.put(bytes)
@@ -195,14 +195,14 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
      * and beat analysis drives audio triggers, and an active recording
      * muxes it where the backend supports audio. [samples] is a direct
      * float buffer. */
-    fun submitAudio(session: Session, samples: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Boolean =
+    fun submitAudio(session: GossSession, samples: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int, timestampUs: Long): Boolean =
         Gosslens.nativeSubmitAudio(session.handle, samples, frameCount, sampleRate, channels, timestampUs) == 0
 
     /** Renders like renderFrame and returns the composited output
      * encoded as PNG bytes, sized by a probe call first. Deterministic:
      * the same composited pixels, the same bytes. Null when the
      * renderer is unavailable. */
-    fun capturePhoto(session: Session?): ByteArray? {
+    fun capturePhoto(session: GossSession?): ByteArray? {
         val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
         val probe = ByteBuffer.allocateDirect(1)
         val probeStatus = Gosslens.nativeCapturePhoto(handle, session?.handle ?: 0L, probe, 0L, info)
@@ -220,7 +220,7 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
      * requested resolution, encoded as PNG (0), JPEG (1) or HEIC (2).
      * colorSpace tags the gamut (0 sRGB, 1 P3, 2 Rec2020); bitDepth 16 is
      * the PNG high-bit-depth path. Null when the renderer/backend is away. */
-    fun captureStill(session: Session?, width: Int = 0, height: Int = 0, supersample: Int = 0, format: Int = 0, quality: Int = 0, colorSpace: Int = 0, bitDepth: Int = 8): ByteArray? {
+    fun captureStill(session: GossSession?, width: Int = 0, height: Int = 0, supersample: Int = 0, format: Int = 0, quality: Int = 0, colorSpace: Int = 0, bitDepth: Int = 8): ByteArray? {
         val info = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
         val probe = ByteBuffer.allocateDirect(1)
         val probeStatus = Gosslens.nativeCaptureStill(handle, session?.handle ?: 0L, width, height, supersample, format, quality, colorSpace, bitDepth, probe, 0L, info)
@@ -246,7 +246,7 @@ class Engine private constructor(internal val handle: Long) : AutoCloseable {
 /** One tracking result read back from the core. The buffer mirrors the
  * frozen C layout; parse() lifts the fields into Kotlin values without
  * allocating per frame. */
-class FaceResult {
+class GossFaceResult {
     internal val buffer: ByteBuffer =
         ByteBuffer.allocateDirect(Gosslens.FACE_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
@@ -277,7 +277,7 @@ class FaceResult {
  * (booleans and a reserved byte, then the padding to the first double
  * at offset 8, then blendshapes at offset 24) - absolute puts, not
  * relative, so this doesn't depend on writing the padding by hand. */
-class LensSignals {
+class GossLensSignals {
     internal val buffer: ByteBuffer =
         ByteBuffer.allocateDirect(Gosslens.LENS_SIGNALS_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
@@ -304,7 +304,7 @@ class LensSignals {
  * allocating per frame. handedness is the model's score that the hand
  * is a right hand; gestures hold GESTURE_* classes, NONE when the
  * enabled bundle carries no gesture models. */
-class HandResult {
+class GossHandResult {
     internal val buffer: ByteBuffer =
         ByteBuffer.allocateDirect(Gosslens.HAND_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
@@ -341,7 +341,7 @@ class HandResult {
 /** One reusable pose tracking readout. The buffer mirrors the frozen C
  * layout; parse() lifts the fields into flat arrays without allocating
  * per frame. */
-class PoseResult {
+class GossPoseResult {
     internal val buffer: ByteBuffer =
         ByteBuffer.allocateDirect(Gosslens.POSE_RESULT_BYTES).order(java.nio.ByteOrder.nativeOrder())
 
@@ -369,15 +369,15 @@ class PoseResult {
     }
 }
 
-class Session private constructor(internal val handle: Long) : AutoCloseable {
+class GossSession private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
 
     companion object {
         /** Null config means the core's own defaults, same as C's null. */
-        fun create(engine: Engine, config: SessionConfig? = null): Session {
+        fun create(engine: GossEngine, config: GossSessionConfig? = null): GossSession {
             val handle = Gosslens.nativeSessionCreate(engine.handle, config?.frameBudgetUs ?: -1)
             check(handle != 0L) { "session create failed" }
-            return Session(handle)
+            return GossSession(handle)
         }
     }
 
@@ -426,7 +426,7 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
 
     /** Fills [result] with the newest pose tracking output; false until
      * the worker publishes its first result. */
-    fun poseResult(result: PoseResult): Boolean {
+    fun poseResult(result: GossPoseResult): Boolean {
         val status = Gosslens.nativePoseResult(handle, result.buffer)
         if (status != 0) return false
         result.parse()
@@ -448,7 +448,7 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
 
     /** Fills [result] with the newest hand tracking output; false until
      * the worker publishes its first result. */
-    fun handResult(result: HandResult): Boolean {
+    fun handResult(result: GossHandResult): Boolean {
         val status = Gosslens.nativeHandResult(handle, result.buffer)
         if (status != 0) return false
         result.parse()
@@ -499,7 +499,7 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
 
     /** Fills [result] with the newest tracking output; false until the
      * worker publishes its first result. */
-    fun faceResult(result: FaceResult): Boolean {
+    fun faceResult(result: GossFaceResult): Boolean {
         val status = Gosslens.nativeFaceResult(handle, result.buffer)
         if (status != 0) return false
         result.parse()
@@ -529,7 +529,7 @@ class Session private constructor(internal val handle: Long) : AutoCloseable {
     /** Advances the active lens by [dtUs] of real time and applies
      * whatever effect values its triggers/ramps changed to the beauty
      * chain, if one is enabled. False with no active lens. */
-    fun tickLens(dtUs: Int, signals: LensSignals): Boolean =
+    fun tickLens(dtUs: Int, signals: GossLensSignals): Boolean =
         Gosslens.nativeTickLens(handle, dtUs, signals.buffer) == 0
 
     /** Reads a live parameter of the active lens by name, including whatever

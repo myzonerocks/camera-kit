@@ -3,7 +3,7 @@ import CGosslens
 /// One reusable tracking readout. landmarks holds landmarkCount * 3
 /// valid floats (x, y in frame pixels, z in the same scale); blendshapes
 /// holds 52 scores in zero to one. landmarkCount zero means no face.
-public final class FaceResult {
+public final class GossFaceResult {
     public private(set) var frameSerial: UInt64 = 0
     public private(set) var timestampUs: Int64 = 0
     public private(set) var presence: Float = 0
@@ -36,7 +36,7 @@ public final class FaceResult {
 
 /// A canned gesture class, in the classifier's own label order. none is
 /// also what a bundle without gesture models reports.
-public enum Gesture: UInt32 {
+public enum GossGesture: UInt32 {
     case none = 0
     case closedFist = 1
     case openPalm = 2
@@ -50,7 +50,7 @@ public enum Gesture: UInt32 {
 /// One reusable hand tracking readout, up to two hands per frame.
 /// handedness is the model's score that the hand is a right hand; hand
 /// h's point p sits at (h * landmarkCount + p) * 3 in landmarks.
-public final class HandResult {
+public final class GossHandResult {
     public static let landmarkCount = Int(GOSS_HAND_LANDMARK_COUNT)
     public static let maxHands = Int(GOSS_HAND_MAX)
 
@@ -59,7 +59,7 @@ public final class HandResult {
     public private(set) var handCount: Int = 0
     public private(set) var presences: [Float]
     public private(set) var handednesses: [Float]
-    public private(set) var gestures: [Gesture]
+    public private(set) var gestures: [GossGesture]
     public private(set) var gestureScores: [Float]
     public private(set) var landmarks: [Float]
 
@@ -68,7 +68,7 @@ public final class HandResult {
     public init() {
         presences = [Float](repeating: 0, count: Self.maxHands)
         handednesses = [Float](repeating: 0, count: Self.maxHands)
-        gestures = [Gesture](repeating: .none, count: Self.maxHands)
+        gestures = [GossGesture](repeating: .none, count: Self.maxHands)
         gestureScores = [Float](repeating: 0, count: Self.maxHands)
         landmarks = [Float](repeating: 0, count: Self.maxHands * Self.landmarkCount * 3)
     }
@@ -85,7 +85,7 @@ public final class HandResult {
                 let base = at * MemoryLayout<goss_hand>.stride
                 presences[at] = source.loadUnaligned(fromByteOffset: base, as: Float.self)
                 handednesses[at] = source.loadUnaligned(fromByteOffset: base + 4, as: Float.self)
-                gestures[at] = Gesture(rawValue: source.loadUnaligned(fromByteOffset: base + 8, as: UInt32.self)) ?? .none
+                gestures[at] = GossGesture(rawValue: source.loadUnaligned(fromByteOffset: base + 8, as: UInt32.self)) ?? .none
                 gestureScores[at] = source.loadUnaligned(fromByteOffset: base + 12, as: Float.self)
                 landmarks.withUnsafeMutableBytes { dest in
                     dest.baseAddress!.advanced(by: at * landmark_floats * 4)
@@ -98,7 +98,7 @@ public final class HandResult {
 
 /// One reusable pose tracking readout: a 33-point skeleton with
 /// per-point visibility and presence scores.
-public final class PoseResult {
+public final class GossPoseResult {
     public static let landmarkCount = Int(GOSS_POSE_LANDMARK_COUNT)
 
     public private(set) var frameSerial: UInt64 = 0
@@ -136,26 +136,26 @@ public final class PoseResult {
     }
 }
 
-/// Tracking/telemetry readouts, reached directly off Session rather
+/// Tracking/telemetry readouts, reached directly off GossSession rather
 /// than their own handle type.
-extension Session {
+extension GossSession {
     /// Fills result with the newest tracking output. Throws .again until
     /// the tracking worker has published its first result.
-    public func faceResult(_ result: FaceResult) throws {
+    public func faceResult(_ result: GossFaceResult) throws {
         try checked(goss_session_face_result(handle, &result.raw))
         result.parse()
     }
 
     /// Fills result with the newest hand tracking output. Throws .again
     /// until the hand worker has published its first result.
-    public func handResult(_ result: HandResult) throws {
+    public func handResult(_ result: GossHandResult) throws {
         try checked(goss_session_hand_result(handle, &result.raw))
         result.parse()
     }
 
     /// Fills result with the newest pose tracking output. Throws .again
     /// until the pose worker has published its first result.
-    public func poseResult(_ result: PoseResult) throws {
+    public func poseResult(_ result: GossPoseResult) throws {
         try checked(goss_session_pose_result(handle, &result.raw))
         result.parse()
     }
@@ -171,7 +171,7 @@ extension Session {
     }
 
     /// The degradation level currently in effect.
-    public func degradeLevel() -> DegradeLevel {
-        DegradeLevel(rawValue: goss_session_degrade_level(handle).rawValue) ?? .passthrough
+    public func degradeLevel() -> GossDegradeLevel {
+        GossDegradeLevel(rawValue: goss_session_degrade_level(handle).rawValue) ?? .passthrough
     }
 }

@@ -11,8 +11,8 @@ CaptureOutput, Events.
 | Preview render | demonstrated on device | built, no hardware yet | demonstrated in browser |
 | Face tracking | demonstrated on device | built, no hardware yet | demonstrated in browser |
 | Segmentation | proven in the host harness, multiclass with per-class lens channels | built, no hardware yet | demonstrated in browser, the sync segmentation core on the wasm tracking module, subject and per-class channels fed back through set_segmentation_mask and set_segmentation_class_mask |
-| Pose tracking | proven in the host harness | built, no hardware yet | demonstrated in browser, the pose pipeline on the wasm tracking module, read through a PoseTracker |
-| Hand tracking (landmarks, handedness, gestures) | proven in the host harness | built, no hardware yet | demonstrated in browser, the hand pipeline on the wasm tracking module, read through a HandTracker |
+| Pose tracking | proven in the host harness | built, no hardware yet | demonstrated in browser, the pose pipeline on the wasm tracking module, read through a GossPoseTracker |
+| Hand tracking (landmarks, handedness, gestures) | proven in the host harness | built, no hardware yet | demonstrated in browser, the hand pipeline on the wasm tracking module, read through a GossHandTracker |
 | Beauty (six effects) | demonstrated on device | built, no hardware yet | demonstrated in browser |
 | Lens runtime | demonstrated on device | built, no hardware yet | demonstrated in browser, beauty-baseline only |
 | Photo capture (deterministic PNG) | proven in the host harness | built, no hardware yet | not wired |
