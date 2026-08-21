@@ -15,6 +15,9 @@ pub const Field = struct {
     /// Rendering hint the sim ignores: the rgb a point cools toward as it
     /// dies. Null holds the draw colour for the whole life.
     cool: ?[3]f32 = null,
+    /// Rendering hint the sim ignores: fading sprite size in pixels; 0 lets
+    /// the caller pick a visible default.
+    size: u32 = 0,
 };
 
 pub const Particle = struct {
@@ -82,19 +85,23 @@ pub const System = struct {
         }
     }
 
-    /// Writes xyz plus the remaining-life fraction (1 at birth, 0 at death)
-    /// per particle into out (count * 5 floats: position, life, 0), matching
-    /// the shared vertex layout, so a fading particle program can dim each
-    /// point as it ages rather than popping it out.
-    pub fn writeFaded(self: *const System, out: []f32) void {
+    /// Writes six vertices per particle (two triangles of a camera-facing
+    /// quad) into out (count * 6 * 5 floats), each vertex carrying the
+    /// particle centre, its remaining-life fraction, and a corner index
+    /// 0..3 the billboard shader expands into the quad's four corners.
+    pub fn writeBillboards(self: *const System, out: []f32) void {
         const lifetime = @max(self.field.lifetime, 1e-6);
+        const corners = [6]f32{ 0, 1, 2, 0, 2, 3 };
         for (self.particles, 0..) |p, i| {
             const frac = std.math.clamp(p.life / lifetime, 0.0, 1.0);
-            out[i * 5 + 0] = p.pos[0];
-            out[i * 5 + 1] = p.pos[1];
-            out[i * 5 + 2] = p.pos[2];
-            out[i * 5 + 3] = frac;
-            out[i * 5 + 4] = 0.0;
+            for (corners, 0..) |corner, k| {
+                const base = (i * 6 + k) * 5;
+                out[base + 0] = p.pos[0];
+                out[base + 1] = p.pos[1];
+                out[base + 2] = p.pos[2];
+                out[base + 3] = frac;
+                out[base + 4] = corner;
+            }
         }
     }
 };

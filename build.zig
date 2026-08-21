@@ -3988,10 +3988,11 @@ fn addShaderBlobs(b: *std.Build, shaderc_exe: *std.Build.Step.Compile, target: s
         // fill, same reasoning as fs_lut_pass above - pairs with the
         // shared vs_lens_pass.sc vertex contract, not its own stage.
         .{ .name = "fs_model", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
-        // A fading particle point's fragment shader: model colour with its
-        // alpha scaled by remaining life, same reasoning as fs_lut_pass and
-        // reusing vs_lens_pass too.
-        .{ .name = "fs_particle", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying.def.sc" },
+        // A camera-facing particle sprite: its own vertex stage expands each
+        // centre into a quad corner, so it carries its own varying def (a
+        // corner and life, not the shared texcoord).
+        .{ .name = "vs_billboard", .kind = "vertex", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_billboard.def.sc" },
+        .{ .name = "fs_billboard", .kind = "fragment", .source_dir = "lenses/shaders", .varyingdef = "lenses/shaders/varying_billboard.def.sc" },
     };
     const profiles = [_]struct { profile: []const u8, platform: []const u8, tag: []const u8 }{
         .{ .profile = "metal", .platform = "ios", .tag = "metal" },

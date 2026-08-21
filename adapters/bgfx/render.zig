@@ -108,7 +108,7 @@ pub const Renderer = struct {
     beauty_reshape_program: c.bgfx_program_handle_t,
     makeup_program: c.bgfx_program_handle_t,
     model_program: c.bgfx_program_handle_t,
-    particle_fade_program: c.bgfx_program_handle_t,
+    billboard_program: c.bgfx_program_handle_t,
     /// The 176-triangle face-makeup mesh's fixed index buffer -
     /// makeup_mesh.triangle_indices, uploaded once, never changes.
     makeup_index_buffer: c.bgfx_index_buffer_handle_t,
@@ -150,6 +150,7 @@ pub const Renderer = struct {
     face_points_uniform: c.bgfx_uniform_handle_t,
     model_color_uniform: c.bgfx_uniform_handle_t,
     particle_cool_uniform: c.bgfx_uniform_handle_t,
+    particle_size_uniform: c.bgfx_uniform_handle_t,
     /// Solid white 1x1: blend.pass's mask input when segmentation is
     /// unavailable. A mask of 1.0 everywhere means "always foreground,"
     /// so binding this reproduces the SPEC's degradation rule exactly -
@@ -277,7 +278,7 @@ pub const Renderer = struct {
         const beauty_reshape_program = try loadBeautyReshapeProgram();
         const makeup_program = try loadMakeupProgram();
         const model_program = try loadModelProgram();
-        const particle_fade_program = try loadParticleProgram();
+        const billboard_program = try loadBillboardProgram();
 
         var makeup_position_layout: c.bgfx_vertex_layout_t = undefined;
         _ = c.bgfx_vertex_layout_begin(&makeup_position_layout, c.BGFX_RENDERER_TYPE_NOOP);
@@ -335,7 +336,7 @@ pub const Renderer = struct {
             .beauty_reshape_program = beauty_reshape_program,
             .makeup_program = makeup_program,
             .model_program = model_program,
-            .particle_fade_program = particle_fade_program,
+            .billboard_program = billboard_program,
             .makeup_index_buffer = makeup_index_buffer,
             .face_mesh_index_buffer = face_mesh_index_buffer,
             .face_mesh_uv_buffer = face_mesh_uv_buffer,
@@ -365,6 +366,7 @@ pub const Renderer = struct {
             .face_points_uniform = c.bgfx_create_uniform("u_facePoints", c.BGFX_UNIFORM_TYPE_VEC4, face_point_vec4_count),
             .model_color_uniform = c.bgfx_create_uniform("u_modelColor", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .particle_cool_uniform = c.bgfx_create_uniform("u_particleCool", c.BGFX_UNIFORM_TYPE_VEC4, 1),
+            .particle_size_uniform = c.bgfx_create_uniform("u_particleSize", c.BGFX_UNIFORM_TYPE_VEC4, 1),
             .default_mask_texture = createMaskTexture(1, 1, &[_]u8{255}),
             .zero_mask_texture = createMaskTexture(1, 1, &[_]u8{0}),
             .yuv_uniform = c.bgfx_create_uniform("u_yuvTransform", c.BGFX_UNIFORM_TYPE_MAT4, 1),
@@ -538,14 +540,14 @@ pub const Renderer = struct {
         };
     }
 
-    /// The fading-particle program every lens shares - reuses vs_lens_pass
-    /// like fs_model, kit-authored so it takes no per-lens bytes.
-    pub fn loadParticleProgram() !c.bgfx_program_handle_t {
+    /// The fading-sprite program every lens shares - its own vertex stage
+    /// expands each particle centre into a camera-facing quad, kit-authored.
+    pub fn loadBillboardProgram() !c.bgfx_program_handle_t {
         return switch (c.bgfx_get_renderer_type()) {
-            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_lens_pass_metal, blobs.fs_particle_metal),
-            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_lens_pass_spirv, blobs.fs_particle_spirv),
-            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_lens_pass_essl, blobs.fs_particle_essl),
-            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_lens_pass_wgsl, blobs.fs_particle_wgsl),
+            c.BGFX_RENDERER_TYPE_METAL => loadProgram(blobs.vs_billboard_metal, blobs.fs_billboard_metal),
+            c.BGFX_RENDERER_TYPE_VULKAN => loadProgram(blobs.vs_billboard_spirv, blobs.fs_billboard_spirv),
+            c.BGFX_RENDERER_TYPE_OPENGLES => loadProgram(blobs.vs_billboard_essl, blobs.fs_billboard_essl),
+            c.BGFX_RENDERER_TYPE_WEBGPU => loadProgram(blobs.vs_billboard_wgsl, blobs.fs_billboard_wgsl),
             else => error.RendererUnsupported,
         };
     }
@@ -596,6 +598,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_uniform(r.face_points_uniform);
         c.bgfx_destroy_uniform(r.model_color_uniform);
         c.bgfx_destroy_uniform(r.particle_cool_uniform);
+        c.bgfx_destroy_uniform(r.particle_size_uniform);
         c.bgfx_destroy_uniform(r.yuv_uniform);
         c.bgfx_destroy_program(r.rgba_program);
         c.bgfx_destroy_program(r.nv12_program);
@@ -609,7 +612,7 @@ pub const Renderer = struct {
         c.bgfx_destroy_program(r.beauty_reshape_program);
         c.bgfx_destroy_program(r.makeup_program);
         c.bgfx_destroy_program(r.model_program);
-        c.bgfx_destroy_program(r.particle_fade_program);
+        c.bgfx_destroy_program(r.billboard_program);
         c.bgfx_destroy_index_buffer(r.makeup_index_buffer);
         c.bgfx_destroy_dynamic_vertex_buffer(r.makeup_position_buffer);
         c.bgfx_destroy_vertex_buffer(r.makeup_lipstick_uv_buffer);
@@ -1244,8 +1247,8 @@ pub const Renderer = struct {
         c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(interleaved.ptr, @intCast(interleaved.len * @sizeOf(f32))));
     }
 
-    /// Uploads already-interleaved particle vertices (position, life, 0 per
-    /// vertex) straight into the mesh - the fading path's writeFaded output.
+    /// Uploads already-interleaved sprite vertices (position, life, corner
+    /// index per vertex) straight into the mesh - writeBillboards' output.
     pub fn updateParticleMeshFaded(mesh: ParticleMesh, faded: []const f32) void {
         const count = @min(faded.len / 5, mesh.vertex_count);
         c.bgfx_update_dynamic_vertex_buffer(mesh.position_buffer, 0, c.bgfx_copy(faded.ptr, @intCast(count * 5 * @sizeOf(f32))));
@@ -1255,10 +1258,11 @@ pub const Renderer = struct {
         c.bgfx_destroy_dynamic_vertex_buffer(mesh.position_buffer);
     }
 
-    /// Draws particles as points over the frame. Opaque through the model
-    /// program by default; when fade is set, alpha-blended through the
-    /// particle program so each point dims by its remaining-life fraction.
-    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool) void {
+    /// Draws particles over the frame. Opaque one-pixel points through the
+    /// model program by default; when fade is set, each particle is a
+    /// camera-facing alpha-blended sprite of sprite_size_ndc (ndc half-extent
+    /// per axis) through the billboard program, dimmed by its remaining life.
+    pub fn submitParticles(r: *Renderer, blit_view: c.bgfx_view_id_t, mesh_view: c.bgfx_view_id_t, input_texture: c.bgfx_texture_handle_t, mesh: ParticleMesh, base_color: [4]f32, cool_color: [4]f32, aspect_ratio: f32, fade: bool, sprite_size_ndc: [2]f32) void {
         r.submitShaderPass(blit_view, r.passthroughProgram(), input_texture, r.default_mask_texture);
 
         const eye: math.Vec3 = .{ 0.0, 0.0, 2.0 };
@@ -1269,13 +1273,14 @@ pub const Renderer = struct {
         _ = c.bgfx_set_transform(&model.cols, 1);
         c.bgfx_set_dynamic_vertex_buffer(0, mesh.position_buffer, 0, mesh.vertex_count);
         c.bgfx_set_uniform(r.model_color_uniform, &base_color, 1);
-        const base_state = c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_PT_POINTS;
         if (fade) {
             c.bgfx_set_uniform(r.particle_cool_uniform, &cool_color, 1);
-            c.bgfx_set_state(base_state | c.BGFX_STATE_BLEND_FUNC(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA), 0);
-            c.bgfx_submit(mesh_view, r.particle_fade_program, 0, c.BGFX_DISCARD_ALL);
+            const size_vec4 = [4]f32{ sprite_size_ndc[0], sprite_size_ndc[1], 0.0, 0.0 };
+            c.bgfx_set_uniform(r.particle_size_uniform, &size_vec4, 1);
+            c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_BLEND_FUNC(c.BGFX_STATE_BLEND_SRC_ALPHA, c.BGFX_STATE_BLEND_INV_SRC_ALPHA), 0);
+            c.bgfx_submit(mesh_view, r.billboard_program, 0, c.BGFX_DISCARD_ALL);
         } else {
-            c.bgfx_set_state(base_state, 0);
+            c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A | c.BGFX_STATE_PT_POINTS, 0);
             c.bgfx_submit(mesh_view, r.model_program, 0, c.BGFX_DISCARD_ALL);
         }
     }

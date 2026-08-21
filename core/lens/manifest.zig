@@ -94,6 +94,9 @@ pub const ParticleField = struct {
     /// node colour and crosses to this by the end of its life (an ember
     /// glowing hot then cooling). Null keeps the node colour throughout.
     cool: ?[3]f32 = null,
+    /// Sprite size in pixels (1 to 64) for a fading fountain, drawn as
+    /// camera-facing quads; 0 lets the engine pick a visible default.
+    size: u32 = 0,
 };
 
 pub const GradeField = struct {
@@ -718,6 +721,9 @@ fn parseNodes(arena: std.mem.Allocator, diags: *Diagnostics, path: *PathStack, a
                 if (getField(pv.object, "cool")) |v| {
                     var rgb: [3]f32 = .{ 0, 0, 0 };
                     if (readVec3(v, &rgb)) field.cool = rgb else try diags.add(path.slice(), "particles cool must be three numbers", .{});
+                }
+                if (getField(pv.object, "size")) |v| {
+                    if (v == .integer and v.integer >= 1 and v.integer <= 64) field.size = @intCast(v.integer) else try diags.add(path.slice(), "particles size must be an integer 1..64", .{});
                 }
                 particle_field = field;
             }
