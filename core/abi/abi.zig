@@ -25,6 +25,7 @@ const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
 const comp = @import("layout");
+const geo = @import("geo");
 const physics = @import("physics");
 const script = @import("script");
 const audio_playback = @import("audio_playback");
@@ -72,7 +73,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 23;
+pub const abi_minor: u16 = 24;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -476,6 +477,13 @@ pub const Session = struct {
     source_has_frame: [comp.max_sources]bool = @splat(false),
     source_count: u8 = 0,
     layout_active: ?comp.Layout = null,
+    /// The last submitted location fix and the session's active geofence. The
+    /// engine computes geo.in_region on-device from these; the location itself
+    /// never crosses back over the ABI.
+    location_lat: f64 = 0,
+    location_lon: f64 = 0,
+    location_engine_fed: bool = false,
+    geofence: ?geo.Circle = null,
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -2784,6 +2792,37 @@ fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, target
     return view;
 }
 
+/// Submits a location fix. The engine computes geo.in_region on-device from this
+/// and the session's geofence; the location never crosses back over the ABI,
+/// only the boolean does. Overwrites in place, no allocation.
+pub export fn goss_session_submit_location(session: ?*Session, latitude: f64, longitude: f64, horizontal_accuracy_m: f32, timestamp_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    _ = horizontal_accuracy_m;
+    _ = timestamp_us;
+    if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180) return .invalid_argument;
+    s.location_lat = latitude;
+    s.location_lon = longitude;
+    s.location_engine_fed = true;
+    return .ok;
+}
+
+/// Sets the session's active geofence: a circle the app derives from a lens's
+/// intended location (the app owns lens metadata and discovery). geo.in_region
+/// reads true when a submitted location is within radius_m of the center.
+pub export fn goss_session_set_geofence(session: ?*Session, latitude: f64, longitude: f64, radius_m: f64) Status {
+    const s = session orelse return .invalid_argument;
+    if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180 or !(radius_m > 0)) return .invalid_argument;
+    s.geofence = .{ .lat = latitude, .lon = longitude, .radius_m = radius_m };
+    return .ok;
+}
+
+/// Clears the geofence; geo.in_region reads false with none set.
+pub export fn goss_session_clear_geofence(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.geofence = null;
+    return .ok;
+}
+
 pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
     const out = out_session orelse return .invalid_argument;
     const parent = engine orelse return .invalid_argument;
@@ -4265,6 +4304,11 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     }
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
+    }
+    if (s.location_engine_fed) {
+        if (s.geofence) |fence| {
+            live_signals.geo_in_region = geo.withinCircle(s.location_lat, s.location_lon, fence.lat, fence.lon, fence.radius_m);
+        }
     }
     // The events fired since the last tick reach the triggers for this tick
     // only, then clear below - a one-tick pulse an edge-triggered action reads
