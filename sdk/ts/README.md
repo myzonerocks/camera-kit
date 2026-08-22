@@ -1,4 +1,4 @@
-# Gosslens — TypeScript SDK
+# Gosslens - TypeScript SDK
 
 TypeScript SDK for [Gosslens](../../include/gosslens.h), a camera engine
 with a Zig core behind one C ABI, compiled to `wasm32`. Wraps it as

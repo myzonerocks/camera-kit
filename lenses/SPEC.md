@@ -243,7 +243,7 @@ the lens nor hang the frame. The same inputs always produce the same writes,
 which is what lets a scripted lens be conformance bit-stable.
 
 The set of known `type` values is closed and versioned with the *engine*, not
-the format — GLF 1.0 does not let a lens introduce a new node type, only
+the format - GLF 1.0 does not let a lens introduce a new node type, only
 compose the runtime's built-in ones (capture input, beauty filters, shader
 passes reading `shaders/*.glsl`, glTF model draws, LUT passes, compositing,
 and `mesh.face` - the canonical face mesh warped by the tracked landmarks,
@@ -300,7 +300,7 @@ the bundle-relative path in `target`, decoded from `sounds/` and mixed into
 the audio the host pulls out), `reset_timer` (name a timer signal back to
 zero). Reserved, accepted by the validator but not yet executed by the
 runtime: `show` / `hide` (a node by id) and `swap_subgraph` (splice a
-different set of this lens's own nodes in place of a named group —
+different set of this lens's own nodes in place of a named group -
 edit-time, deferred to the next frame boundary so it never tears a
 frame). A 1.0 runtime treats the reserved actions as no-ops; a lens
 must not depend on them until a spec revision moves them out of this
@@ -378,7 +378,7 @@ A bundle that passes validation is guaranteed, by this document, to never
 crash the engine, never allocate past its declared node/parameter/trigger
 counts, and never execute anything the manifest did not declare. This is
 the load-bearing security property: **lenses are untrusted content, and
-untrusted content only ever flows through typed, bounded, validated data —
+untrusted content only ever flows through typed, bounded, validated data -
 never through code.**
 
 ## 9. Conformance

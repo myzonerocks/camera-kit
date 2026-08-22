@@ -319,14 +319,14 @@ const Gate = struct {
         }
     }
 
-    // A dash that glues a lowercase clause onto a sentence is a machine
-    // writing tell, not an appositive. Flags each hit with a quote and
-    // the fix. Runs on doc prose, commit messages, and PR bodies.
+    // A long dash (em-dash always, en-dash outside a number range) is a machine
+    // writing tell. Flags each hit with a quote and the fix. Runs on doc prose,
+    // commit messages, and PR bodies.
     fn checkClauseDashes(g: *Gate, text: []const u8, context: []const u8) !void {
         var from: usize = 0;
-        while (nextClauseDash(text, from)) |idx| {
+        while (nextBadDash(text, from)) |idx| {
             const snippet = clauseSnippet(text, idx);
-            try g.flag("em-dash: {s} joins a clause with a dash (\"{s}\"); an em-dash joining a clause reads as AI-written, so restructure the sentence or use a spaced hyphen. An appositive like 'X - A definition' is allowed.", .{ context, snippet });
+            try g.flag("long-dash: {s} uses a long dash (\"{s}\"); a long dash reads as AI-written, so use a plain hyphen '-' or restructure the sentence. En-dashes are only for number ranges.", .{ context, snippet });
             from = idx + 3;
         }
     }
@@ -586,38 +586,35 @@ fn findVerboseMarker(line: []const u8) ?[]const u8 {
     return null;
 }
 
-// An em-dash (U+2014) or en-dash (U+2013) at the start of s, returned as
-// its byte length, or 0. Both encode as three bytes under E2 80.
-fn dashLen(s: []const u8) usize {
-    if (s.len >= 3 and s[0] == 0xE2 and s[1] == 0x80 and (s[2] == 0x94 or s[2] == 0x93)) return 3;
-    return 0;
+// A long dash at the start of s: the em-dash (U+2014) or en-dash (U+2013),
+// both three bytes under E2 80. Returns the third byte (0x94 or 0x93) or null.
+fn dashByte(s: []const u8) ?u8 {
+    if (s.len >= 3 and s[0] == 0xE2 and s[1] == 0x80 and (s[2] == 0x94 or s[2] == 0x93)) return s[2];
+    return null;
 }
 
-// A dash joins a clause when its next non-space character is a lowercase
-// ascii letter. An uppercase letter (an appositive or definition), a
-// digit (a numeric range like 10-20), or anything else is left alone.
-fn joinsClause(after: []const u8) bool {
-    var i: usize = 0;
-    while (i < after.len and (after[i] == ' ' or after[i] == '\t')) i += 1;
-    if (i >= after.len) return false;
-    return after[i] >= 'a' and after[i] <= 'z';
+fn isAsciiDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
 }
 
-// Index of the next clause-joining dash at or after `from`, or null. The
-// one scanner behind both the flag path and the test helper.
-fn nextClauseDash(text: []const u8, from: usize) ?usize {
+// Index of the next long dash that reads as AI-written, or null. The em-dash
+// is always the tell. The en-dash is allowed only as a numeric range (a digit
+// on both sides, like 2013-2015); anywhere else it is flagged too. A plain
+// ascii hyphen '-' is never a hit.
+fn nextBadDash(text: []const u8, from: usize) ?usize {
     var i: usize = from;
     while (i < text.len) : (i += 1) {
-        const dl = dashLen(text[i..]);
-        if (dl == 0) continue;
-        if (joinsClause(text[i + dl ..])) return i;
-        i += dl - 1;
+        const kind = dashByte(text[i..]) orelse continue;
+        if (kind == 0x94) return i; // em-dash: always the tell
+        const range = i > 0 and isAsciiDigit(text[i - 1]) and i + 3 < text.len and isAsciiDigit(text[i + 3]);
+        if (!range) return i; // en-dash outside a numeric range
+        i += 2;
     }
     return null;
 }
 
-fn hasClauseDash(text: []const u8) bool {
-    return nextClauseDash(text, 0) != null;
+fn hasBadDash(text: []const u8) bool {
+    return nextBadDash(text, 0) != null;
 }
 
 // A short quote around the dash, bounded to its own line and a small
@@ -758,20 +755,20 @@ test "checklist lines are recognized" {
     try std.testing.expect(!isChecklistLine("- a plain bullet"));
 }
 
-test "a dash joining a lowercase clause is the AI tell, an appositive and a range are not" {
-    // Em-dash then a lowercase clause is the pattern to catch.
-    try std.testing.expect(hasClauseDash("someone \xE2\x80\x94 every thread stays end-to-end encrypted"));
-    // Em-dash then a capital is an appositive or definition, allowed.
-    try std.testing.expect(!hasClauseDash("Melbourne \xE2\x80\x94 A city located in Victoria, AU."));
-    // A digit on the far side is a numeric range, allowed.
-    try std.testing.expect(!hasClauseDash("2013\xE2\x80\x9315"));
-    try std.testing.expect(!hasClauseDash("10\xE2\x80\x9320"));
-    // An en-dash gluing a lowercase clause is the same tell.
-    try std.testing.expect(hasClauseDash("it stopped \xE2\x80\x93 then it resumed"));
-    // A title like the SDK headers keeps its dash before a capital.
-    try std.testing.expect(!hasClauseDash("Gosslens \xE2\x80\x94 Kotlin SDK"));
-    // A plain spaced hyphen is never a hit.
-    try std.testing.expect(!hasClauseDash("a real web page - see the demo"));
+test "any long dash is the AI tell; only a hyphen and a numeric range are fine" {
+    // The em-dash is always the tell, before a lowercase clause...
+    try std.testing.expect(hasBadDash("someone \xE2\x80\x94 every thread stays end-to-end encrypted"));
+    // ...and equally before a capital (an appositive is not an exception).
+    try std.testing.expect(hasBadDash("Melbourne \xE2\x80\x94 A city located in Victoria, AU."));
+    try std.testing.expect(hasBadDash("Gosslens \xE2\x80\x94 Kotlin SDK"));
+    // An en-dash between two digits is a numeric range, allowed.
+    try std.testing.expect(!hasBadDash("2013\xE2\x80\x9315"));
+    try std.testing.expect(!hasBadDash("10\xE2\x80\x9320"));
+    // An en-dash anywhere else is flagged too.
+    try std.testing.expect(hasBadDash("it stopped \xE2\x80\x93 then it resumed"));
+    // A plain hyphen, spaced or in a range, is never a hit.
+    try std.testing.expect(!hasBadDash("Melbourne - a city in Victoria, AU."));
+    try std.testing.expect(!hasBadDash("a real web page - see the demo"));
 }
 
 test "only authored markdown prose is scanned for clause dashes" {

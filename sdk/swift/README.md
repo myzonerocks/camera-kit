@@ -1,4 +1,4 @@
-# Gosslens — Swift SDK
+# Gosslens - Swift SDK
 
 Swift SDK for [Gosslens](../../include/gosslens.h), a camera engine with a
 Zig core behind one C ABI. Wraps it as `GossEngine`, `GossSession`, and
