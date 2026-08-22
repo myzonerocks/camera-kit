@@ -1134,10 +1134,6 @@ fn proveAudio(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
-/// Proves the engine-side outgoing mix: at the native 48 kHz, the lens over a
-/// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
-/// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
-/// across runs.
 /// Proves the camera-controls contract through the public ABI: out-of-range
 /// intent is normalized to its valid envelope and read back exactly, with no
 /// hardware and no host dependence.
@@ -1226,6 +1222,80 @@ fn proveEventTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves multi-source composition through the public ABI: a side-by-side
+/// layout puts the camera (a red frame) in the left half and a named source (a
+/// green frame) in the right half of the captured output, deterministically.
+fn proveLayoutComposite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    for (0..sw * sh) |p| {
+        cam[p * 4 + 0] = 255; cam[p * 4 + 1] = 0; cam[p * 4 + 2] = 0; cam[p * 4 + 3] = 255; // red
+        src[p * 4 + 0] = 0; src[p * 4 + 1] = 255; src[p * 4 + 2] = 0; src[p * 4 + 3] = 255; // green
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    var shots: [2][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+    for (0..2) |_| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_define_source(session, "b", 1) != .ok or
+            abi.goss_session_submit_source_frame_rgba_copy(session, "b", 1, &base_desc, src.ptr, sw * 4) != .ok or
+            abi.goss_session_set_layout(session, 1) != .ok)
+        {
+            std.debug.print("conformance: FAIL composition setup\n", .{});
+            return false;
+        }
+        for (0..3) |i| {
+            var d = base_desc;
+            d.timestamp_us = @intCast((i + 1) * 33_333);
+            if (abi.goss_session_submit_frame_rgba_copy(session, &d, cam.ptr, sw * 4) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var cw: u32 = 0;
+        var ch: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &cw, &ch) != .ok) {
+            gpa.free(shot);
+            std.debug.print("conformance: FAIL composition capture\n", .{});
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    const w: usize = 400;
+    const h: usize = 300;
+    const s0 = shots[0];
+    const left = (h / 2 * w + w / 4) * 4; // camera half
+    const right = (h / 2 * w + w * 3 / 4) * 4; // source half
+    if (!(s0[left + 0] > 200 and s0[left + 1] < 60)) {
+        std.debug.print("conformance: FAIL left half is not the camera (red)\n", .{});
+        return false;
+    }
+    if (!(s0[right + 1] > 200 and s0[right + 0] < 60)) {
+        std.debug.print("conformance: FAIL right half is not the source (green)\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL composition is not deterministic across runs\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a side-by-side layout composites the camera left and a named source right, deterministically\n", .{});
+    return true;
+}
+
+/// Proves the engine-side outgoing mix: at the native 48 kHz, the lens over a
+/// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
+/// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
+/// across runs.
 fn proveOutputMix(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     _ = gpa;
     const block: u32 = 512;
@@ -3105,6 +3175,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveOutputMix(gpa, engine)) return 1;
     if (!try proveCameraControls(gpa, engine)) return 1;
     if (!try proveEventTrigger(gpa, engine)) return 1;
+    if (!try proveLayoutComposite(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;

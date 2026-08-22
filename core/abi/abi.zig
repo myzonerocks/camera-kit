@@ -24,6 +24,7 @@ const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
+const comp = @import("layout");
 const physics = @import("physics");
 const script = @import("script");
 const audio_playback = @import("audio_playback");
@@ -71,7 +72,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 22;
+pub const abi_minor: u16 = 23;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -109,6 +110,9 @@ pub const frame_rotation_mask: u32 = 0x3 << 8;
 /// truncated to this many bytes. Bounded so firing allocates nothing.
 const max_pending_events: usize = 8;
 const max_event_name: usize = 31;
+
+/// A composite source name is truncated to this many bytes.
+const max_source_name: usize = 31;
 
 pub const Landmarks = extern struct {
     points: ?[*]const f32,
@@ -462,6 +466,16 @@ pub const Session = struct {
     pending_event_buf: [max_pending_events][max_event_name]u8 = undefined,
     pending_event_len: [max_pending_events]u8 = undefined,
     pending_event_count: u8 = 0,
+    /// Named RGBA sources for multi-source composition (Duet/Stitch, live
+    /// grids), in definition order; the camera is the implicit source 0. Fixed
+    /// arrays so the frame-path composite walks them without a hashmap.
+    source_names: [comp.max_sources][max_source_name]u8 = undefined,
+    source_name_len: [comp.max_sources]u8 = @splat(0),
+    source_tex: [comp.max_sources]render.Renderer.PersistentTexture = @splat(.{}),
+    source_dims: [comp.max_sources][2]u16 = @splat(.{ 0, 0 }),
+    source_has_frame: [comp.max_sources]bool = @splat(false),
+    source_count: u8 = 0,
+    layout_active: ?comp.Layout = null,
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -974,7 +988,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     const capture_out_width: u16 = if (s.capture_requested and s.capture_res_width != 0) s.capture_res_width else @intCast(r.width);
     const capture_out_height: u16 = if (s.capture_requested and s.capture_res_height != 0) s.capture_res_height else @intCast(r.height);
     if (s.capture_requested) try ensureCaptureTarget(e, capture_out_width, capture_out_height);
-    if (ready_count == 0 and !beauty_active) {
+    if (ready_count == 0 and !beauty_active and s.layout_active == null) {
         // view 0 may still be bound to an offscreen chain/beauty target
         // from an earlier frame that took the other branch below -
         // bgfx_set_view_frame_buffer is stateful across frames, nothing
@@ -1017,10 +1031,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     try ensureChainTargets(e, width, height);
     const targets = [2]render.Renderer.OffscreenTarget{ e.chain_targets[0].?, e.chain_targets[1].? };
 
-    render.Renderer.setViewTarget(0, targets[0], width, height);
-    r.submitPreview(0, current.preview, rotation * 90, mirror);
-    var input_texture = targets[0].texture;
     var next_view_id: u8 = 1;
+    if (s.layout_active) |lay| {
+        next_view_id = composeLayout(r, s, current, targets[0], width, height, rotation, mirror, lay);
+    } else {
+        render.Renderer.setViewTarget(0, targets[0], width, height);
+        r.submitPreview(0, current.preview, rotation * 90, mirror);
+    }
+    var input_texture = targets[0].texture;
 
     if (beauty_active) {
         input_texture = if (is_web)
@@ -1449,11 +1467,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     if (ready_count > 0) blitRecordingToSwapChain(e, r, next_view_id + 1);
 
     if (ready_count == 0) {
-        // beauty_active is guaranteed true here (the ready_count == 0
-        // and !beauty_active case already returned above): beauty's own
-        // output is a plain sampled texture, never a view's render
-        // target, so with no lens stage to hand it off to, it still
-        // needs one real draw to actually reach the swap chain.
+        // Either beauty or a multi-source layout produced input_texture as a
+        // plain sampled texture, not a view's render target, so with no lens
+        // stage to hand it off to it still needs one real draw to reach the
+        // swap chain. The no-beauty, no-layout case already returned above.
         render.Renderer.setViewTarget(next_view_id, finalTarget(e, s), output_width, output_height);
         r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
         if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 1);
@@ -1574,6 +1591,7 @@ pub fn destroySession(session: *Session) void {
         session.preview_bgra.deinit();
         session.preview_y.deinit();
         session.preview_uv.deinit();
+        for (0..session.source_count) |i| session.source_tex[i].deinit();
     }
     session.engine.gpa.destroy(session);
 }
@@ -2642,6 +2660,128 @@ pub export fn goss_session_camera_controls(session: ?*Session, out: ?*CameraCont
 fn resolveMirror(s: *const Session, flags: u32) bool {
     _ = s;
     return flags & frame_flag_mirror != 0;
+}
+
+fn findSource(s: *Session, name: []const u8) ?u8 {
+    for (0..s.source_count) |i| {
+        if (std.mem.eql(u8, s.source_names[i][0..s.source_name_len[i]], name)) return @intCast(i);
+    }
+    return null;
+}
+
+/// Registers a named RGBA source for multi-source composition. The camera is
+/// always the implicit source 0; named sources fill the layout after it in the
+/// order defined. Idempotent for a name already defined.
+pub export fn goss_session_define_source(session: ?*Session, name: ?[*]const u8, name_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    if (name_len == 0) return .invalid_argument;
+    const key = n[0..name_len];
+    if (findSource(s, key) != null) return .ok;
+    if (s.source_count + 1 >= comp.max_sources) return .invalid_argument; // camera + this
+    const slot = s.source_count;
+    const copy = @min(name_len, max_source_name);
+    @memcpy(s.source_names[slot][0..copy], n[0..copy]);
+    s.source_name_len[slot] = @intCast(copy);
+    s.source_tex[slot] = .{};
+    s.source_dims[slot] = .{ 0, 0 };
+    s.source_has_frame[slot] = false;
+    s.source_count += 1;
+    return .ok;
+}
+
+/// Removes a named source, freeing its texture; later sources shift down to
+/// keep the definition order dense.
+pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8, name_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    const idx = findSource(s, n[0..name_len]) orelse return .again;
+    s.source_tex[idx].deinit();
+    var i: u8 = idx;
+    while (i + 1 < s.source_count) : (i += 1) {
+        s.source_names[i] = s.source_names[i + 1];
+        s.source_name_len[i] = s.source_name_len[i + 1];
+        s.source_tex[i] = s.source_tex[i + 1];
+        s.source_dims[i] = s.source_dims[i + 1];
+        s.source_has_frame[i] = s.source_has_frame[i + 1];
+    }
+    s.source_count -= 1;
+    s.source_tex[s.source_count] = .{}; // its handle moved down; do not deinit here
+    s.source_has_frame[s.source_count] = false;
+    return .ok;
+}
+
+/// Uploads one RGBA/BGRA frame into a named source's own texture (no shared
+/// cache to clobber). Define the source first.
+pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, name: ?[*]const u8, name_len: usize, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const rgba_ptr = rgba orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    _ = r;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
+    _ = s.source_tex[idx].uploadCopy(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride);
+    s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
+    s.source_has_frame[idx] = true;
+    return .ok;
+}
+
+/// Sets the composite arrangement over the camera plus the named sources
+/// (0 custom, 1 side-by-side, 2 top-bottom, 3 picture-in-picture, 4 grid). The
+/// composite runs at the head of the render chain; the rest is unchanged.
+pub export fn goss_session_set_layout(session: ?*Session, arrangement: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const total: u8 = s.source_count + 1; // camera is source 0
+    s.layout_active = switch (arrangement) {
+        1 => comp.Layout.sideBySide(total),
+        2 => comp.Layout.topBottom(total),
+        3 => comp.Layout.pip(.{ 0.62, 0.62, 0.34, 0.34 }),
+        0, 4 => comp.Layout.grid(total),
+        else => return .invalid_argument,
+    };
+    return .ok;
+}
+
+/// Clears the composite, returning to a single-camera preview.
+pub export fn goss_session_clear_layout(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.layout_active = null;
+    return .ok;
+}
+
+/// Composites the camera (placement 0) and the named sources into targets0 at
+/// the head of the render chain: a full-frame clear, then each placed source
+/// drawn into its own viewport in draw order. Returns the next free view id for
+/// the rest of the chain. Allocation-free; walks the fixed layout arrays only.
+fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, targets0: render.Renderer.OffscreenTarget, width: u16, height: u16, rotation: u32, mirror: bool, lay: comp.Layout) u8 {
+    render.Renderer.clearComposite(0, targets0, width, height);
+    var order: [comp.max_sources]u8 = undefined;
+    const n = lay.drawOrder(&order);
+    var view: u8 = 1;
+    const fw: f32 = @floatFromInt(width);
+    const fh: f32 = @floatFromInt(height);
+    for (order[0..n]) |p| {
+        if (p >= lay.count) continue;
+        const rect = lay.placements[p].rect;
+        const dx: u16 = @intFromFloat(std.math.clamp(rect[0], 0, 1) * fw);
+        const dy: u16 = @intFromFloat(std.math.clamp(rect[1], 0, 1) * fh);
+        const dw: u16 = @intFromFloat(std.math.clamp(rect[2], 0, 1) * fw);
+        const dh: u16 = @intFromFloat(std.math.clamp(rect[3], 0, 1) * fh);
+        if (dw == 0 or dh == 0) continue;
+        if (p == 0) {
+            render.Renderer.setLayoutViewport(view, targets0, dx, dy, dw, dh);
+            r.submitPreview(view, current.preview, rotation * 90, mirror);
+        } else {
+            const src = p - 1;
+            if (src >= s.source_count or !s.source_has_frame[src]) continue;
+            r.submitLayoutSource(view, s.source_tex[src].handle, targets0, dx, dy, dw, dh);
+        }
+        view += 1;
+    }
+    return view;
 }
 
 pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
