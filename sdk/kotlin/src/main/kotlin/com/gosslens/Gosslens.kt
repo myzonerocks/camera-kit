@@ -74,6 +74,8 @@ object Gosslens {
     internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
+    internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
+    internal external fun nativeCameraControls(session: Long, buffer: ByteBuffer): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -141,6 +143,25 @@ data class GossEngineConfig(val texturePoolCapacity: Int, val stagingPoolCapacit
 /** frameBudgetUs is the whole-pipeline frame time the degradation
  * policy holds the session to; zero means the built-in 30 fps budget. */
 data class GossSessionConfig(val frameBudgetUs: Int)
+
+/** Declarative camera-hardware intent. The engine normalizes every field; the
+ * app reads it back and drives CameraX. Modes: flash 0 off/1 on/2 auto; focus
+ * 0 auto/1 locked/2 point; exposure 0 auto/1 locked. Points are normalized. */
+data class GossCameraControls(
+    val flashMode: Int = 0,
+    val torch: Int = 0,
+    val focusMode: Int = 0,
+    val exposureMode: Int = 0,
+    val focusPointX: Float = 0.5f,
+    val focusPointY: Float = 0.5f,
+    val exposureLinked: Int = 1,
+    val exposurePointX: Float = 0.5f,
+    val exposurePointY: Float = 0.5f,
+    val exposureBiasEv: Float = 0f,
+    val zoomFactor: Float = 1f,
+    val maxZoomFactor: Float = 0f,
+    val mirrorSavePolicy: Int = 0,
+)
 
 class GossEngine private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
@@ -571,6 +592,30 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * (frameCount*channels s16). Advances the mixer once, replacing [pullAudio]. */
     fun mixOutputAudio(mic: ByteBuffer?, out: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Boolean =
         Gosslens.nativeMixOutputAudio(handle, mic, out, frameCount, sampleRate, channels) == 0
+
+    /** Stores validated camera-hardware intent; the engine normalizes it. Read
+     * it back with [cameraControls] and drive CameraX with the result. */
+    fun setCameraControls(c: GossCameraControls): Boolean {
+        val buf = ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
+        buf.putInt(c.flashMode); buf.putInt(c.torch); buf.putInt(c.focusMode); buf.putInt(c.exposureMode)
+        buf.putFloat(c.focusPointX); buf.putFloat(c.focusPointY); buf.putInt(c.exposureLinked)
+        buf.putFloat(c.exposurePointX); buf.putFloat(c.exposurePointY); buf.putFloat(c.exposureBiasEv)
+        buf.putFloat(c.zoomFactor); buf.putFloat(c.maxZoomFactor); buf.putInt(c.mirrorSavePolicy); buf.putInt(0)
+        buf.rewind()
+        return Gosslens.nativeSetCameraControls(handle, buf) == 0
+    }
+
+    /** The normalized camera controls the app applies to the platform camera. */
+    fun cameraControls(): GossCameraControls? {
+        val buf = ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeCameraControls(handle, buf) != 0) return null
+        return GossCameraControls(
+            buf.getInt(0), buf.getInt(4), buf.getInt(8), buf.getInt(12),
+            buf.getFloat(16), buf.getFloat(20), buf.getInt(24),
+            buf.getFloat(28), buf.getFloat(32), buf.getFloat(36),
+            buf.getFloat(40), buf.getFloat(44), buf.getInt(48),
+        )
+    }
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,

@@ -1138,6 +1138,40 @@ fn proveAudio(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
 /// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
 /// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
 /// across runs.
+/// Proves the camera-controls contract through the public ABI: out-of-range
+/// intent is normalized to its valid envelope and read back exactly, with no
+/// hardware and no host dependence.
+fn proveCameraControls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    var in: abi.CameraControls = .{
+        .flash_mode = 99,
+        .zoom_factor = 99,
+        .max_zoom_factor = 4,
+        .exposure_bias_ev = 40,
+        .focus_point_x = 5.0,
+        .mirror_save_policy = 1,
+    };
+    if (abi.goss_session_set_camera_controls(session, &in) != .ok) {
+        std.debug.print("conformance: FAIL set_camera_controls\n", .{});
+        return false;
+    }
+    var out: abi.CameraControls = undefined;
+    if (abi.goss_session_camera_controls(session, &out) != .ok) {
+        std.debug.print("conformance: FAIL camera_controls read-back\n", .{});
+        return false;
+    }
+    if (out.flash_mode != 0 or out.zoom_factor != 4.0 or out.exposure_bias_ev != 8.0 or
+        out.focus_point_x != 1.0 or out.mirror_save_policy != 0)
+    {
+        std.debug.print("conformance: FAIL camera controls not normalized (zoom {d}, bias {d}, focus_x {d})\n", .{ out.zoom_factor, out.exposure_bias_ev, out.focus_point_x });
+        return false;
+    }
+    std.debug.print("conformance: PROOF camera controls normalize out-of-range intent to their valid envelope and read back exactly\n", .{});
+    return true;
+}
+
 fn proveOutputMix(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     _ = gpa;
     const block: u32 = 512;
@@ -3015,6 +3049,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveScript(gpa, engine)) return 1;
     if (!try proveAudio(gpa, engine)) return 1;
     if (!try proveOutputMix(gpa, engine)) return 1;
+    if (!try proveCameraControls(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;

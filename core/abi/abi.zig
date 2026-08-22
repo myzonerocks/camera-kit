@@ -71,7 +71,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 20;
+pub const abi_minor: u16 = 21;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -448,6 +448,9 @@ pub const Session = struct {
     /// goss_session_mix_output_audio calls when the outgoing rate differs
     /// from the mixer's 48 kHz.
     mix_resampler: audio_mix.Resampler = .{},
+    /// The caller's normalized camera-hardware intent (validated at set-time);
+    /// the SDK reads it back and drives the platform camera. Inline POD.
+    camera_controls: CameraControls = .{},
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -1851,7 +1854,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         }
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
-            const mirror = current.desc.flags & frame_flag_mirror != 0;
+            const mirror = resolveMirror(s, current.desc.flags);
             // Always through renderCompositeChain, which owns the one
             // authoritative "is anything actually active" check and its
             // own view-0-target reset for the plain-preview case. This
@@ -1919,7 +1922,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSegmentationMask(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
-        const mirror = current.desc.flags & frame_flag_mirror != 0;
+        const mirror = resolveMirror(s, current.desc.flags);
         renderCompositeChain(e, r, s, current, rotation, mirror) catch {
             r.submitPreview(0, current.preview, rotation * 90, mirror);
         };
@@ -2030,7 +2033,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSegmentationMask(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
-        const mirror = current.desc.flags & frame_flag_mirror != 0;
+        const mirror = resolveMirror(s, current.desc.flags);
         renderCompositeChain(e, r, s, current, rotation, mirror) catch {
             r.submitPreview(0, current.preview, rotation * 90, mirror);
         };
@@ -2552,6 +2555,82 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         return .ok;
     }
     return encodeLossyPhoto(gpa, pixels, out_w, out_h, cfg.format, cfg.quality, cfg.color_space, 1, data[0..out_capacity], len_out);
+}
+
+/// Declarative camera-hardware intent. The engine validates and normalizes
+/// every field and stores it on the session; the SDK reads the normalized
+/// values back and drives the platform camera. The core never touches the
+/// camera - it only owns the contract and the mirror-save policy.
+pub const CameraControls = extern struct {
+    flash_mode: u32 = 0, // 0 off, 1 on, 2 auto (still-capture LED)
+    torch: u32 = 0, // 0 off, 1 on (continuous LED)
+    focus_mode: u32 = 0, // 0 continuous-auto, 1 locked, 2 point-single
+    exposure_mode: u32 = 0, // 0 continuous-auto, 1 locked
+    focus_point_x: f32 = 0.5, // tap POI, normalized 0..1
+    focus_point_y: f32 = 0.5,
+    exposure_linked: u32 = 1, // 1 exposure POI follows focus POI, 0 decoupled
+    exposure_point_x: f32 = 0.5, // used when decoupled
+    exposure_point_y: f32 = 0.5,
+    exposure_bias_ev: f32 = 0, // clamped to [-8, 8]; SDK re-clamps to device
+    zoom_factor: f32 = 1, // >= 1; clamped to [1, max_zoom_factor or 128]
+    max_zoom_factor: f32 = 0, // SDK-reported device ceiling; 0 = unknown
+    mirror_save_policy: u32 = 0, // 0 uniform (front mirrors every surface)
+    reserved: u32 = 0,
+};
+
+fn clampF32(v: f32, lo: f32, hi: f32) f32 {
+    if (std.math.isNan(v)) return lo;
+    return std.math.clamp(v, lo, hi);
+}
+
+/// Pure normalization: clamps every field to its valid envelope so the stored
+/// controls (and the read-back the SDK applies) are always sane, whatever the
+/// caller passed. No clock, no allocation - a fixed function of the input.
+fn normalizeCameraControls(c: CameraControls) CameraControls {
+    var out = c;
+    out.flash_mode = if (c.flash_mode <= 2) c.flash_mode else 0;
+    out.torch = if (c.torch != 0) 1 else 0;
+    out.focus_mode = if (c.focus_mode <= 2) c.focus_mode else 0;
+    out.exposure_mode = if (c.exposure_mode <= 1) c.exposure_mode else 0;
+    out.focus_point_x = clampF32(c.focus_point_x, 0, 1);
+    out.focus_point_y = clampF32(c.focus_point_y, 0, 1);
+    out.exposure_linked = if (c.exposure_linked != 0) 1 else 0;
+    out.exposure_point_x = clampF32(c.exposure_point_x, 0, 1);
+    out.exposure_point_y = clampF32(c.exposure_point_y, 0, 1);
+    out.exposure_bias_ev = clampF32(c.exposure_bias_ev, -8, 8);
+    out.max_zoom_factor = if (c.max_zoom_factor >= 1 and !std.math.isNan(c.max_zoom_factor)) c.max_zoom_factor else 0;
+    const zoom_ceiling: f32 = if (out.max_zoom_factor >= 1) out.max_zoom_factor else 128;
+    out.zoom_factor = clampF32(c.zoom_factor, 1, zoom_ceiling);
+    out.mirror_save_policy = 0; // only uniform today; reserved values normalize to 0
+    out.reserved = 0;
+    return out;
+}
+
+/// Stores the caller's normalized camera intent on the session. The SDK reads
+/// it back with goss_session_camera_controls and applies it to the platform
+/// camera; the engine itself never calls camera hardware.
+pub export fn goss_session_set_camera_controls(session: ?*Session, controls: ?*const CameraControls) Status {
+    const s = session orelse return .invalid_argument;
+    const c = controls orelse return .invalid_argument;
+    s.camera_controls = normalizeCameraControls(c.*);
+    return .ok;
+}
+
+/// Reads the normalized camera controls back for the SDK to apply.
+pub export fn goss_session_camera_controls(session: ?*Session, out: ?*CameraControls) Status {
+    const s = session orelse return .invalid_argument;
+    const o = out orelse return .invalid_argument;
+    o.* = s.camera_controls;
+    return .ok;
+}
+
+/// The single point that resolves the effective mirror for every output
+/// surface (preview, recording, live, capture). Policy 0 (uniform) bakes the
+/// front-camera mirror the frame declares into all of them, so every viewer
+/// sees the same flip; reserved policies normalize to 0.
+fn resolveMirror(s: *const Session, flags: u32) bool {
+    _ = s;
+    return flags & frame_flag_mirror != 0;
 }
 
 pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
@@ -4041,6 +4120,60 @@ test "alloc and free round-trip through the abi allocator" {
 
 test "abi version packs major and minor" {
     try t.expectEqual((@as(u32, abi_major) << 16) | abi_minor, goss_abi_version());
+}
+
+test "camera controls normalize to their valid envelope" {
+    const out = normalizeCameraControls(.{
+        .flash_mode = 99,
+        .torch = 7,
+        .focus_mode = 5,
+        .exposure_mode = 9,
+        .focus_point_x = 5.0,
+        .focus_point_y = -2.0,
+        .exposure_linked = 3,
+        .exposure_point_x = 1.5,
+        .exposure_point_y = 0.25,
+        .exposure_bias_ev = 40,
+        .zoom_factor = 99,
+        .max_zoom_factor = 4,
+        .mirror_save_policy = 1,
+        .reserved = 123,
+    });
+    try t.expectEqual(@as(u32, 0), out.flash_mode); // invalid enum -> off
+    try t.expectEqual(@as(u32, 1), out.torch); // nonzero -> on
+    try t.expectEqual(@as(u32, 0), out.focus_mode);
+    try t.expectEqual(@as(u32, 0), out.exposure_mode);
+    try t.expectEqual(@as(f32, 1.0), out.focus_point_x); // clamped to [0,1]
+    try t.expectEqual(@as(f32, 0.0), out.focus_point_y);
+    try t.expectEqual(@as(u32, 1), out.exposure_linked);
+    try t.expectEqual(@as(f32, 1.0), out.exposure_point_x);
+    try t.expectEqual(@as(f32, 0.25), out.exposure_point_y);
+    try t.expectEqual(@as(f32, 8.0), out.exposure_bias_ev); // clamped to [-8,8]
+    try t.expectEqual(@as(f32, 4.0), out.zoom_factor); // clamped to [1, max=4]
+    try t.expectEqual(@as(u32, 0), out.mirror_save_policy); // reserved -> uniform
+    try t.expectEqual(@as(u32, 0), out.reserved);
+
+    // Unknown device ceiling (max < 1) falls back to the 128x cap.
+    const wide = normalizeCameraControls(.{ .zoom_factor = 200, .max_zoom_factor = 0 });
+    try t.expectEqual(@as(f32, 128.0), wide.zoom_factor);
+    try t.expectEqual(@as(f32, 0.0), wide.max_zoom_factor);
+}
+
+test "camera controls set-get round-trips the normalized value" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+    var in: CameraControls = .{ .zoom_factor = 0.1, .exposure_bias_ev = -99, .focus_point_x = 2.0 };
+    try t.expectEqual(Status.ok, goss_session_set_camera_controls(session, &in));
+    var back: CameraControls = undefined;
+    try t.expectEqual(Status.ok, goss_session_camera_controls(session, &back));
+    try t.expectEqual(@as(f32, 1.0), back.zoom_factor);
+    try t.expectEqual(@as(f32, -8.0), back.exposure_bias_ev);
+    try t.expectEqual(@as(f32, 1.0), back.focus_point_x);
+    // Null args are rejected, not crashes.
+    try t.expectEqual(Status.invalid_argument, goss_session_set_camera_controls(null, &in));
+    try t.expectEqual(Status.invalid_argument, goss_session_camera_controls(session, null));
 }
 
 test "engine and session lifecycle is leak-free" {

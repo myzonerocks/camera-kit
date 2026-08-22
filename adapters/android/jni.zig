@@ -464,6 +464,19 @@ export fn Java_com_gosslens_Gosslens_nativeMixOutputAudio(env: *JniEnv, cls: job
     return @intFromEnum(abi.goss_session_mix_output_audio(sessionFromHandle(session), mic, out, @intCast(@max(frame_count, 0)), @intCast(@max(sample_rate, 0)), @intCast(@max(channels, 0))));
 }
 
+/// buffer packs the 56-byte goss_camera_controls in native byte order.
+export fn Java_com_gosslens_Gosslens_nativeSetCameraControls(env: *JniEnv, cls: jobject, session: i64, buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_set_camera_controls(sessionFromHandle(session), @ptrCast(@alignCast(bytes))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeCameraControls(env: *JniEnv, cls: jobject, session: i64, buffer: jobject) i32 {
+    _ = cls;
+    const bytes = getDirectBufferAddress(env, buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_camera_controls(sessionFromHandle(session), @ptrCast(@alignCast(bytes))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;
