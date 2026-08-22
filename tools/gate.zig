@@ -319,6 +319,29 @@ const Gate = struct {
         }
     }
 
+    // A dash that glues a lowercase clause onto a sentence is a machine
+    // writing tell, not an appositive. Flags each hit with a quote and
+    // the fix. Runs on doc prose, commit messages, and PR bodies.
+    fn checkClauseDashes(g: *Gate, text: []const u8, context: []const u8) !void {
+        var from: usize = 0;
+        while (nextClauseDash(text, from)) |idx| {
+            const snippet = clauseSnippet(text, idx);
+            try g.flag("em-dash: {s} joins a clause with a dash (\"{s}\"); an em-dash joining a clause reads as AI-written, so restructure the sentence or use a spaced hyphen. An appositive like 'X - A definition' is allowed.", .{ context, snippet });
+            from = idx + 3;
+        }
+    }
+
+    fn checkProseDashes(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!isMarkdownDoc(path)) continue;
+            const stat = Io.Dir.cwd().statFile(g.io, path, .{}) catch continue;
+            if (stat.size > max_file_scan_bytes) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            const ctx = try std.fmt.allocPrint(g.arena, "'{s}'", .{path});
+            try g.checkClauseDashes(content, ctx);
+        }
+    }
+
     fn stagedPaths(g: *Gate) ![][]const u8 {
         const out = try g.git(&.{ "git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z" }, &.{0});
         return g.nulSeparated(out);
@@ -338,6 +361,7 @@ const Gate = struct {
             const body = rec[sep + 1 ..];
             const ctx = try std.fmt.allocPrint(g.arena, "commit {s}", .{sha[0..@min(sha.len, 12)]});
             try g.checkMessage(body, ctx);
+            try g.checkClauseDashes(body, ctx);
         }
     }
 };
@@ -359,11 +383,13 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkInbound(paths);
         try g.checkFileProvenance(paths);
         try g.checkCommentHygiene(&.{"--cached"});
+        try g.checkProseDashes(paths);
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
         try g.checkInbound(paths);
         try g.checkFileProvenance(paths);
+        try g.checkProseDashes(paths);
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});
@@ -371,6 +397,7 @@ pub fn main(init: std.process.Init) !u8 {
         };
         const message = try Io.Dir.cwd().readFileAlloc(g.io, file, arena, .limited(max_file_scan_bytes));
         try g.checkMessage(message, "commit message");
+        try g.checkClauseDashes(message, "commit message");
     } else if (std.mem.eql(u8, mode, "--log")) {
         const range = args.next() orelse {
             std.debug.print("gate: --log needs a rev range argument\n", .{});
@@ -391,6 +418,7 @@ pub fn main(init: std.process.Init) !u8 {
         const body = try Io.Dir.cwd().readFileAlloc(g.io, file, arena, .limited(max_file_scan_bytes));
         try g.checkMessage(body, "PR body");
         try g.checkProseShape(body, "PR body");
+        try g.checkClauseDashes(body, "PR body");
     } else {
         std.debug.print("gate: unknown mode '{s}'\n", .{mode});
         return 2;
@@ -558,6 +586,62 @@ fn findVerboseMarker(line: []const u8) ?[]const u8 {
     return null;
 }
 
+// An em-dash (U+2014) or en-dash (U+2013) at the start of s, returned as
+// its byte length, or 0. Both encode as three bytes under E2 80.
+fn dashLen(s: []const u8) usize {
+    if (s.len >= 3 and s[0] == 0xE2 and s[1] == 0x80 and (s[2] == 0x94 or s[2] == 0x93)) return 3;
+    return 0;
+}
+
+// A dash joins a clause when its next non-space character is a lowercase
+// ascii letter. An uppercase letter (an appositive or definition), a
+// digit (a numeric range like 10-20), or anything else is left alone.
+fn joinsClause(after: []const u8) bool {
+    var i: usize = 0;
+    while (i < after.len and (after[i] == ' ' or after[i] == '\t')) i += 1;
+    if (i >= after.len) return false;
+    return after[i] >= 'a' and after[i] <= 'z';
+}
+
+// Index of the next clause-joining dash at or after `from`, or null. The
+// one scanner behind both the flag path and the test helper.
+fn nextClauseDash(text: []const u8, from: usize) ?usize {
+    var i: usize = from;
+    while (i < text.len) : (i += 1) {
+        const dl = dashLen(text[i..]);
+        if (dl == 0) continue;
+        if (joinsClause(text[i + dl ..])) return i;
+        i += dl - 1;
+    }
+    return null;
+}
+
+fn hasClauseDash(text: []const u8) bool {
+    return nextClauseDash(text, 0) != null;
+}
+
+// A short quote around the dash, bounded to its own line and a small
+// window so a violation shows the joined clause, not the paragraph.
+fn clauseSnippet(text: []const u8, dash_index: usize) []const u8 {
+    var line_start: usize = dash_index;
+    while (line_start > 0 and text[line_start - 1] != '\n') line_start -= 1;
+    var line_end: usize = dash_index;
+    while (line_end < text.len and text[line_end] != '\n') line_end += 1;
+    const window: usize = 24;
+    const start = if (dash_index - line_start > window) dash_index - window else line_start;
+    const stop = if (line_end - dash_index > window) dash_index + window else line_end;
+    return std.mem.trim(u8, text[start..stop], " \t\r");
+}
+
+// Authored markdown prose, the only files scanned for clause dashes. The
+// private docs tree is gitignored and never scanned; source keeps its
+// own spaced hyphens and is out of scope.
+fn isMarkdownDoc(path: []const u8) bool {
+    if (!std.mem.endsWith(u8, path, ".md")) return false;
+    if (std.mem.startsWith(u8, path, "docs/private/")) return false;
+    return true;
+}
+
 test "top-level trees require their re-include line" {
     const ignore = "!core/**\n!tools/**\ndocs/private/\n";
     try std.testing.expect(hasLine(ignore, "!core/**"));
@@ -672,4 +756,29 @@ test "checklist lines are recognized" {
     try std.testing.expect(isChecklistLine("- [ ] zig build ci green"));
     try std.testing.expect(isChecklistLine("- [x] real device run"));
     try std.testing.expect(!isChecklistLine("- a plain bullet"));
+}
+
+test "a dash joining a lowercase clause is the AI tell, an appositive and a range are not" {
+    // Em-dash then a lowercase clause is the pattern to catch.
+    try std.testing.expect(hasClauseDash("someone \xE2\x80\x94 every thread stays end-to-end encrypted"));
+    // Em-dash then a capital is an appositive or definition, allowed.
+    try std.testing.expect(!hasClauseDash("Melbourne \xE2\x80\x94 A city located in Victoria, AU."));
+    // A digit on the far side is a numeric range, allowed.
+    try std.testing.expect(!hasClauseDash("2013\xE2\x80\x9315"));
+    try std.testing.expect(!hasClauseDash("10\xE2\x80\x9320"));
+    // An en-dash gluing a lowercase clause is the same tell.
+    try std.testing.expect(hasClauseDash("it stopped \xE2\x80\x93 then it resumed"));
+    // A title like the SDK headers keeps its dash before a capital.
+    try std.testing.expect(!hasClauseDash("Gosslens \xE2\x80\x94 Kotlin SDK"));
+    // A plain spaced hyphen is never a hit.
+    try std.testing.expect(!hasClauseDash("a real web page - see the demo"));
+}
+
+test "only authored markdown prose is scanned for clause dashes" {
+    try std.testing.expect(isMarkdownDoc("README.md"));
+    try std.testing.expect(isMarkdownDoc("lenses/format.md"));
+    try std.testing.expect(isMarkdownDoc("sdk/ts/README.md"));
+    try std.testing.expect(!isMarkdownDoc("docs/private/notes.md"));
+    try std.testing.expect(!isMarkdownDoc("core/graph/node.zig"));
+    try std.testing.expect(!isMarkdownDoc("adapters/beauty/beauty_shim.cc"));
 }
