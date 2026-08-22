@@ -125,6 +125,7 @@ export interface GossSessionEvents {
 interface EngineModule {
   HEAPU8: Uint8Array;
   HEAP16: Int16Array;
+  HEAP32: Int32Array;
   HEAPF32: Float32Array;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[], opts: { async: true }): Promise<number>;

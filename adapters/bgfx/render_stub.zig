@@ -82,6 +82,8 @@ pub const Renderer = struct {
     }
 
     pub const PersistentTexture = struct {
+        handle: TextureHandle = .{},
+
         pub fn rebind(self: *PersistentTexture, width: u16, height: u16, format: u32, native_ptr: usize) TextureHandle {
             _ = self;
             _ = width;
@@ -93,6 +95,15 @@ pub const Renderer = struct {
 
         pub fn deinit(self: *PersistentTexture) void {
             _ = self;
+        }
+
+        pub fn uploadCopy(self: *PersistentTexture, width: u16, height: u16, format: u32, data: [*]const u8, stride: u32) TextureHandle {
+            _ = width;
+            _ = height;
+            _ = format;
+            _ = data;
+            _ = stride;
+            return self.handle;
         }
     };
 
@@ -163,6 +174,33 @@ pub const Renderer = struct {
         _ = frame_width;
         _ = frame_height;
         _ = intensity;
+    }
+
+    pub fn clearComposite(view_id: u16, target: OffscreenTarget, width: u16, height: u16) void {
+        _ = view_id;
+        _ = target;
+        _ = width;
+        _ = height;
+    }
+
+    pub fn submitLayoutSource(r: *Renderer, view_id: u16, source_tex: TextureHandle, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
+        _ = r;
+        _ = view_id;
+        _ = source_tex;
+        _ = target;
+        _ = dx;
+        _ = dy;
+        _ = dw;
+        _ = dh;
+    }
+
+    pub fn setLayoutViewport(view_id: u16, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
+        _ = view_id;
+        _ = target;
+        _ = dx;
+        _ = dy;
+        _ = dw;
+        _ = dh;
     }
 
     pub fn submitShaderPass(r: *Renderer, view_id: u16, program: ProgramHandle, input_texture: TextureHandle, mask_texture: TextureHandle) void {

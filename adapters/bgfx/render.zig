@@ -686,6 +686,32 @@ pub const Renderer = struct {
             if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
             self.* = .{};
         }
+
+        /// Uploads a copy of RGBA/BGRA `data` into this texture, creating or
+        /// resizing on a dimension change. Mirrors uploadRgba's axis flip so a
+        /// composited source matches the camera path, but owns its own texture
+        /// so a multi-source composite never clobbers the shared upload cache.
+        pub fn uploadCopy(self: *PersistentTexture, width: u16, height: u16, format: u32, data: [*]const u8, stride: u32) c.bgfx_texture_handle_t {
+            if (self.handle.idx == invalid_handle or self.width != width or self.height != height) {
+                if (self.handle.idx != invalid_handle) c.bgfx_destroy_texture(self.handle);
+                const flags = c.BGFX_SAMPLER_U_CLAMP | c.BGFX_SAMPLER_V_CLAMP;
+                self.handle = c.bgfx_create_texture_2d(width, height, false, 1, format, flags, null, 0);
+                self.width = width;
+                self.height = height;
+            }
+            const mem = c.bgfx_alloc(@as(u32, width) * height * 4) orelse return self.handle;
+            const dst: [*]u8 = mem.*.data;
+            for (0..height) |row| {
+                const src_row = data[(height - 1 - row) * stride ..];
+                const dst_row = dst[row * width * 4 ..];
+                for (0..width) |col| {
+                    const src_col = width - 1 - col;
+                    @memcpy(dst_row[col * 4 ..][0..4], src_row[src_col * 4 ..][0..4]);
+                }
+            }
+            c.bgfx_update_texture_2d(self.handle, 0, 0, 0, 0, width, height, mem, std.math.maxInt(u16));
+            return self.handle;
+        }
     };
 
     /// Verifies the override actually landed, keeping pt's handle alive
@@ -924,6 +950,38 @@ pub const Renderer = struct {
         c.bgfx_set_texture(2, r.tex_mask, mask_texture, std.math.maxInt(u32));
         c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
         c.bgfx_submit(view_id, program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Clears `target` to opaque black across the whole frame, so any region a
+    /// multi-source composite leaves uncovered shows a defined backdrop instead
+    /// of stale contents. The touch forces the clear with no draw.
+    pub fn clearComposite(view_id: c.bgfx_view_id_t, target: OffscreenTarget, width: u16, height: u16) void {
+        c.bgfx_set_view_frame_buffer(view_id, target.framebuffer);
+        c.bgfx_set_view_rect(view_id, 0, 0, width, height);
+        c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_COLOR | c.BGFX_CLEAR_DEPTH, 0x000000ff, 1.0, 0);
+        c.bgfx_touch(view_id);
+    }
+
+    /// Draws `source_tex` (RGBA) scaled to fill the destination rectangle (in
+    /// `target` pixels) as one placed source of a composite - a viewport draw
+    /// with the passthrough program, no clear so earlier sources stay under it.
+    pub fn submitLayoutSource(r: *Renderer, view_id: c.bgfx_view_id_t, source_tex: c.bgfx_texture_handle_t, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
+        c.bgfx_set_view_frame_buffer(view_id, target.framebuffer);
+        c.bgfx_set_view_rect(view_id, @intCast(dx), @intCast(dy), dw, dh);
+        c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
+        if (!r.setupFullScreenQuad(view_id, 0, false)) return;
+        c.bgfx_set_texture(0, r.tex_color, source_tex, std.math.maxInt(u32));
+        c.bgfx_set_state(c.BGFX_STATE_WRITE_RGB | c.BGFX_STATE_WRITE_A, 0);
+        c.bgfx_submit(view_id, r.rgba_program, 0, c.BGFX_DISCARD_ALL);
+    }
+
+    /// Points `view_id` at a sub-rectangle of `target` with no clear, so the
+    /// caller can draw the camera preview into one composite cell via
+    /// submitPreview (which fills whatever viewport is set).
+    pub fn setLayoutViewport(view_id: c.bgfx_view_id_t, target: OffscreenTarget, dx: u16, dy: u16, dw: u16, dh: u16) void {
+        c.bgfx_set_view_frame_buffer(view_id, target.framebuffer);
+        c.bgfx_set_view_rect(view_id, @intCast(dx), @intCast(dy), dw, dh);
+        c.bgfx_set_view_clear(view_id, c.BGFX_CLEAR_NONE, 0, 1.0, 0);
     }
 
     /// Draws one lens lut.pass node as a full-screen pass into view_id:
