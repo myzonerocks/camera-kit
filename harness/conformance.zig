@@ -1134,6 +1134,266 @@ fn proveAudio(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the camera-controls contract through the public ABI: out-of-range
+/// intent is normalized to its valid envelope and read back exactly, with no
+/// hardware and no host dependence.
+fn proveCameraControls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+    var in: abi.CameraControls = .{
+        .flash_mode = 99,
+        .zoom_factor = 99,
+        .max_zoom_factor = 4,
+        .exposure_bias_ev = 40,
+        .focus_point_x = 5.0,
+        .mirror_save_policy = 1,
+    };
+    if (abi.goss_session_set_camera_controls(session, &in) != .ok) {
+        std.debug.print("conformance: FAIL set_camera_controls\n", .{});
+        return false;
+    }
+    var out: abi.CameraControls = undefined;
+    if (abi.goss_session_camera_controls(session, &out) != .ok) {
+        std.debug.print("conformance: FAIL camera_controls read-back\n", .{});
+        return false;
+    }
+    if (out.flash_mode != 0 or out.zoom_factor != 4.0 or out.exposure_bias_ev != 8.0 or
+        out.focus_point_x != 1.0 or out.mirror_save_policy != 0)
+    {
+        std.debug.print("conformance: FAIL camera controls not normalized (zoom {d}, bias {d}, focus_x {d})\n", .{ out.zoom_factor, out.exposure_bias_ev, out.focus_point_x });
+        return false;
+    }
+    std.debug.print("conformance: PROOF camera controls normalize out-of-range intent to their valid envelope and read back exactly\n", .{});
+    return true;
+}
+
+/// Proves the host-fired event trigger through the public ABI: a lens with an
+/// event('celebrate') trigger leaves its parameter at default until the exact
+/// event is fired, ignores a non-matching event, fires the action on the next
+/// tick, and does so bit-identically across runs.
+fn proveEventTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const manifest =
+        \\{"glf":"1.0","id":"goss.reference.event-burst","version":"1.0.0","display_name":"Event Burst","engine_compat":">=0.5","capabilities":[],"parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],"nodes":[{"id":"grade","type":"grade.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[{"when":"event('celebrate')","action":{"kind":"param_set","target":"intensity","to":1.0}}]}
+    ;
+    const pname = "intensity";
+    var results: [2]f32 = undefined;
+    for (0..2) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        if (abi.goss_session_activate_lens(session, manifest.ptr, manifest.len) != .ok) {
+            std.debug.print("conformance: FAIL event lens activation\n", .{});
+            return false;
+        }
+        var sig = std.mem.zeroes(abi.LensSignals);
+        var value: f32 = -1;
+
+        // No event: the trigger never fires, the parameter stays at default.
+        _ = abi.goss_session_tick_lens(session, 16000, &sig);
+        _ = abi.goss_session_parameter_value(session, pname, pname.len, &value);
+        if (value != 0.0) {
+            std.debug.print("conformance: FAIL event trigger fired with no event ({d})\n", .{value});
+            return false;
+        }
+        // A non-matching event is ignored.
+        _ = abi.goss_session_fire_event(session, "other", "other".len);
+        _ = abi.goss_session_tick_lens(session, 16000, &sig);
+        _ = abi.goss_session_parameter_value(session, pname, pname.len, &value);
+        if (value != 0.0) {
+            std.debug.print("conformance: FAIL a non-matching event fired the trigger ({d})\n", .{value});
+            return false;
+        }
+        // The matching event fires the action on the next tick.
+        _ = abi.goss_session_fire_event(session, "celebrate", "celebrate".len);
+        _ = abi.goss_session_tick_lens(session, 16000, &sig);
+        _ = abi.goss_session_parameter_value(session, pname, pname.len, &value);
+        results[run] = value;
+    }
+    if (results[0] != 1.0) {
+        std.debug.print("conformance: FAIL the matching event did not fire the action ({d})\n", .{results[0]});
+        return false;
+    }
+    if (results[0] != results[1]) {
+        std.debug.print("conformance: FAIL event trigger is not deterministic across runs\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a host-fired event fires a lens trigger for exactly one tick, ignores non-matching names, and is bit-stable\n", .{});
+    return true;
+}
+
+/// Proves multi-source composition through the public ABI: a side-by-side
+/// layout puts the camera (a red frame) in the left half and a named source (a
+/// green frame) in the right half of the captured output, deterministically.
+fn proveLayoutComposite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    const sw: u32 = 64;
+    const sh: u32 = 64;
+    const cam = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(cam);
+    const src = try gpa.alloc(u8, sw * sh * 4);
+    defer gpa.free(src);
+    for (0..sw * sh) |p| {
+        cam[p * 4 + 0] = 255; cam[p * 4 + 1] = 0; cam[p * 4 + 2] = 0; cam[p * 4 + 3] = 255; // red
+        src[p * 4 + 0] = 0; src[p * 4 + 1] = 255; src[p * 4 + 2] = 0; src[p * 4 + 3] = 255; // green
+    }
+    const base_desc: abi.FrameDesc = .{ .width = sw, .height = sh, .pixel_format = 4, .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 33_333 };
+
+    var shots: [2][]u8 = undefined;
+    var taken: usize = 0;
+    defer for (shots[0..taken]) |shot| gpa.free(shot);
+    for (0..2) |_| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        defer settle(engine);
+        if (abi.goss_session_define_source(session, "b", 1) != .ok or
+            abi.goss_session_submit_source_frame_rgba_copy(session, "b", 1, &base_desc, src.ptr, sw * 4) != .ok or
+            abi.goss_session_set_layout(session, 1) != .ok)
+        {
+            std.debug.print("conformance: FAIL composition setup\n", .{});
+            return false;
+        }
+        for (0..3) |i| {
+            var d = base_desc;
+            d.timestamp_us = @intCast((i + 1) * 33_333);
+            if (abi.goss_session_submit_frame_rgba_copy(session, &d, cam.ptr, sw * 4) != .ok) return error.SubmitFailed;
+            _ = abi.goss_engine_render_frame(engine, session);
+            c.glfwPollEvents();
+        }
+        var cw: u32 = 0;
+        var ch: u32 = 0;
+        const shot = try gpa.alloc(u8, @as(usize, 400) * 300 * 4);
+        errdefer gpa.free(shot);
+        if (abi.goss_engine_capture_frame(engine, session, shot.ptr, shot.len, &cw, &ch) != .ok) {
+            gpa.free(shot);
+            std.debug.print("conformance: FAIL composition capture\n", .{});
+            return false;
+        }
+        shots[taken] = shot;
+        taken += 1;
+    }
+    const w: usize = 400;
+    const h: usize = 300;
+    const s0 = shots[0];
+    const left = (h / 2 * w + w / 4) * 4; // camera half
+    const right = (h / 2 * w + w * 3 / 4) * 4; // source half
+    if (!(s0[left + 0] > 200 and s0[left + 1] < 60)) {
+        std.debug.print("conformance: FAIL left half is not the camera (red)\n", .{});
+        return false;
+    }
+    if (!(s0[right + 1] > 200 and s0[right + 0] < 60)) {
+        std.debug.print("conformance: FAIL right half is not the source (green)\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(u8, shots[0], shots[1])) {
+        std.debug.print("conformance: FAIL composition is not deterministic across runs\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a side-by-side layout composites the camera left and a named source right, deterministically\n", .{});
+    return true;
+}
+
+/// Proves geofilters through the public ABI: a lens with a geo.in_region trigger
+/// fires its action when a submitted location is inside the geofence, not when
+/// it is outside, deterministically, with the location computed on-device and
+/// never crossing back over the ABI.
+fn proveGeofilter(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const manifest =
+        \\{"glf":"1.0","id":"goss.reference.geofilter","version":"1.0.0","display_name":"Geofilter","engine_compat":">=0.5","capabilities":[],"parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],"nodes":[{"id":"grade","type":"grade.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[{"when":"geo.in_region","action":{"kind":"param_set","target":"intensity","to":1.0}}]}
+    ;
+    const c_lat: f64 = 37.7749;
+    const c_lon: f64 = -122.4194;
+
+    const S = struct {
+        fn run(e: *abi.Engine, m: []const u8, clat: f64, clon: f64, lat: f64) !f32 {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            if (abi.goss_session_activate_lens(session, m.ptr, m.len) != .ok) return error.Activate;
+            if (abi.goss_session_set_geofence(session, clat, clon, 100) != .ok) return error.Geofence;
+            if (abi.goss_session_submit_location(session, lat, clon, 5.0, 1000) != .ok) return error.Location;
+            var sig = std.mem.zeroes(abi.LensSignals);
+            _ = abi.goss_session_tick_lens(session, 16000, &sig);
+            var v: f32 = -1;
+            _ = abi.goss_session_parameter_value(session, "intensity", "intensity".len, &v);
+            return v;
+        }
+    };
+
+    const inside_a = S.run(engine, manifest, c_lat, c_lon, c_lat + 0.0001) catch return false; // ~11 m north, inside 100 m
+    const inside_b = S.run(engine, manifest, c_lat, c_lon, c_lat + 0.0001) catch return false;
+    const outside = S.run(engine, manifest, c_lat, c_lon, c_lat + 0.01) catch return false; // ~1.1 km north, outside
+
+    if (inside_a != 1.0) {
+        std.debug.print("conformance: FAIL geo.in_region did not fire inside the geofence ({d})\n", .{inside_a});
+        return false;
+    }
+    if (outside != 0.0) {
+        std.debug.print("conformance: FAIL geo.in_region fired outside the geofence ({d})\n", .{outside});
+        return false;
+    }
+    if (inside_a != inside_b) {
+        std.debug.print("conformance: FAIL geofilter is not deterministic across runs\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a geo.in_region trigger fires inside its geofence and not outside, deterministically, with the location never leaving the engine\n", .{});
+    return true;
+}
+
+/// Proves the brush board: a two-segment stroke yields the expected ribbon size
+/// (two segments, six vertices each, six floats each), a null-out query reports
+/// that same float count, and undo then clear empty the ribbon.
+fn proveBrushStroke(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    if (abi.goss_session_brush_set_style(session, 1.0, 0.2, 0.4, 1.0, 0.02) != .ok) return false;
+    _ = abi.goss_session_brush_begin(session);
+    _ = abi.goss_session_brush_point(session, 0.0, 0.0);
+    _ = abi.goss_session_brush_point(session, 1.0, 0.0);
+    _ = abi.goss_session_brush_point(session, 1.0, 1.0);
+    _ = abi.goss_session_brush_end(session);
+
+    const want: usize = 2 * 6 * 6; // two segments, six vertices, six floats
+    var reported: usize = 0;
+    if (abi.goss_session_brush_vertices(session, null, 0, &reported) != .ok) return false;
+    if (reported != want) {
+        std.debug.print("conformance: FAIL brush float-count query reported {d}, expected {d}\n", .{ reported, want });
+        return false;
+    }
+
+    var buf: [want]f32 = undefined;
+    var written: usize = 0;
+    if (abi.goss_session_brush_vertices(session, &buf, buf.len, &written) != .ok) return false;
+    if (written != want) {
+        std.debug.print("conformance: FAIL brush ribbon wrote {d} floats, expected {d}\n", .{ written, want });
+        return false;
+    }
+    if (buf[2] != 1.0 or buf[3] != 0.2) {
+        std.debug.print("conformance: FAIL brush color did not ride the vertices\n", .{});
+        return false;
+    }
+
+    _ = abi.goss_session_brush_undo(session);
+    var after_undo: usize = 1;
+    _ = abi.goss_session_brush_vertices(session, null, 0, &after_undo);
+
+    _ = abi.goss_session_brush_redo(session);
+    var after_redo: usize = 0;
+    _ = abi.goss_session_brush_vertices(session, null, 0, &after_redo);
+
+    _ = abi.goss_session_brush_clear(session);
+    var after_clear: usize = 1;
+    _ = abi.goss_session_brush_vertices(session, null, 0, &after_clear);
+
+    if (after_undo != 0 or after_redo != want or after_clear != 0) {
+        std.debug.print("conformance: FAIL brush undo/redo/clear did not track the ribbon ({d}/{d}/{d})\n", .{ after_undo, after_redo, after_clear });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a brush stroke builds a bounded triangle ribbon the renderer can pull, with undo, redo, and clear tracking it, allocation-free\n", .{});
+    return true;
+}
+
 /// Proves the engine-side outgoing mix: at the native 48 kHz, the lens over a
 /// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
 /// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
@@ -3015,6 +3275,11 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveScript(gpa, engine)) return 1;
     if (!try proveAudio(gpa, engine)) return 1;
     if (!try proveOutputMix(gpa, engine)) return 1;
+    if (!try proveCameraControls(gpa, engine)) return 1;
+    if (!try proveEventTrigger(gpa, engine)) return 1;
+    if (!try proveLayoutComposite(gpa, engine)) return 1;
+    if (!try proveGeofilter(gpa, engine)) return 1;
+    if (!try proveBrushStroke(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;

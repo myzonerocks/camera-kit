@@ -9,7 +9,7 @@
 const std = @import("std");
 const abi = @import("abi");
 
-const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig, abi.RendererDesc, abi.FramePlanes, abi.FaceResult, abi.HandResult, abi.PoseResult, abi.LensSignals };
+const abi_types = .{ abi.FrameDesc, abi.Landmarks, abi.EngineConfig, abi.SessionConfig, abi.RendererDesc, abi.FramePlanes, abi.FaceResult, abi.HandResult, abi.PoseResult, abi.LensSignals, abi.CameraControls };
 
 // Exported functions with their frozen C signatures. Kept next to the type
 // manifest so a new export without a manifest entry is caught in review.
@@ -36,6 +36,25 @@ const abi_functions = [_][]const u8{
     "goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)",
     "goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)",
     "goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
+    "goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)",
+    "goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)",
+    "goss_status goss_session_fire_event(goss_session *session, const uint8_t *name, size_t name_len)",
+    "goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len)",
+    "goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len)",
+    "goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)",
+    "goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)",
+    "goss_status goss_session_clear_layout(goss_session *session)",
+    "goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us)",
+    "goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m)",
+    "goss_status goss_session_clear_geofence(goss_session *session)",
+    "goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)",
+    "goss_status goss_session_brush_begin(goss_session *session)",
+    "goss_status goss_session_brush_point(goss_session *session, float x, float y)",
+    "goss_status goss_session_brush_end(goss_session *session)",
+    "goss_status goss_session_brush_undo(goss_session *session)",
+    "goss_status goss_session_brush_redo(goss_session *session)",
+    "goss_status goss_session_brush_clear(goss_session *session)",
+    "goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count)",
     "goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)",
     "goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)",
     "goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",

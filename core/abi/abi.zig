@@ -24,6 +24,9 @@ const media_recording = @import("media_recording");
 const photo = @import("photo");
 const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
+const comp = @import("layout");
+const geo = @import("geo");
+const stroke = @import("stroke");
 const physics = @import("physics");
 const script = @import("script");
 const audio_playback = @import("audio_playback");
@@ -71,7 +74,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 20;
+pub const abi_minor: u16 = 25;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -104,6 +107,14 @@ pub const FrameDesc = extern struct {
 pub const frame_flag_mirror: u32 = 1 << 0;
 pub const frame_rotation_shift: u5 = 8;
 pub const frame_rotation_mask: u32 = 0x3 << 8;
+
+/// The host may fire up to this many named events per tick; each name is
+/// truncated to this many bytes. Bounded so firing allocates nothing.
+const max_pending_events: usize = 8;
+const max_event_name: usize = 31;
+
+/// A composite source name is truncated to this many bytes.
+const max_source_name: usize = 31;
 
 pub const Landmarks = extern struct {
     points: ?[*]const f32,
@@ -448,6 +459,35 @@ pub const Session = struct {
     /// goss_session_mix_output_audio calls when the outgoing rate differs
     /// from the mixer's 48 kHz.
     mix_resampler: audio_mix.Resampler = .{},
+    /// The caller's normalized camera-hardware intent (validated at set-time);
+    /// the SDK reads it back and drives the platform camera. Inline POD.
+    camera_controls: CameraControls = .{},
+    /// Host-fired event names buffered until the next tick, where they reach
+    /// the trigger rail for exactly one tick and then clear. Fixed-size, so
+    /// firing an event allocates nothing.
+    pending_event_buf: [max_pending_events][max_event_name]u8 = undefined,
+    pending_event_len: [max_pending_events]u8 = undefined,
+    pending_event_count: u8 = 0,
+    /// Named RGBA sources for multi-source composition (Duet/Stitch, live
+    /// grids), in definition order; the camera is the implicit source 0. Fixed
+    /// arrays so the frame-path composite walks them without a hashmap.
+    source_names: [comp.max_sources][max_source_name]u8 = undefined,
+    source_name_len: [comp.max_sources]u8 = @splat(0),
+    source_tex: [comp.max_sources]render.Renderer.PersistentTexture = @splat(.{}),
+    source_dims: [comp.max_sources][2]u16 = @splat(.{ 0, 0 }),
+    source_has_frame: [comp.max_sources]bool = @splat(false),
+    source_count: u8 = 0,
+    layout_active: ?comp.Layout = null,
+    /// The last submitted location fix and the session's active geofence. The
+    /// engine computes geo.in_region on-device from these; the location itself
+    /// never crosses back over the ABI.
+    location_lat: f64 = 0,
+    location_lon: f64 = 0,
+    location_engine_fed: bool = false,
+    geofence: ?geo.Circle = null,
+    /// The draw and AR-brush board. The engine owns stroke state and undo/redo;
+    /// goss_session_brush_vertices reads the finished ribbon for the renderer.
+    brush: stroke.Board = .{},
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -960,7 +1000,7 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     const capture_out_width: u16 = if (s.capture_requested and s.capture_res_width != 0) s.capture_res_width else @intCast(r.width);
     const capture_out_height: u16 = if (s.capture_requested and s.capture_res_height != 0) s.capture_res_height else @intCast(r.height);
     if (s.capture_requested) try ensureCaptureTarget(e, capture_out_width, capture_out_height);
-    if (ready_count == 0 and !beauty_active) {
+    if (ready_count == 0 and !beauty_active and s.layout_active == null) {
         // view 0 may still be bound to an offscreen chain/beauty target
         // from an earlier frame that took the other branch below -
         // bgfx_set_view_frame_buffer is stateful across frames, nothing
@@ -1003,10 +1043,14 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     try ensureChainTargets(e, width, height);
     const targets = [2]render.Renderer.OffscreenTarget{ e.chain_targets[0].?, e.chain_targets[1].? };
 
-    render.Renderer.setViewTarget(0, targets[0], width, height);
-    r.submitPreview(0, current.preview, rotation * 90, mirror);
-    var input_texture = targets[0].texture;
     var next_view_id: u8 = 1;
+    if (s.layout_active) |lay| {
+        next_view_id = composeLayout(r, s, current, targets[0], width, height, rotation, mirror, lay);
+    } else {
+        render.Renderer.setViewTarget(0, targets[0], width, height);
+        r.submitPreview(0, current.preview, rotation * 90, mirror);
+    }
+    var input_texture = targets[0].texture;
 
     if (beauty_active) {
         input_texture = if (is_web)
@@ -1435,11 +1479,10 @@ fn renderCompositeChain(e: *Engine, r: *render.Renderer, s: *Session, current: C
     if (ready_count > 0) blitRecordingToSwapChain(e, r, next_view_id + 1);
 
     if (ready_count == 0) {
-        // beauty_active is guaranteed true here (the ready_count == 0
-        // and !beauty_active case already returned above): beauty's own
-        // output is a plain sampled texture, never a view's render
-        // target, so with no lens stage to hand it off to, it still
-        // needs one real draw to actually reach the swap chain.
+        // Either beauty or a multi-source layout produced input_texture as a
+        // plain sampled texture, not a view's render target, so with no lens
+        // stage to hand it off to it still needs one real draw to reach the
+        // swap chain. The no-beauty, no-layout case already returned above.
         render.Renderer.setViewTarget(next_view_id, finalTarget(e, s), output_width, output_height);
         r.submitShaderPass(next_view_id, r.passthroughProgram(), input_texture, r.default_mask_texture);
         if (s.capture_requested) blitCaptureToSwapChain(e, r, next_view_id + 1);
@@ -1560,6 +1603,7 @@ pub fn destroySession(session: *Session) void {
         session.preview_bgra.deinit();
         session.preview_y.deinit();
         session.preview_uv.deinit();
+        for (0..session.source_count) |i| session.source_tex[i].deinit();
     }
     session.engine.gpa.destroy(session);
 }
@@ -1851,7 +1895,7 @@ pub export fn goss_engine_render_frame(engine: ?*Engine, session: ?*Session) Sta
         }
         if (s.current) |current| {
             const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
-            const mirror = current.desc.flags & frame_flag_mirror != 0;
+            const mirror = resolveMirror(s, current.desc.flags);
             // Always through renderCompositeChain, which owns the one
             // authoritative "is anything actually active" check and its
             // own view-0-target reset for the plain-preview case. This
@@ -1919,7 +1963,7 @@ fn renderForCapture(e: *Engine, r: *render.Renderer, s: *Session) ?render.Render
     pollSegmentationMask(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
-        const mirror = current.desc.flags & frame_flag_mirror != 0;
+        const mirror = resolveMirror(s, current.desc.flags);
         renderCompositeChain(e, r, s, current, rotation, mirror) catch {
             r.submitPreview(0, current.preview, rotation * 90, mirror);
         };
@@ -2030,7 +2074,7 @@ fn renderLiveComposite(e: *Engine, r: *render.Renderer, s: *Session) void {
     pollSegmentationMask(s);
     if (s.current) |current| {
         const rotation = (current.desc.flags & frame_rotation_mask) >> frame_rotation_shift;
-        const mirror = current.desc.flags & frame_flag_mirror != 0;
+        const mirror = resolveMirror(s, current.desc.flags);
         renderCompositeChain(e, r, s, current, rotation, mirror) catch {
             r.submitPreview(0, current.preview, rotation * 90, mirror);
         };
@@ -2552,6 +2596,300 @@ pub export fn goss_engine_capture_still(engine: ?*Engine, session: ?*Session, co
         return .ok;
     }
     return encodeLossyPhoto(gpa, pixels, out_w, out_h, cfg.format, cfg.quality, cfg.color_space, 1, data[0..out_capacity], len_out);
+}
+
+/// Declarative camera-hardware intent. The engine validates and normalizes
+/// every field and stores it on the session; the SDK reads the normalized
+/// values back and drives the platform camera. The core never touches the
+/// camera - it only owns the contract and the mirror-save policy.
+pub const CameraControls = extern struct {
+    flash_mode: u32 = 0, // 0 off, 1 on, 2 auto (still-capture LED)
+    torch: u32 = 0, // 0 off, 1 on (continuous LED)
+    focus_mode: u32 = 0, // 0 continuous-auto, 1 locked, 2 point-single
+    exposure_mode: u32 = 0, // 0 continuous-auto, 1 locked
+    focus_point_x: f32 = 0.5, // tap POI, normalized 0..1
+    focus_point_y: f32 = 0.5,
+    exposure_linked: u32 = 1, // 1 exposure POI follows focus POI, 0 decoupled
+    exposure_point_x: f32 = 0.5, // used when decoupled
+    exposure_point_y: f32 = 0.5,
+    exposure_bias_ev: f32 = 0, // clamped to [-8, 8]; SDK re-clamps to device
+    zoom_factor: f32 = 1, // >= 1; clamped to [1, max_zoom_factor or 128]
+    max_zoom_factor: f32 = 0, // SDK-reported device ceiling; 0 = unknown
+    mirror_save_policy: u32 = 0, // 0 uniform (front mirrors every surface)
+    reserved: u32 = 0,
+};
+
+fn clampF32(v: f32, lo: f32, hi: f32) f32 {
+    if (std.math.isNan(v)) return lo;
+    return std.math.clamp(v, lo, hi);
+}
+
+/// Pure normalization: clamps every field to its valid envelope so the stored
+/// controls (and the read-back the SDK applies) are always sane, whatever the
+/// caller passed. No clock, no allocation - a fixed function of the input.
+fn normalizeCameraControls(c: CameraControls) CameraControls {
+    var out = c;
+    out.flash_mode = if (c.flash_mode <= 2) c.flash_mode else 0;
+    out.torch = if (c.torch != 0) 1 else 0;
+    out.focus_mode = if (c.focus_mode <= 2) c.focus_mode else 0;
+    out.exposure_mode = if (c.exposure_mode <= 1) c.exposure_mode else 0;
+    out.focus_point_x = clampF32(c.focus_point_x, 0, 1);
+    out.focus_point_y = clampF32(c.focus_point_y, 0, 1);
+    out.exposure_linked = if (c.exposure_linked != 0) 1 else 0;
+    out.exposure_point_x = clampF32(c.exposure_point_x, 0, 1);
+    out.exposure_point_y = clampF32(c.exposure_point_y, 0, 1);
+    out.exposure_bias_ev = clampF32(c.exposure_bias_ev, -8, 8);
+    out.max_zoom_factor = if (c.max_zoom_factor >= 1 and !std.math.isNan(c.max_zoom_factor)) c.max_zoom_factor else 0;
+    const zoom_ceiling: f32 = if (out.max_zoom_factor >= 1) out.max_zoom_factor else 128;
+    out.zoom_factor = clampF32(c.zoom_factor, 1, zoom_ceiling);
+    out.mirror_save_policy = 0; // only uniform today; reserved values normalize to 0
+    out.reserved = 0;
+    return out;
+}
+
+/// Stores the caller's normalized camera intent on the session. The SDK reads
+/// it back with goss_session_camera_controls and applies it to the platform
+/// camera; the engine itself never calls camera hardware.
+pub export fn goss_session_set_camera_controls(session: ?*Session, controls: ?*const CameraControls) Status {
+    const s = session orelse return .invalid_argument;
+    const c = controls orelse return .invalid_argument;
+    s.camera_controls = normalizeCameraControls(c.*);
+    return .ok;
+}
+
+/// Reads the normalized camera controls back for the SDK to apply.
+pub export fn goss_session_camera_controls(session: ?*Session, out: ?*CameraControls) Status {
+    const s = session orelse return .invalid_argument;
+    const o = out orelse return .invalid_argument;
+    o.* = s.camera_controls;
+    return .ok;
+}
+
+/// The single point that resolves the effective mirror for every output
+/// surface (preview, recording, live, capture). Policy 0 (uniform) bakes the
+/// front-camera mirror the frame declares into all of them, so every viewer
+/// sees the same flip; reserved policies normalize to 0.
+fn resolveMirror(s: *const Session, flags: u32) bool {
+    _ = s;
+    return flags & frame_flag_mirror != 0;
+}
+
+fn findSource(s: *Session, name: []const u8) ?u8 {
+    for (0..s.source_count) |i| {
+        if (std.mem.eql(u8, s.source_names[i][0..s.source_name_len[i]], name)) return @intCast(i);
+    }
+    return null;
+}
+
+/// Registers a named RGBA source for multi-source composition. The camera is
+/// always the implicit source 0; named sources fill the layout after it in the
+/// order defined. Idempotent for a name already defined.
+pub export fn goss_session_define_source(session: ?*Session, name: ?[*]const u8, name_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    if (name_len == 0) return .invalid_argument;
+    const key = n[0..name_len];
+    if (findSource(s, key) != null) return .ok;
+    if (s.source_count + 1 >= comp.max_sources) return .invalid_argument; // camera + this
+    const slot = s.source_count;
+    const copy = @min(name_len, max_source_name);
+    @memcpy(s.source_names[slot][0..copy], n[0..copy]);
+    s.source_name_len[slot] = @intCast(copy);
+    s.source_tex[slot] = .{};
+    s.source_dims[slot] = .{ 0, 0 };
+    s.source_has_frame[slot] = false;
+    s.source_count += 1;
+    return .ok;
+}
+
+/// Removes a named source, freeing its texture; later sources shift down to
+/// keep the definition order dense.
+pub export fn goss_session_remove_source(session: ?*Session, name: ?[*]const u8, name_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    const idx = findSource(s, n[0..name_len]) orelse return .again;
+    s.source_tex[idx].deinit();
+    var i: u8 = idx;
+    while (i + 1 < s.source_count) : (i += 1) {
+        s.source_names[i] = s.source_names[i + 1];
+        s.source_name_len[i] = s.source_name_len[i + 1];
+        s.source_tex[i] = s.source_tex[i + 1];
+        s.source_dims[i] = s.source_dims[i + 1];
+        s.source_has_frame[i] = s.source_has_frame[i + 1];
+    }
+    s.source_count -= 1;
+    s.source_tex[s.source_count] = .{}; // its handle moved down; do not deinit here
+    s.source_has_frame[s.source_count] = false;
+    return .ok;
+}
+
+/// Uploads one RGBA/BGRA frame into a named source's own texture (no shared
+/// cache to clobber). Define the source first.
+pub export fn goss_session_submit_source_frame_rgba_copy(session: ?*Session, name: ?[*]const u8, name_len: usize, desc: ?*const FrameDesc, rgba: ?[*]const u8, stride: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const nm = name orelse return .invalid_argument;
+    const d = desc orelse return .invalid_argument;
+    const rgba_ptr = rgba orelse return .invalid_argument;
+    if (d.pixel_format != pixel_format_bgra8 and d.pixel_format != pixel_format_rgba8) return .invalid_argument;
+    const r = if (s.engine.renderer) |*r| r else return .renderer_unavailable;
+    _ = r;
+    const idx = findSource(s, nm[0..name_len]) orelse return .again;
+    const format: u32 = if (d.pixel_format == pixel_format_bgra8) render.c.BGFX_TEXTURE_FORMAT_BGRA8 else render.c.BGFX_TEXTURE_FORMAT_RGBA8;
+    _ = s.source_tex[idx].uploadCopy(@intCast(d.width), @intCast(d.height), format, rgba_ptr, stride);
+    s.source_dims[idx] = .{ @intCast(d.width), @intCast(d.height) };
+    s.source_has_frame[idx] = true;
+    return .ok;
+}
+
+/// Sets the composite arrangement over the camera plus the named sources
+/// (0 custom, 1 side-by-side, 2 top-bottom, 3 picture-in-picture, 4 grid). The
+/// composite runs at the head of the render chain; the rest is unchanged.
+pub export fn goss_session_set_layout(session: ?*Session, arrangement: u32) Status {
+    const s = session orelse return .invalid_argument;
+    const total: u8 = s.source_count + 1; // camera is source 0
+    s.layout_active = switch (arrangement) {
+        1 => comp.Layout.sideBySide(total),
+        2 => comp.Layout.topBottom(total),
+        3 => comp.Layout.pip(.{ 0.62, 0.62, 0.34, 0.34 }),
+        0, 4 => comp.Layout.grid(total),
+        else => return .invalid_argument,
+    };
+    return .ok;
+}
+
+/// Clears the composite, returning to a single-camera preview.
+pub export fn goss_session_clear_layout(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.layout_active = null;
+    return .ok;
+}
+
+/// Composites the camera (placement 0) and the named sources into targets0 at
+/// the head of the render chain: a full-frame clear, then each placed source
+/// drawn into its own viewport in draw order. Returns the next free view id for
+/// the rest of the chain. Allocation-free; walks the fixed layout arrays only.
+fn composeLayout(r: *render.Renderer, s: *Session, current: CurrentFrame, targets0: render.Renderer.OffscreenTarget, width: u16, height: u16, rotation: u32, mirror: bool, lay: comp.Layout) u8 {
+    render.Renderer.clearComposite(0, targets0, width, height);
+    var order: [comp.max_sources]u8 = undefined;
+    const n = lay.drawOrder(&order);
+    var view: u8 = 1;
+    const fw: f32 = @floatFromInt(width);
+    const fh: f32 = @floatFromInt(height);
+    for (order[0..n]) |p| {
+        if (p >= lay.count) continue;
+        const rect = lay.placements[p].rect;
+        const dx: u16 = @intFromFloat(std.math.clamp(rect[0], 0, 1) * fw);
+        const dy: u16 = @intFromFloat(std.math.clamp(rect[1], 0, 1) * fh);
+        const dw: u16 = @intFromFloat(std.math.clamp(rect[2], 0, 1) * fw);
+        const dh: u16 = @intFromFloat(std.math.clamp(rect[3], 0, 1) * fh);
+        if (dw == 0 or dh == 0) continue;
+        if (p == 0) {
+            render.Renderer.setLayoutViewport(view, targets0, dx, dy, dw, dh);
+            r.submitPreview(view, current.preview, rotation * 90, mirror);
+        } else {
+            const src = p - 1;
+            if (src >= s.source_count or !s.source_has_frame[src]) continue;
+            r.submitLayoutSource(view, s.source_tex[src].handle, targets0, dx, dy, dw, dh);
+        }
+        view += 1;
+    }
+    return view;
+}
+
+/// Submits a location fix. The engine computes geo.in_region on-device from this
+/// and the session's geofence; the location never crosses back over the ABI,
+/// only the boolean does. Overwrites in place, no allocation.
+pub export fn goss_session_submit_location(session: ?*Session, latitude: f64, longitude: f64, horizontal_accuracy_m: f32, timestamp_us: i64) Status {
+    const s = session orelse return .invalid_argument;
+    _ = horizontal_accuracy_m;
+    _ = timestamp_us;
+    if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180) return .invalid_argument;
+    s.location_lat = latitude;
+    s.location_lon = longitude;
+    s.location_engine_fed = true;
+    return .ok;
+}
+
+/// Sets the session's active geofence: a circle the app derives from a lens's
+/// intended location (the app owns lens metadata and discovery). geo.in_region
+/// reads true when a submitted location is within radius_m of the center.
+pub export fn goss_session_set_geofence(session: ?*Session, latitude: f64, longitude: f64, radius_m: f64) Status {
+    const s = session orelse return .invalid_argument;
+    if (latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180 or !(radius_m > 0)) return .invalid_argument;
+    s.geofence = .{ .lat = latitude, .lon = longitude, .radius_m = radius_m };
+    return .ok;
+}
+
+/// Clears the geofence; geo.in_region reads false with none set.
+pub export fn goss_session_clear_geofence(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.geofence = null;
+    return .ok;
+}
+
+/// Sets the color and half-width the next stroke begins with. Width is in
+/// normalized units; a non-positive width falls back to a hairline.
+pub export fn goss_session_brush_set_style(session: ?*Session, r: f32, g: f32, b: f32, a: f32, width: f32) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.setStyle(.{ r, g, b, a }, width);
+    return .ok;
+}
+
+/// Opens a new stroke in the current style. A fresh stroke drops the redo stack.
+pub export fn goss_session_brush_begin(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.begin();
+    return .ok;
+}
+
+/// Adds a point to the open stroke, in normalized screen space (0..1).
+pub export fn goss_session_brush_point(session: ?*Session, x: f32, y: f32) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.point(x, y);
+    return .ok;
+}
+
+/// Commits the open stroke. A stroke of fewer than two points is dropped.
+pub export fn goss_session_brush_end(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.end();
+    return .ok;
+}
+
+/// Removes the last committed stroke onto the redo stack.
+pub export fn goss_session_brush_undo(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.undo();
+    return .ok;
+}
+
+/// Replays the last undone stroke.
+pub export fn goss_session_brush_redo(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.redoLast();
+    return .ok;
+}
+
+/// Drops every stroke and both stacks.
+pub export fn goss_session_brush_clear(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.clear();
+    return .ok;
+}
+
+/// Writes the finished brush ribbon into out (x, y, r, g, b, a per vertex) and
+/// returns the float count through out_count. Passing a null out reports the
+/// float count the caller must size for. Allocation-free; reads finished
+/// strokes only.
+pub export fn goss_session_brush_vertices(session: ?*Session, out: ?[*]f32, capacity_floats: usize, out_count: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const count = out_count orelse return .invalid_argument;
+    const dst = out orelse {
+        count.* = s.brush.vertexFloatCount();
+        return .ok;
+    };
+    count.* = s.brush.buildVertices(dst[0..capacity_floats]);
+    return .ok;
 }
 
 pub export fn goss_session_create(engine: ?*Engine, config: ?*const SessionConfig, out_session: ?**Session) Status {
@@ -4005,6 +4343,23 @@ pub export fn goss_session_parameter_value(session: ?*Session, name: ?[*]const u
 /// effect value its triggers/ramps changed to the beauty chain, if one
 /// is enabled. Reports GOSS_AGAIN with no active lens, matching the
 /// no-chain-yet convention goss_session_set_beauty already uses.
+/// Fires a named event the next tick delivers to the lens's event('name')
+/// triggers for exactly one tick - drives an on-screen effect from an app
+/// moment; the engine knows the name, never its meaning. Buffered without
+/// allocation; a full buffer or over-long name is dropped/truncated, not error.
+pub export fn goss_session_fire_event(session: ?*Session, name: ?[*]const u8, name_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    if (name_len == 0) return .invalid_argument;
+    if (s.pending_event_count >= max_pending_events) return .ok; // dropped this tick
+    const copy_len = @min(name_len, max_event_name);
+    const slot = s.pending_event_count;
+    @memcpy(s.pending_event_buf[slot][0..copy_len], n[0..copy_len]);
+    s.pending_event_len[slot] = @intCast(copy_len);
+    s.pending_event_count += 1;
+    return .ok;
+}
+
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
@@ -4019,12 +4374,24 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
     }
+    if (s.location_engine_fed) {
+        if (s.geofence) |fence| {
+            live_signals.geo_in_region = geo.withinCircle(s.location_lat, s.location_lon, fence.lat, fence.lon, fence.radius_m);
+        }
+    }
+    // The events fired since the last tick reach the triggers for this tick
+    // only, then clear below - a one-tick pulse an edge-triggered action reads
+    // once. The view borrows the session's fixed buffer, valid for this call.
+    var event_view: [max_pending_events][]const u8 = undefined;
+    for (0..s.pending_event_count) |i| event_view[i] = s.pending_event_buf[i][0..s.pending_event_len[i]];
+    live_signals.events = event_view[0..s.pending_event_count];
     // The script drives parameters before triggers and ramps read them, so
     // its writes flow into this tick's effects.
     runScript(s, &live_signals);
     const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
     applyLensEffects(s, effects);
     playFiredSounds(s);
+    s.pending_event_count = 0;
     return .ok;
 }
 
@@ -4041,6 +4408,60 @@ test "alloc and free round-trip through the abi allocator" {
 
 test "abi version packs major and minor" {
     try t.expectEqual((@as(u32, abi_major) << 16) | abi_minor, goss_abi_version());
+}
+
+test "camera controls normalize to their valid envelope" {
+    const out = normalizeCameraControls(.{
+        .flash_mode = 99,
+        .torch = 7,
+        .focus_mode = 5,
+        .exposure_mode = 9,
+        .focus_point_x = 5.0,
+        .focus_point_y = -2.0,
+        .exposure_linked = 3,
+        .exposure_point_x = 1.5,
+        .exposure_point_y = 0.25,
+        .exposure_bias_ev = 40,
+        .zoom_factor = 99,
+        .max_zoom_factor = 4,
+        .mirror_save_policy = 1,
+        .reserved = 123,
+    });
+    try t.expectEqual(@as(u32, 0), out.flash_mode); // invalid enum -> off
+    try t.expectEqual(@as(u32, 1), out.torch); // nonzero -> on
+    try t.expectEqual(@as(u32, 0), out.focus_mode);
+    try t.expectEqual(@as(u32, 0), out.exposure_mode);
+    try t.expectEqual(@as(f32, 1.0), out.focus_point_x); // clamped to [0,1]
+    try t.expectEqual(@as(f32, 0.0), out.focus_point_y);
+    try t.expectEqual(@as(u32, 1), out.exposure_linked);
+    try t.expectEqual(@as(f32, 1.0), out.exposure_point_x);
+    try t.expectEqual(@as(f32, 0.25), out.exposure_point_y);
+    try t.expectEqual(@as(f32, 8.0), out.exposure_bias_ev); // clamped to [-8,8]
+    try t.expectEqual(@as(f32, 4.0), out.zoom_factor); // clamped to [1, max=4]
+    try t.expectEqual(@as(u32, 0), out.mirror_save_policy); // reserved -> uniform
+    try t.expectEqual(@as(u32, 0), out.reserved);
+
+    // Unknown device ceiling (max < 1) falls back to the 128x cap.
+    const wide = normalizeCameraControls(.{ .zoom_factor = 200, .max_zoom_factor = 0 });
+    try t.expectEqual(@as(f32, 128.0), wide.zoom_factor);
+    try t.expectEqual(@as(f32, 0.0), wide.max_zoom_factor);
+}
+
+test "camera controls set-get round-trips the normalized value" {
+    const engine = try createEngine(t.allocator, .{ .texture_pool_capacity = 0, .staging_pool_capacity = 0 });
+    defer destroyEngine(engine);
+    const session = try createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer destroySession(session);
+    var in: CameraControls = .{ .zoom_factor = 0.1, .exposure_bias_ev = -99, .focus_point_x = 2.0 };
+    try t.expectEqual(Status.ok, goss_session_set_camera_controls(session, &in));
+    var back: CameraControls = undefined;
+    try t.expectEqual(Status.ok, goss_session_camera_controls(session, &back));
+    try t.expectEqual(@as(f32, 1.0), back.zoom_factor);
+    try t.expectEqual(@as(f32, -8.0), back.exposure_bias_ev);
+    try t.expectEqual(@as(f32, 1.0), back.focus_point_x);
+    // Null args are rejected, not crashes.
+    try t.expectEqual(Status.invalid_argument, goss_session_set_camera_controls(null, &in));
+    try t.expectEqual(Status.invalid_argument, goss_session_camera_controls(session, null));
 }
 
 test "engine and session lifecycle is leak-free" {

@@ -1,4 +1,4 @@
-abi 0.20
+abi 0.25
 type abi.FrameDesc size=32 align=8
   field width offset=0 size=4
   field height offset=4 size=4
@@ -55,6 +55,21 @@ type abi.LensSignals size=232 align=8
   field world_tracking_state offset=8 size=8
   field audio_level offset=16 size=8
   field blendshapes offset=24 size=208
+type abi.CameraControls size=56 align=4
+  field flash_mode offset=0 size=4
+  field torch offset=4 size=4
+  field focus_mode offset=8 size=4
+  field exposure_mode offset=12 size=4
+  field focus_point_x offset=16 size=4
+  field focus_point_y offset=20 size=4
+  field exposure_linked offset=24 size=4
+  field exposure_point_x offset=28 size=4
+  field exposure_point_y offset=32 size=4
+  field exposure_bias_ev offset=36 size=4
+  field zoom_factor offset=40 size=4
+  field max_zoom_factor offset=44 size=4
+  field mirror_save_policy offset=48 size=4
+  field reserved offset=52 size=4
 fn uint32_t goss_abi_version(void)
 fn void *goss_alloc(size_t size)
 fn void goss_free(void *ptr, size_t size)
@@ -77,6 +92,25 @@ fn goss_status goss_engine_capture_still(goss_engine *engine, goss_session *sess
 fn goss_status goss_session_parameter_value(goss_session *session, const uint8_t *name, size_t name_len, float *out_value)
 fn goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames)
 fn goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)
+fn goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)
+fn goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)
+fn goss_status goss_session_fire_event(goss_session *session, const uint8_t *name, size_t name_len)
+fn goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len)
+fn goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len)
+fn goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride)
+fn goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement)
+fn goss_status goss_session_clear_layout(goss_session *session)
+fn goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us)
+fn goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m)
+fn goss_status goss_session_clear_geofence(goss_session *session)
+fn goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width)
+fn goss_status goss_session_brush_begin(goss_session *session)
+fn goss_status goss_session_brush_point(goss_session *session, float x, float y)
+fn goss_status goss_session_brush_end(goss_session *session)
+fn goss_status goss_session_brush_undo(goss_session *session)
+fn goss_status goss_session_brush_redo(goss_session *session)
+fn goss_status goss_session_brush_clear(goss_session *session)
+fn goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count)
 fn goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)
 fn goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)
 fn goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)

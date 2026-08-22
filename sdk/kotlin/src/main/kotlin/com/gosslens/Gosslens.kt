@@ -74,6 +74,26 @@ object Gosslens {
     internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
+    internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
+    internal external fun nativeCameraControls(session: Long, buffer: ByteBuffer): Int
+    internal external fun nativeFireEvent(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
+    internal external fun nativeDefineSource(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
+    internal external fun nativeRemoveSource(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
+    internal external fun nativeSubmitSourceFrameRgba(session: Long, nameBuffer: ByteBuffer, nameLen: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int, stride: Int, pixelFormat: Int): Int
+    internal external fun nativeSetLayout(session: Long, arrangement: Int): Int
+    internal external fun nativeClearLayout(session: Long): Int
+    internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
+    internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
+    internal external fun nativeClearGeofence(session: Long): Int
+    internal external fun nativeBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
+    internal external fun nativeBrushBegin(session: Long): Int
+    internal external fun nativeBrushPoint(session: Long, x: Float, y: Float): Int
+    internal external fun nativeBrushEnd(session: Long): Int
+    internal external fun nativeBrushUndo(session: Long): Int
+    internal external fun nativeBrushRedo(session: Long): Int
+    internal external fun nativeBrushClear(session: Long): Int
+    internal external fun nativeBrushVertexCount(session: Long): Int
+    internal external fun nativeBrushVertices(session: Long, outBuffer: ByteBuffer, capacityFloats: Int): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -141,6 +161,25 @@ data class GossEngineConfig(val texturePoolCapacity: Int, val stagingPoolCapacit
 /** frameBudgetUs is the whole-pipeline frame time the degradation
  * policy holds the session to; zero means the built-in 30 fps budget. */
 data class GossSessionConfig(val frameBudgetUs: Int)
+
+/** Declarative camera-hardware intent. The engine normalizes every field; the
+ * app reads it back and drives CameraX. Modes: flash 0 off/1 on/2 auto; focus
+ * 0 auto/1 locked/2 point; exposure 0 auto/1 locked. Points are normalized. */
+data class GossCameraControls(
+    val flashMode: Int = 0,
+    val torch: Int = 0,
+    val focusMode: Int = 0,
+    val exposureMode: Int = 0,
+    val focusPointX: Float = 0.5f,
+    val focusPointY: Float = 0.5f,
+    val exposureLinked: Int = 1,
+    val exposurePointX: Float = 0.5f,
+    val exposurePointY: Float = 0.5f,
+    val exposureBiasEv: Float = 0f,
+    val zoomFactor: Float = 1f,
+    val maxZoomFactor: Float = 0f,
+    val mirrorSavePolicy: Int = 0,
+)
 
 class GossEngine private constructor(internal val handle: Long) : AutoCloseable {
     private var closed = false
@@ -571,6 +610,105 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * (frameCount*channels s16). Advances the mixer once, replacing [pullAudio]. */
     fun mixOutputAudio(mic: ByteBuffer?, out: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Boolean =
         Gosslens.nativeMixOutputAudio(handle, mic, out, frameCount, sampleRate, channels) == 0
+
+    /** Stores validated camera-hardware intent; the engine normalizes it. Read
+     * it back with [cameraControls] and drive CameraX with the result. */
+    fun setCameraControls(c: GossCameraControls): Boolean {
+        val buf = ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
+        buf.putInt(c.flashMode); buf.putInt(c.torch); buf.putInt(c.focusMode); buf.putInt(c.exposureMode)
+        buf.putFloat(c.focusPointX); buf.putFloat(c.focusPointY); buf.putInt(c.exposureLinked)
+        buf.putFloat(c.exposurePointX); buf.putFloat(c.exposurePointY); buf.putFloat(c.exposureBiasEv)
+        buf.putFloat(c.zoomFactor); buf.putFloat(c.maxZoomFactor); buf.putInt(c.mirrorSavePolicy); buf.putInt(0)
+        buf.rewind()
+        return Gosslens.nativeSetCameraControls(handle, buf) == 0
+    }
+
+    /** The normalized camera controls the app applies to the platform camera. */
+    fun cameraControls(): GossCameraControls? {
+        val buf = ByteBuffer.allocateDirect(56).order(ByteOrder.nativeOrder())
+        if (Gosslens.nativeCameraControls(handle, buf) != 0) return null
+        return GossCameraControls(
+            buf.getInt(0), buf.getInt(4), buf.getInt(8), buf.getInt(12),
+            buf.getFloat(16), buf.getFloat(20), buf.getInt(24),
+            buf.getFloat(28), buf.getFloat(32), buf.getFloat(36),
+            buf.getFloat(40), buf.getFloat(44), buf.getInt(48),
+        )
+    }
+
+    /** Fires a named event the next [tickLens] delivers to the lens's
+     * event('name') triggers for one tick. */
+    fun fireEvent(name: String): Boolean {
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        val buf = ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); rewind() }
+        return Gosslens.nativeFireEvent(handle, buf, bytes.size) == 0
+    }
+
+    private fun nameBuf(name: String): Pair<ByteBuffer, Int> {
+        val b = name.toByteArray(Charsets.UTF_8)
+        return ByteBuffer.allocateDirect(b.size).apply { put(b); rewind() } to b.size
+    }
+
+    /** Registers a named RGBA source for multi-source composition. */
+    fun defineSource(name: String): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeDefineSource(handle, buf, n) == 0
+    }
+
+    /** Removes a named source. */
+    fun removeSource(name: String): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeRemoveSource(handle, buf, n) == 0
+    }
+
+    /** Uploads one RGBA/BGRA frame into a named source ([pixelFormat] 3 BGRA, 4 RGBA). */
+    fun submitSourceFrameRgba(name: String, rgba: ByteBuffer, width: Int, height: Int, stride: Int, pixelFormat: Int = 4): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeSubmitSourceFrameRgba(handle, buf, n, rgba, width, height, stride, pixelFormat) == 0
+    }
+
+    /** Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid. */
+    fun setLayout(arrangement: Int): Boolean = Gosslens.nativeSetLayout(handle, arrangement) == 0
+
+    fun clearLayout(): Boolean = Gosslens.nativeClearLayout(handle) == 0
+
+    /** Feeds a location fix for on-device geo.in_region membership. */
+    fun submitLocation(latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Boolean =
+        Gosslens.nativeSubmitLocation(handle, latitude, longitude, accuracyM, timestampUs) == 0
+
+    /** Sets the geofence circle the app derives from a lens's intended place. */
+    fun setGeofence(latitude: Double, longitude: Double, radiusM: Double): Boolean =
+        Gosslens.nativeSetGeofence(handle, latitude, longitude, radiusM) == 0
+
+    fun clearGeofence(): Boolean = Gosslens.nativeClearGeofence(handle) == 0
+
+    /** Sets the color and half-width (normalized units) the next stroke opens with. */
+    fun setBrushStyle(r: Float, g: Float, b: Float, a: Float, width: Float): Boolean =
+        Gosslens.nativeBrushSetStyle(handle, r, g, b, a, width) == 0
+
+    /** Opens a stroke in the current style. A fresh stroke drops the redo stack. */
+    fun beginStroke(): Boolean = Gosslens.nativeBrushBegin(handle) == 0
+
+    /** Adds a point to the open stroke, in normalized screen space (0..1). */
+    fun addStrokePoint(x: Float, y: Float): Boolean = Gosslens.nativeBrushPoint(handle, x, y) == 0
+
+    /** Commits the open stroke. A stroke of fewer than two points is dropped. */
+    fun endStroke(): Boolean = Gosslens.nativeBrushEnd(handle) == 0
+
+    fun undoStroke(): Boolean = Gosslens.nativeBrushUndo(handle) == 0
+    fun redoStroke(): Boolean = Gosslens.nativeBrushRedo(handle) == 0
+    fun clearStrokes(): Boolean = Gosslens.nativeBrushClear(handle) == 0
+
+    /** Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the renderer. */
+    fun brushVertices(): FloatArray {
+        val count = Gosslens.nativeBrushVertexCount(handle)
+        if (count <= 0) return FloatArray(0)
+        val buffer = ByteBuffer.allocateDirect(count * 4).order(ByteOrder.nativeOrder())
+        val written = Gosslens.nativeBrushVertices(handle, buffer, count)
+        if (written <= 0) return FloatArray(0)
+        val out = FloatArray(written)
+        buffer.asFloatBuffer().get(out)
+        return out
+    }
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,

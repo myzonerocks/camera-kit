@@ -111,4 +111,113 @@ extension GossSession {
         }
         return out
     }
+
+    /// Stores validated camera-hardware intent on the session; the engine
+    /// normalizes every field. Read it back with `cameraControls` and apply it
+    /// to the platform camera - the engine never touches camera hardware.
+    public func setCameraControls(_ controls: goss_camera_controls) throws {
+        var c = controls
+        try checked(goss_session_set_camera_controls(handle, &c))
+    }
+
+    /// The normalized camera controls for the SDK to apply to the platform camera.
+    public var cameraControls: goss_camera_controls {
+        get throws {
+            var out = goss_camera_controls()
+            try checked(goss_session_camera_controls(handle, &out))
+            return out
+        }
+    }
+
+    /// Fires a named event the next `tickLens` delivers to the lens's
+    /// `event('name')` triggers for one tick. Drive an on-screen effect from an
+    /// app moment; the engine knows the name, never its meaning.
+    public func fireEvent(_ name: String) throws {
+        var bytes = Array(name.utf8)
+        try bytes.withUnsafeMutableBufferPointer { buf in
+            try checked(goss_session_fire_event(handle, buf.baseAddress, buf.count))
+        }
+    }
+
+    /// Registers a named RGBA source for multi-source composition (Duet, Stitch,
+    /// live grids). The camera is the implicit source 0.
+    public func defineSource(_ name: String) throws {
+        var b = Array(name.utf8)
+        try b.withUnsafeMutableBufferPointer { buf in
+            try checked(goss_session_define_source(handle, buf.baseAddress, buf.count))
+        }
+    }
+
+    public func removeSource(_ name: String) throws {
+        var b = Array(name.utf8)
+        try b.withUnsafeMutableBufferPointer { buf in
+            try checked(goss_session_remove_source(handle, buf.baseAddress, buf.count))
+        }
+    }
+
+    /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
+    public func submitSourceFrame(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32, stride: UInt32, pixelFormat: UInt32 = 4) throws {
+        var nameBytes = Array(name.utf8)
+        var desc = goss_frame_desc(width: width, height: height, pixel_format: pixelFormat, color_standard: 0, color_range: 1, flags: 0, timestamp_us: 0)
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try rgba.withUnsafeBufferPointer { rb in
+                try checked(goss_session_submit_source_frame_rgba_copy(handle, nb.baseAddress, nb.count, &desc, rb.baseAddress, stride))
+            }
+        }
+    }
+
+    /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
+    public func setLayout(_ arrangement: UInt32) throws {
+        try checked(goss_session_set_layout(handle, arrangement))
+    }
+
+    public func clearLayout() throws {
+        try checked(goss_session_clear_layout(handle))
+    }
+
+    /// Feeds a location fix for on-device geo.in_region membership; the location never leaves the engine.
+    public func submitLocation(latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Int64) throws {
+        try checked(goss_session_submit_location(handle, latitude, longitude, accuracyM, timestampUs))
+    }
+
+    /// Sets the geofence circle the app derives from a lens's intended place.
+    public func setGeofence(latitude: Double, longitude: Double, radiusM: Double) throws {
+        try checked(goss_session_set_geofence(handle, latitude, longitude, radiusM))
+    }
+
+    public func clearGeofence() throws {
+        try checked(goss_session_clear_geofence(handle))
+    }
+
+    /// Sets the color and half-width (normalized units) the next stroke opens with.
+    public func setBrushStyle(red: Float, green: Float, blue: Float, alpha: Float, width: Float) throws {
+        try checked(goss_session_brush_set_style(handle, red, green, blue, alpha, width))
+    }
+
+    /// Opens a stroke in the current style. A fresh stroke drops the redo stack.
+    public func beginStroke() throws { try checked(goss_session_brush_begin(handle)) }
+
+    /// Adds a point to the open stroke, in normalized screen space (0..1).
+    public func addStrokePoint(x: Float, y: Float) throws { try checked(goss_session_brush_point(handle, x, y)) }
+
+    /// Commits the open stroke. A stroke of fewer than two points is dropped.
+    public func endStroke() throws { try checked(goss_session_brush_end(handle)) }
+
+    public func undoStroke() throws { try checked(goss_session_brush_undo(handle)) }
+    public func redoStroke() throws { try checked(goss_session_brush_redo(handle)) }
+    public func clearStrokes() throws { try checked(goss_session_brush_clear(handle)) }
+
+    /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
+    /// renderer to draw. Queries the float count first, then fills a buffer.
+    public func brushVertices() throws -> [Float] {
+        var count = 0
+        try checked(goss_session_brush_vertices(handle, nil, 0, &count))
+        if count == 0 { return [] }
+        var out = [Float](repeating: 0, count: count)
+        try out.withUnsafeMutableBufferPointer { buffer in
+            var written = 0
+            try checked(goss_session_brush_vertices(handle, buffer.baseAddress, buffer.count, &written))
+        }
+        return out
+    }
 }

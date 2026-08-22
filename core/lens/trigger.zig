@@ -20,11 +20,13 @@ pub const SignalKind = enum {
     timer,
     tap,
     param,
+    event,
+    geo_in_region,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param => false,
     };
 }
@@ -34,6 +36,7 @@ pub const Signal = struct {
     blendshape_index: u8 = 0,
     param_index: u16 = 0,
     timer_name: []const u8 = "",
+    event_name: []const u8 = "",
 };
 
 pub const CompareOp = enum { gt, lt, ge, le, eq, ne };
@@ -80,6 +83,14 @@ pub const Signals = struct {
     blendshapes: ?*const [face.blendshape_count]f32 = null,
     params: []const f64 = &.{},
     timers: []const TimerValue = &.{},
+    /// The event names the host fired this tick (goss_session_fire_event). An
+    /// event is present only for the tick it is fired, so an edge-triggered
+    /// action fires exactly once.
+    events: []const []const u8 = &.{},
+    /// Whether the submitted location is inside the session's geofence, computed
+    /// on-device from goss_session_submit_location; the location never crosses
+    /// the ABI, only this boolean.
+    geo_in_region: bool = false,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -98,6 +109,13 @@ fn readBool(s: Signal, signals: Signals) bool {
         .hands_present => signals.hands_present,
         .tap => signals.tap,
         .audio_beat => signals.audio_beat,
+        .event => {
+            for (signals.events) |name| {
+                if (std.mem.eql(u8, name, s.event_name)) return true;
+            }
+            return false;
+        },
+        .geo_in_region => signals.geo_in_region,
         else => unreachable,
     };
 }
@@ -446,6 +464,10 @@ const Parser = struct {
             }
             return self.fail("unknown parameter '{s}'", .{name});
         }
+        if (std.mem.eql(u8, head, "event")) {
+            const name = try self.parseCall();
+            return .{ .kind = .event, .event_name = try self.arena.dupe(u8, name) };
+        }
 
         try self.expect(.dot);
         const tail = switch (self.current) {
@@ -472,6 +494,9 @@ const Parser = struct {
         }
         if (std.mem.eql(u8, head, "world") and std.mem.eql(u8, tail, "tracking_state")) {
             return .{ .kind = .world_tracking_state };
+        }
+        if (std.mem.eql(u8, head, "geo") and std.mem.eql(u8, tail, "in_region")) {
+            return .{ .kind = .geo_in_region };
         }
         if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "level")) {
             return .{ .kind = .audio_level };
@@ -649,4 +674,20 @@ test "audio.beat compiles as a boolean signal and reads live" {
     defer expr.deinit();
     try t.expect(!evaluate(expr.root, .{}));
     try t.expect(evaluate(expr.root, .{ .audio_beat = true }));
+}
+
+test "event fires only when its name is in the tick's fired set" {
+    var expr = try compileOk("event('celebrate')");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(!evaluate(expr.root, .{ .events = &.{"other"} }));
+    try t.expect(evaluate(expr.root, .{ .events = &.{"celebrate"} }));
+    try t.expect(evaluate(expr.root, .{ .events = &.{ "other", "celebrate" } }));
+}
+
+test "geo.in_region reads the on-device membership boolean" {
+    var expr = try compileOk("geo.in_region");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .geo_in_region = true }));
 }

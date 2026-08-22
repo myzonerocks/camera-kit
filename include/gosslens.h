@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 19u
+#define GOSS_ABI_MINOR 25u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -377,6 +377,33 @@ typedef struct goss_capture_config {
  * platform photo backend. */
 goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height);
 
+/* Declarative camera-hardware intent. The engine validates and normalizes
+ * every field and stores it on the session; the SDK reads the normalized
+ * values back and drives the platform camera. The core never touches camera
+ * hardware. Layout: 56 bytes, static-asserted below. */
+typedef struct goss_camera_controls {
+  uint32_t flash_mode;         /* 0 off, 1 on, 2 auto (still-capture LED) */
+  uint32_t torch;              /* 0 off, 1 on (continuous LED) */
+  uint32_t focus_mode;         /* 0 continuous-auto, 1 locked, 2 point-single */
+  uint32_t exposure_mode;      /* 0 continuous-auto, 1 locked */
+  float    focus_point_x;      /* tap POI, normalized 0..1 (clamped) */
+  float    focus_point_y;
+  uint32_t exposure_linked;    /* 1 exposure POI follows focus POI, 0 decoupled */
+  float    exposure_point_x;   /* used when decoupled, 0..1 (clamped) */
+  float    exposure_point_y;
+  float    exposure_bias_ev;   /* clamped to [-8, 8]; SDK re-clamps to device */
+  float    zoom_factor;        /* >= 1; clamped to [1, max_zoom_factor or 128] */
+  float    max_zoom_factor;    /* SDK-reported device ceiling; 0 = unknown */
+  uint32_t mirror_save_policy; /* 0 uniform (front mirrors every surface) */
+  uint32_t reserved;           /* zero */
+} goss_camera_controls;
+
+/* Graph thread. Validates and normalizes controls into the session; the SDK
+ * reads them back with goss_session_camera_controls and applies them to the
+ * platform camera. */
+goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls);
+goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out);
+
 /* Graph thread. config may be null for defaults. */
 goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);
 void goss_session_destroy(goss_session *session);
@@ -534,6 +561,37 @@ goss_status goss_session_set_segmentation_class_mask(goss_session *session, uint
  * of NV12's two. */
 goss_status goss_session_submit_frame_rgba_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
 
+/* Graph thread. Multi-source composition (Duet, Stitch, live grids). Register a
+ * named RGBA source with define_source, feed it with submit_source_frame_rgba_copy,
+ * then set_layout to composite the camera (source 0) and the named sources
+ * (arrangement: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid). */
+goss_status goss_session_define_source(goss_session *session, const uint8_t *name, size_t name_len);
+goss_status goss_session_remove_source(goss_session *session, const uint8_t *name, size_t name_len);
+goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
+goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement);
+goss_status goss_session_clear_layout(goss_session *session);
+
+/* Graph thread. Geofilters: location-gated overlay lenses. set_geofence sets a
+ * circle the app derives from a lens's intended place; submit_location feeds a
+ * fix. The engine computes geo.in_region on-device and only that boolean
+ * crosses the trigger rail, so the location never leaves the process. */
+goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us);
+goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m);
+goss_status goss_session_clear_geofence(goss_session *session);
+
+/* Brush board. The engine owns stroke state and the undo/redo stacks; the app
+ * feeds points in normalized screen space and pulls the finished triangle
+ * ribbon (x, y, r, g, b, a per vertex) for the renderer to draw. brush_vertices
+ * with a null out reports the float count the caller must size for. */
+goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width);
+goss_status goss_session_brush_begin(goss_session *session);
+goss_status goss_session_brush_point(goss_session *session, float x, float y);
+goss_status goss_session_brush_end(goss_session *session);
+goss_status goss_session_brush_undo(goss_session *session);
+goss_status goss_session_brush_redo(goss_session *session);
+goss_status goss_session_brush_clear(goss_session *session);
+goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count);
+
 /* Graph thread. Runs the beauty chain over one RGBA frame on the calling
  * thread, reading the newest tracking result for the landmark driven
  * effects when face tracking is enabled. The stated CPU path; live
@@ -571,6 +629,12 @@ void goss_session_deactivate_lens(goss_session *session);
  * enabled. Reports GOSS_AGAIN with no active lens. */
 goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, const goss_lens_signals *signals);
 
+/* Graph thread. Fires a named event the next goss_session_tick_lens delivers
+ * to the lens's event('name') triggers for exactly one tick, then clears -
+ * drives an on-screen effect from an app moment; the engine knows the name,
+ * never its meaning. Buffered without allocation; over-long names truncate. */
+goss_status goss_session_fire_event(goss_session *session, const uint8_t *name, size_t name_len);
+
 /* Graph thread. Reads a live parameter of the active lens by name,
  * including whatever a script node last wrote, into out_value. Reports
  * GOSS_AGAIN with no active lens and GOSS_INVALID_ARGUMENT for an unknown
@@ -603,6 +667,7 @@ _Static_assert(offsetof(goss_pose_result, landmarks) == 24, "goss_pose_result la
 _Static_assert(sizeof(goss_renderer_desc) == (sizeof(void *) == 8 ? 16 : 12), "goss_renderer_desc layout is frozen");
 _Static_assert(sizeof(goss_frame_planes) == 32, "goss_frame_planes layout is frozen");
 _Static_assert(sizeof(goss_lens_signals) == 232, "goss_lens_signals layout is frozen");
+_Static_assert(sizeof(goss_camera_controls) == 56, "goss_camera_controls layout is frozen");
 _Static_assert(offsetof(goss_lens_signals, world_tracking_state) == 8, "goss_lens_signals layout is frozen");
 _Static_assert(offsetof(goss_lens_signals, blendshapes) == 24, "goss_lens_signals layout is frozen");
 #endif

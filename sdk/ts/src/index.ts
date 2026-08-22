@@ -125,6 +125,7 @@ export interface GossSessionEvents {
 interface EngineModule {
   HEAPU8: Uint8Array;
   HEAP16: Int16Array;
+  HEAP32: Int32Array;
   HEAPF32: Float32Array;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[]): number;
   ccall(name: string, returnType: string | null, argTypes: string[], args: unknown[], opts: { async: true }): Promise<number>;
@@ -517,6 +518,26 @@ export class GossEngine {
   }
 }
 
+/// Declarative camera-hardware intent. The engine normalizes every field; the
+/// page reads it back and applies it via getUserMedia track constraints. Modes:
+/// flash 0 off/1 on/2 auto; focus 0 auto/1 locked/2 point; exposure 0 auto/1
+/// locked. Points normalized 0..1.
+export interface GossCameraControls {
+  flashMode: number;
+  torch: number;
+  focusMode: number;
+  exposureMode: number;
+  focusPointX: number;
+  focusPointY: number;
+  exposureLinked: number;
+  exposurePointX: number;
+  exposurePointY: number;
+  exposureBiasEv: number;
+  zoomFactor: number;
+  maxZoomFactor: number;
+  mirrorSavePolicy: number;
+}
+
 /// Per-preview runtime: frame submission, beauty, tracking, lens. Owns
 /// its own scratch allocations (frame descriptor, pixel buffer,
 /// landmarks) rather than one shared per-engine pool - matches every
@@ -691,6 +712,166 @@ export class GossSession {
     const out = new Int16Array(this.mod.HEAP16.buffer, outPtr, outLen).slice();
     this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, outBytes]);
     if (mic) this.mod.ccall("goss_free", null, ["number", "number"], [micPtr, micBytes]);
+    return out;
+  }
+
+  /// Stores validated camera-hardware intent; the engine normalizes it. Read it
+  /// back with `cameraControls` and apply it via getUserMedia track constraints.
+  setCameraControls(c: GossCameraControls): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [56]) as number;
+    const w = ptr >> 2;
+    this.mod.HEAP32[w] = c.flashMode; this.mod.HEAP32[w + 1] = c.torch;
+    this.mod.HEAP32[w + 2] = c.focusMode; this.mod.HEAP32[w + 3] = c.exposureMode;
+    this.mod.HEAPF32[w + 4] = c.focusPointX; this.mod.HEAPF32[w + 5] = c.focusPointY;
+    this.mod.HEAP32[w + 6] = c.exposureLinked;
+    this.mod.HEAPF32[w + 7] = c.exposurePointX; this.mod.HEAPF32[w + 8] = c.exposurePointY;
+    this.mod.HEAPF32[w + 9] = c.exposureBiasEv; this.mod.HEAPF32[w + 10] = c.zoomFactor;
+    this.mod.HEAPF32[w + 11] = c.maxZoomFactor; this.mod.HEAP32[w + 12] = c.mirrorSavePolicy;
+    this.mod.HEAP32[w + 13] = 0;
+    this.mod.ccall("goss_session_set_camera_controls", "number", ["number", "number"], [this.handle, ptr]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 56]);
+  }
+
+  /// The normalized camera controls for the page to apply to the media track.
+  cameraControls(): GossCameraControls {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [56]) as number;
+    this.mod.ccall("goss_session_camera_controls", "number", ["number", "number"], [this.handle, ptr]);
+    const w = ptr >> 2;
+    const c: GossCameraControls = {
+      flashMode: this.mod.HEAP32[w], torch: this.mod.HEAP32[w + 1],
+      focusMode: this.mod.HEAP32[w + 2], exposureMode: this.mod.HEAP32[w + 3],
+      focusPointX: this.mod.HEAPF32[w + 4], focusPointY: this.mod.HEAPF32[w + 5],
+      exposureLinked: this.mod.HEAP32[w + 6],
+      exposurePointX: this.mod.HEAPF32[w + 7], exposurePointY: this.mod.HEAPF32[w + 8],
+      exposureBiasEv: this.mod.HEAPF32[w + 9], zoomFactor: this.mod.HEAPF32[w + 10],
+      maxZoomFactor: this.mod.HEAPF32[w + 11], mirrorSavePolicy: this.mod.HEAP32[w + 12],
+    };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 56]);
+    return c;
+  }
+
+  /// Fires a named event the next `tickLens` delivers to the lens's
+  /// `event('name')` triggers for one tick.
+  fireEvent(name: string): void {
+    const bytes = new TextEncoder().encode(name);
+    if (bytes.length === 0) return;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    this.mod.HEAPU8.set(bytes, ptr);
+    this.mod.ccall("goss_session_fire_event", "number", ["number", "number", "number"], [this.handle, ptr, bytes.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+  }
+
+  private withName(name: string, fn: (ptr: number, len: number) => void): void {
+    const bytes = new TextEncoder().encode(name);
+    if (bytes.length === 0) return;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    this.mod.HEAPU8.set(bytes, ptr);
+    fn(ptr, bytes.length);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+  }
+
+  /// Registers a named RGBA source for multi-source composition (Duet, Stitch,
+  /// live grids). The camera is the implicit source 0.
+  defineSource(name: string): void {
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_define_source", "number", ["number", "number", "number"], [this.handle, ptr, len]));
+  }
+
+  removeSource(name: string): void {
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_remove_source", "number", ["number", "number", "number"], [this.handle, ptr, len]));
+  }
+
+  /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
+  submitSourceFrameRgba(name: string, rgba: Uint8Array, width: number, height: number, stride: number, pixelFormat: GossPixelFormat = GossPixelFormat.Rgba8): void {
+    const byteLen = stride * height;
+    const rgbaPtr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLen]) as number;
+    this.mod.HEAPU8.set(rgba.subarray(0, byteLen), rgbaPtr);
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, pixelFormat, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, 1, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_submit_source_frame_rgba_copy", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, this.frameDescPtr, rgbaPtr, stride]));
+    this.mod.ccall("goss_free", null, ["number", "number"], [rgbaPtr, byteLen]);
+  }
+
+  /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
+  setLayout(arrangement: number): void {
+    this.mod.ccall("goss_session_set_layout", "number", ["number", "number"], [this.handle, arrangement]);
+  }
+
+  clearLayout(): void {
+    this.mod.ccall("goss_session_clear_layout", "number", ["number"], [this.handle]);
+  }
+
+  /// Feeds a location fix for on-device geo.in_region membership; the location never leaves the engine.
+  submitLocation(latitude: number, longitude: number, accuracyM: number, timestampUs: number): void {
+    this.mod.ccall("goss_session_submit_location", "number", ["number", "number", "number", "number", "number"], [this.handle, latitude, longitude, accuracyM, timestampUs]);
+  }
+
+  /// Sets the geofence circle the app derives from a lens's intended place.
+  setGeofence(latitude: number, longitude: number, radiusM: number): void {
+    this.mod.ccall("goss_session_set_geofence", "number", ["number", "number", "number", "number"], [this.handle, latitude, longitude, radiusM]);
+  }
+
+  clearGeofence(): void {
+    this.mod.ccall("goss_session_clear_geofence", "number", ["number"], [this.handle]);
+  }
+
+  /// Sets the color and half-width (normalized units) the next stroke opens with.
+  setBrushStyle(r: number, g: number, b: number, a: number, width: number): void {
+    this.mod.ccall("goss_session_brush_set_style", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, r, g, b, a, width]);
+  }
+
+  /// Opens a stroke in the current style. A fresh stroke drops the redo stack.
+  beginStroke(): void {
+    this.mod.ccall("goss_session_brush_begin", "number", ["number"], [this.handle]);
+  }
+
+  /// Adds a point to the open stroke, in normalized screen space (0..1).
+  addStrokePoint(x: number, y: number): void {
+    this.mod.ccall("goss_session_brush_point", "number", ["number", "number", "number"], [this.handle, x, y]);
+  }
+
+  /// Commits the open stroke. A stroke of fewer than two points is dropped.
+  endStroke(): void {
+    this.mod.ccall("goss_session_brush_end", "number", ["number"], [this.handle]);
+  }
+
+  undoStroke(): void {
+    this.mod.ccall("goss_session_brush_undo", "number", ["number"], [this.handle]);
+  }
+
+  redoStroke(): void {
+    this.mod.ccall("goss_session_brush_redo", "number", ["number"], [this.handle]);
+  }
+
+  clearStrokes(): void {
+    this.mod.ccall("goss_session_brush_clear", "number", ["number"], [this.handle]);
+  }
+
+  /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
+  /// renderer. Queries the float count, then reads it out of a scratch buffer.
+  brushVertices(): Float32Array {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    this.mod.ccall("goss_session_brush_vertices", "number", ["number", "number", "number", "number"], [this.handle, 0, 0, countPtr]);
+    const count = this.mod.HEAP32[countPtr >> 2]!;
+    if (count <= 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      return new Float32Array(0);
+    }
+    const bytes = count * 4;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    this.mod.ccall("goss_session_brush_vertices", "number", ["number", "number", "number", "number"], [this.handle, outPtr, count, countPtr]);
+    const written = this.mod.HEAP32[countPtr >> 2]!;
+    const out = new Float32Array(this.mod.HEAPF32.buffer, outPtr, written).slice();
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, bytes]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
     return out;
   }
 
