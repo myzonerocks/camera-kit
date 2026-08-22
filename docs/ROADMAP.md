@@ -3,8 +3,8 @@
 Gosslens is a full camera and AR engine: every camera-manipulation
 capability and every AR capability, measured against the strongest
 proprietary stacks and aiming past them. New capabilities ride the rails
-that already exist — the tracking module's model path, the lens format's
-node and trigger system, the bgfx graph — rather than arriving as
+that already exist (the tracking module's model path, the lens format's
+node and trigger system, the bgfx graph) rather than arriving as
 parallel machinery.
 
 Work lands in dependency order. Each stage is built to production

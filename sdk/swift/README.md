@@ -2,7 +2,7 @@
 
 Swift SDK for [Gosslens](../../include/gosslens.h), a camera engine with a
 Zig core behind one C ABI. Wraps it as `GossEngine`, `GossSession`, and
-`Gosslens` — the same names the [Kotlin](../kotlin/README.md) and
+`Gosslens`, the same names the [Kotlin](../kotlin/README.md) and
 [TypeScript](../ts/README.md) SDKs use.
 
 This SDK owns capture ingress, GPU surface handoff, and platform
@@ -80,7 +80,7 @@ The full cross-platform capability tour is in the
 
 ## Demo app
 
-[`demo/`](demo/), a real iOS app — see [`demo/README.md`](demo/README.md).
+[`demo/`](demo/) is a real iOS app; see [`demo/README.md`](demo/README.md).
 
 ## TODO
 

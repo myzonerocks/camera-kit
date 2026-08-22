@@ -6,7 +6,7 @@ into a session's frame graph. This document is the format's spec, versioned
 independently of the engine itself. The engine's lens runtime is one
 conforming implementation; the validator (`lenses/validator`) is the reference
 implementation of validation. Anything a conforming runtime does with a
-`.glens` bundle, this document defines — if the runtime's behavior and this
+`.glens` bundle, this document defines. If the runtime's behavior and this
 document disagree, this document is right and the runtime has a bug.
 
 Format version: GLF 1.0. Versions are `major.minor`. A runtime built against
@@ -20,7 +20,7 @@ the same major version.
 
 ## 1. Bundle layout
 
-A `.glens` bundle is a directory (or a zip archive of the same layout — the
+A `.glens` bundle is a directory (or a zip archive of the same layout; the
 runtime treats both identically, reading through a virtual file interface):
 
 ```
@@ -34,7 +34,7 @@ mylens.glens/
 
 No other file types are permitted inside a bundle. No file may reference a
 path outside the bundle root (no `..` segments, no absolute paths, no
-symlinks followed outside the root) — the loader rejects any reference that
+symlinks followed outside the root). The loader rejects any reference that
 would escape, closed, before opening the file.
 
 ### 1.1 Size and depth limits
@@ -49,7 +49,7 @@ part of the format, not an implementation detail:
 - Any single shader source file: 256 KiB.
 - Any single asset file: 32 MiB.
 - Parameters: 256 per lens. Triggers: 256 per lens. Nodes in the subgraph:
-  128. Each of these is a flat count, not a nesting depth — the graph and
+  128. Each of these is a flat count, not a nesting depth. The graph and
   trigger list are arrays, not trees, so there is no recursive case to
   bound separately.
 
@@ -309,7 +309,7 @@ paragraph.
 ### 6.3 Parameter animation
 
 Two curve primitives, chosen per `param_ramp`: `linear` (duration_ms, from
-current value to target) and `spring` (stiffness, damping, target — a
+current value to target) and `spring` (stiffness, damping, target; a
 standard critically-damped-tunable spring integrated at the fixed graph
 timestep, not wall-clock, so it is frame-rate independent and
 deterministic across platforms for the conformance harness). No custom
@@ -320,7 +320,7 @@ falling back to `linear`.
 ## 7. Assets
 
 Every file in `shaders/` is a fragment shader for a full-screen pass over
-the current frame — a lens does not author its own vertex stage. The
+the current frame. A lens does not author its own vertex stage. The
 runtime supplies one fixed vertex contract, `lenses/shaders/varying.def.sc`,
 shared by every lens shader pass: `a_position`/`a_texcoord0` in,
 `v_texcoord0` out, the same shape as the engine's own preview passes. A lens
@@ -331,8 +331,8 @@ A `shader.pass` node may also name a segmentation mask channel with a
 `mask` field: `person`, `background`, `hair`, `body_skin`, `face_skin`,
 `clothes`, or `others`. The shader then reads it through
 `SAMPLER2D(s_texMask, 2)` beside the frame's own `s_texColor`. When the
-running session cannot provide the channel — segmentation disabled, or a
-single-class model without it — the sampler serves the all-foreground
+running session cannot provide the channel (segmentation disabled, or a
+single-class model without it), the sampler serves the all-foreground
 default, the same degradation rule every capability follows. An unknown
 channel name fails validation.
 
@@ -340,11 +340,11 @@ Compilation happens at package time, not on the device: the engine's pinned
 shader toolchain runs wherever a bundle is built or validated, producing
 compiled bytecode for every platform profile a conforming runtime ships
 (Metal / SPIR-V / ESSL), under the same resource limits the engine's own
-shaders compile under — bounded compile time, no toolchain escape
+shaders compile under: bounded compile time, no toolchain escape
 hatches, compiler diagnostics surfaced as validation errors naming the
 source file and line. A shader that
 fails to compile fails the bundle's validation; there is no partial
-lens. The runtime never compiles GLSL — it loads whichever precompiled
+lens. The runtime never compiles GLSL; it loads whichever precompiled
 profile matches its own active graphics backend and hands the bytes
 straight to its shader loader, the same call the engine's own built-in
 passes already go through. This is deliberate, not a shortcut: nothing
@@ -354,8 +354,8 @@ user-authored effects, and a bundle that fails to compile is caught at
 package time by the same validator a lens author already runs, not
 discovered by an end user's device.
 
-glTF/GLB assets bind through the engine's existing cgltf adapter — same
-allocator-bridged parse, same refusal of external file references (a glTF
+glTF/GLB assets bind through the engine's existing cgltf adapter: the same
+allocator-bridged parse, the same refusal of external file references (a glTF
 asset inside a bundle may not reference textures or buffers outside that
 bundle). Textures and LUTs are plain image files decoded through the engine's
 existing image decode path, bounded by the per-file size limit in 1.1.
@@ -368,7 +368,7 @@ capability names, then parameter/node/trigger cross-references (a node's
 `inputs` or `params` naming an id or parameter that does not exist, a
 trigger's action naming a node id that does not exist), then shader compile,
 then asset decode. Validation stops at the first failing stage and reports
-every error found *within* that stage (not just the first) — a manifest
+every error found *within* that stage (not just the first). A manifest
 with three unknown node types reports all three, not one followed by a
 second run to find the next. Every diagnostic names the exact JSON pointer
 or file path and line it came from; "invalid manifest" alone is not a
@@ -400,6 +400,6 @@ harness on all three platforms and is asserted bit-stable per platform
 resolution-independent (trigger fire timing, parameter curve values at
 fixed timestamps). The validator CLI (`lenses/validator`) is run against
 every reference lens, and against a fuzz corpus of malformed manifests and
-malformed shader inputs, in CI — a fuzz-found crash or leak is a spec
+malformed shader inputs, in CI. A fuzz-found crash or leak is a spec
 violation of section 8, filed and fixed before the next lens ships, not
 triaged as a lens-author error.
