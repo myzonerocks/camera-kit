@@ -1339,6 +1339,61 @@ fn proveGeofilter(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the brush board: a two-segment stroke yields the expected ribbon size
+/// (two segments, six vertices each, six floats each), a null-out query reports
+/// that same float count, and undo then clear empty the ribbon.
+fn proveBrushStroke(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+    defer abi.destroySession(session);
+
+    if (abi.goss_session_brush_set_style(session, 1.0, 0.2, 0.4, 1.0, 0.02) != .ok) return false;
+    _ = abi.goss_session_brush_begin(session);
+    _ = abi.goss_session_brush_point(session, 0.0, 0.0);
+    _ = abi.goss_session_brush_point(session, 1.0, 0.0);
+    _ = abi.goss_session_brush_point(session, 1.0, 1.0);
+    _ = abi.goss_session_brush_end(session);
+
+    const want: usize = 2 * 6 * 6; // two segments, six vertices, six floats
+    var reported: usize = 0;
+    if (abi.goss_session_brush_vertices(session, null, 0, &reported) != .ok) return false;
+    if (reported != want) {
+        std.debug.print("conformance: FAIL brush float-count query reported {d}, expected {d}\n", .{ reported, want });
+        return false;
+    }
+
+    var buf: [want]f32 = undefined;
+    var written: usize = 0;
+    if (abi.goss_session_brush_vertices(session, &buf, buf.len, &written) != .ok) return false;
+    if (written != want) {
+        std.debug.print("conformance: FAIL brush ribbon wrote {d} floats, expected {d}\n", .{ written, want });
+        return false;
+    }
+    if (buf[2] != 1.0 or buf[3] != 0.2) {
+        std.debug.print("conformance: FAIL brush color did not ride the vertices\n", .{});
+        return false;
+    }
+
+    _ = abi.goss_session_brush_undo(session);
+    var after_undo: usize = 1;
+    _ = abi.goss_session_brush_vertices(session, null, 0, &after_undo);
+
+    _ = abi.goss_session_brush_redo(session);
+    var after_redo: usize = 0;
+    _ = abi.goss_session_brush_vertices(session, null, 0, &after_redo);
+
+    _ = abi.goss_session_brush_clear(session);
+    var after_clear: usize = 1;
+    _ = abi.goss_session_brush_vertices(session, null, 0, &after_clear);
+
+    if (after_undo != 0 or after_redo != want or after_clear != 0) {
+        std.debug.print("conformance: FAIL brush undo/redo/clear did not track the ribbon ({d}/{d}/{d})\n", .{ after_undo, after_redo, after_clear });
+        return false;
+    }
+    std.debug.print("conformance: PROOF a brush stroke builds a bounded triangle ribbon the renderer can pull, with undo, redo, and clear tracking it, allocation-free\n", .{});
+    return true;
+}
+
 /// Proves the engine-side outgoing mix: at the native 48 kHz, the lens over a
 /// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
 /// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
@@ -3224,6 +3279,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveEventTrigger(gpa, engine)) return 1;
     if (!try proveLayoutComposite(gpa, engine)) return 1;
     if (!try proveGeofilter(gpa, engine)) return 1;
+    if (!try proveBrushStroke(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;

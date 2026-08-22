@@ -533,6 +533,68 @@ export fn Java_com_gosslens_Gosslens_nativeClearGeofence(env: *JniEnv, cls: jobj
     return @intFromEnum(abi.goss_session_clear_geofence(sessionFromHandle(session)));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeBrushSetStyle(env: *JniEnv, cls: jobject, session: i64, r: f32, g: f32, b: f32, a: f32, width: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_brush_set_style(sessionFromHandle(session), r, g, b, a, width));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeBrushBegin(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_brush_begin(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeBrushPoint(env: *JniEnv, cls: jobject, session: i64, x: f32, y: f32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_brush_point(sessionFromHandle(session), x, y));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeBrushEnd(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_brush_end(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeBrushUndo(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_brush_undo(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeBrushRedo(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_brush_redo(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeBrushClear(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_brush_clear(sessionFromHandle(session)));
+}
+
+/// Reports the float count the finished ribbon needs; -1 on a bad session.
+export fn Java_com_gosslens_Gosslens_nativeBrushVertexCount(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    var count: usize = 0;
+    if (abi.goss_session_brush_vertices(sessionFromHandle(session), null, 0, &count) != .ok) return -1;
+    return @intCast(count);
+}
+
+/// Fills out_buffer (a direct float buffer) with the ribbon; returns the float
+/// count written, or -1 on a bad session or buffer.
+export fn Java_com_gosslens_Gosslens_nativeBrushVertices(env: *JniEnv, cls: jobject, session: i64, out_buffer: jobject, capacity_floats: i32) i32 {
+    _ = cls;
+    const out_bytes = getDirectBufferAddress(env, out_buffer) orelse return -1;
+    const out: [*]f32 = @ptrCast(@alignCast(out_bytes));
+    var written: usize = 0;
+    if (abi.goss_session_brush_vertices(sessionFromHandle(session), out, @intCast(@max(capacity_floats, 0)), &written) != .ok) return -1;
+    return @intCast(written);
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;

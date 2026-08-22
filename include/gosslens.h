@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 24u
+#define GOSS_ABI_MINOR 25u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -578,6 +578,19 @@ goss_status goss_session_clear_layout(goss_session *session);
 goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us);
 goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m);
 goss_status goss_session_clear_geofence(goss_session *session);
+
+/* Brush board. The engine owns stroke state and the undo/redo stacks; the app
+ * feeds points in normalized screen space and pulls the finished triangle
+ * ribbon (x, y, r, g, b, a per vertex) for the renderer to draw. brush_vertices
+ * with a null out reports the float count the caller must size for. */
+goss_status goss_session_brush_set_style(goss_session *session, float r, float g, float b, float a, float width);
+goss_status goss_session_brush_begin(goss_session *session);
+goss_status goss_session_brush_point(goss_session *session, float x, float y);
+goss_status goss_session_brush_end(goss_session *session);
+goss_status goss_session_brush_undo(goss_session *session);
+goss_status goss_session_brush_redo(goss_session *session);
+goss_status goss_session_brush_clear(goss_session *session);
+goss_status goss_session_brush_vertices(goss_session *session, float *out, size_t capacity_floats, size_t *out_count);
 
 /* Graph thread. Runs the beauty chain over one RGBA frame on the calling
  * thread, reading the newest tracking result for the landmark driven

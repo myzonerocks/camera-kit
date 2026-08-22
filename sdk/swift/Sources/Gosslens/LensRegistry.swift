@@ -188,4 +188,36 @@ extension GossSession {
     public func clearGeofence() throws {
         try checked(goss_session_clear_geofence(handle))
     }
+
+    /// Sets the color and half-width (normalized units) the next stroke opens with.
+    public func setBrushStyle(red: Float, green: Float, blue: Float, alpha: Float, width: Float) throws {
+        try checked(goss_session_brush_set_style(handle, red, green, blue, alpha, width))
+    }
+
+    /// Opens a stroke in the current style. A fresh stroke drops the redo stack.
+    public func beginStroke() throws { try checked(goss_session_brush_begin(handle)) }
+
+    /// Adds a point to the open stroke, in normalized screen space (0..1).
+    public func addStrokePoint(x: Float, y: Float) throws { try checked(goss_session_brush_point(handle, x, y)) }
+
+    /// Commits the open stroke. A stroke of fewer than two points is dropped.
+    public func endStroke() throws { try checked(goss_session_brush_end(handle)) }
+
+    public func undoStroke() throws { try checked(goss_session_brush_undo(handle)) }
+    public func redoStroke() throws { try checked(goss_session_brush_redo(handle)) }
+    public func clearStrokes() throws { try checked(goss_session_brush_clear(handle)) }
+
+    /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
+    /// renderer to draw. Queries the float count first, then fills a buffer.
+    public func brushVertices() throws -> [Float] {
+        var count = 0
+        try checked(goss_session_brush_vertices(handle, nil, 0, &count))
+        if count == 0 { return [] }
+        var out = [Float](repeating: 0, count: count)
+        try out.withUnsafeMutableBufferPointer { buffer in
+            var written = 0
+            try checked(goss_session_brush_vertices(handle, buffer.baseAddress, buffer.count, &written))
+        }
+        return out
+    }
 }

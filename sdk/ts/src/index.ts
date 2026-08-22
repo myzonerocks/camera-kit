@@ -823,6 +823,58 @@ export class GossSession {
     this.mod.ccall("goss_session_clear_geofence", "number", ["number"], [this.handle]);
   }
 
+  /// Sets the color and half-width (normalized units) the next stroke opens with.
+  setBrushStyle(r: number, g: number, b: number, a: number, width: number): void {
+    this.mod.ccall("goss_session_brush_set_style", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, r, g, b, a, width]);
+  }
+
+  /// Opens a stroke in the current style. A fresh stroke drops the redo stack.
+  beginStroke(): void {
+    this.mod.ccall("goss_session_brush_begin", "number", ["number"], [this.handle]);
+  }
+
+  /// Adds a point to the open stroke, in normalized screen space (0..1).
+  addStrokePoint(x: number, y: number): void {
+    this.mod.ccall("goss_session_brush_point", "number", ["number", "number", "number"], [this.handle, x, y]);
+  }
+
+  /// Commits the open stroke. A stroke of fewer than two points is dropped.
+  endStroke(): void {
+    this.mod.ccall("goss_session_brush_end", "number", ["number"], [this.handle]);
+  }
+
+  undoStroke(): void {
+    this.mod.ccall("goss_session_brush_undo", "number", ["number"], [this.handle]);
+  }
+
+  redoStroke(): void {
+    this.mod.ccall("goss_session_brush_redo", "number", ["number"], [this.handle]);
+  }
+
+  clearStrokes(): void {
+    this.mod.ccall("goss_session_brush_clear", "number", ["number"], [this.handle]);
+  }
+
+  /// Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the
+  /// renderer. Queries the float count, then reads it out of a scratch buffer.
+  brushVertices(): Float32Array {
+    const countPtr = this.mod.ccall("goss_alloc", "number", ["number"], [4]) as number;
+    this.mod.ccall("goss_session_brush_vertices", "number", ["number", "number", "number", "number"], [this.handle, 0, 0, countPtr]);
+    const count = this.mod.HEAP32[countPtr >> 2]!;
+    if (count <= 0) {
+      this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+      return new Float32Array(0);
+    }
+    const bytes = count * 4;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes]) as number;
+    this.mod.ccall("goss_session_brush_vertices", "number", ["number", "number", "number", "number"], [this.handle, outPtr, count, countPtr]);
+    const written = this.mod.HEAP32[countPtr >> 2]!;
+    const out = new Float32Array(this.mod.HEAPF32.buffer, outPtr, written).slice();
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, bytes]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [countPtr, 4]);
+    return out;
+  }
+
   setVideoFlip(enabled: boolean): void {
     this.videoFlipped = enabled;
   }

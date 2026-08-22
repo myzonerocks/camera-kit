@@ -26,6 +26,7 @@ const audio_analysis = @import("audio_analysis");
 const audio_mix = @import("audio_mix");
 const comp = @import("layout");
 const geo = @import("geo");
+const stroke = @import("stroke");
 const physics = @import("physics");
 const script = @import("script");
 const audio_playback = @import("audio_playback");
@@ -73,7 +74,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 24;
+pub const abi_minor: u16 = 25;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -484,6 +485,9 @@ pub const Session = struct {
     location_lon: f64 = 0,
     location_engine_fed: bool = false,
     geofence: ?geo.Circle = null,
+    /// The draw and AR-brush board. The engine owns stroke state and undo/redo;
+    /// goss_session_brush_vertices reads the finished ribbon for the renderer.
+    brush: stroke.Board = .{},
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -2820,6 +2824,71 @@ pub export fn goss_session_set_geofence(session: ?*Session, latitude: f64, longi
 pub export fn goss_session_clear_geofence(session: ?*Session) Status {
     const s = session orelse return .invalid_argument;
     s.geofence = null;
+    return .ok;
+}
+
+/// Sets the color and half-width the next stroke begins with. Width is in
+/// normalized units; a non-positive width falls back to a hairline.
+pub export fn goss_session_brush_set_style(session: ?*Session, r: f32, g: f32, b: f32, a: f32, width: f32) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.setStyle(.{ r, g, b, a }, width);
+    return .ok;
+}
+
+/// Opens a new stroke in the current style. A fresh stroke drops the redo stack.
+pub export fn goss_session_brush_begin(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.begin();
+    return .ok;
+}
+
+/// Adds a point to the open stroke, in normalized screen space (0..1).
+pub export fn goss_session_brush_point(session: ?*Session, x: f32, y: f32) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.point(x, y);
+    return .ok;
+}
+
+/// Commits the open stroke. A stroke of fewer than two points is dropped.
+pub export fn goss_session_brush_end(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.end();
+    return .ok;
+}
+
+/// Removes the last committed stroke onto the redo stack.
+pub export fn goss_session_brush_undo(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.undo();
+    return .ok;
+}
+
+/// Replays the last undone stroke.
+pub export fn goss_session_brush_redo(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.redoLast();
+    return .ok;
+}
+
+/// Drops every stroke and both stacks.
+pub export fn goss_session_brush_clear(session: ?*Session) Status {
+    const s = session orelse return .invalid_argument;
+    s.brush.clear();
+    return .ok;
+}
+
+/// Writes the finished brush ribbon into out (x, y, r, g, b, a per vertex) and
+/// returns the float count through out_count. Passing a null out reports the
+/// float count the caller must size for. Allocation-free; reads finished
+/// strokes only.
+pub export fn goss_session_brush_vertices(session: ?*Session, out: ?[*]f32, capacity_floats: usize, out_count: ?*usize) Status {
+    const s = session orelse return .invalid_argument;
+    const count = out_count orelse return .invalid_argument;
+    const dst = out orelse {
+        count.* = s.brush.vertexFloatCount();
+        return .ok;
+    };
+    count.* = s.brush.buildVertices(dst[0..capacity_floats]);
     return .ok;
 }
 

@@ -85,6 +85,15 @@ object Gosslens {
     internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
     internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
     internal external fun nativeClearGeofence(session: Long): Int
+    internal external fun nativeBrushSetStyle(session: Long, r: Float, g: Float, b: Float, a: Float, width: Float): Int
+    internal external fun nativeBrushBegin(session: Long): Int
+    internal external fun nativeBrushPoint(session: Long, x: Float, y: Float): Int
+    internal external fun nativeBrushEnd(session: Long): Int
+    internal external fun nativeBrushUndo(session: Long): Int
+    internal external fun nativeBrushRedo(session: Long): Int
+    internal external fun nativeBrushClear(session: Long): Int
+    internal external fun nativeBrushVertexCount(session: Long): Int
+    internal external fun nativeBrushVertices(session: Long, outBuffer: ByteBuffer, capacityFloats: Int): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -671,6 +680,35 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         Gosslens.nativeSetGeofence(handle, latitude, longitude, radiusM) == 0
 
     fun clearGeofence(): Boolean = Gosslens.nativeClearGeofence(handle) == 0
+
+    /** Sets the color and half-width (normalized units) the next stroke opens with. */
+    fun setBrushStyle(r: Float, g: Float, b: Float, a: Float, width: Float): Boolean =
+        Gosslens.nativeBrushSetStyle(handle, r, g, b, a, width) == 0
+
+    /** Opens a stroke in the current style. A fresh stroke drops the redo stack. */
+    fun beginStroke(): Boolean = Gosslens.nativeBrushBegin(handle) == 0
+
+    /** Adds a point to the open stroke, in normalized screen space (0..1). */
+    fun addStrokePoint(x: Float, y: Float): Boolean = Gosslens.nativeBrushPoint(handle, x, y) == 0
+
+    /** Commits the open stroke. A stroke of fewer than two points is dropped. */
+    fun endStroke(): Boolean = Gosslens.nativeBrushEnd(handle) == 0
+
+    fun undoStroke(): Boolean = Gosslens.nativeBrushUndo(handle) == 0
+    fun redoStroke(): Boolean = Gosslens.nativeBrushRedo(handle) == 0
+    fun clearStrokes(): Boolean = Gosslens.nativeBrushClear(handle) == 0
+
+    /** Pulls the finished brush ribbon (x, y, r, g, b, a per vertex) for the renderer. */
+    fun brushVertices(): FloatArray {
+        val count = Gosslens.nativeBrushVertexCount(handle)
+        if (count <= 0) return FloatArray(0)
+        val buffer = ByteBuffer.allocateDirect(count * 4).order(ByteOrder.nativeOrder())
+        val written = Gosslens.nativeBrushVertices(handle, buffer, count)
+        if (written <= 0) return FloatArray(0)
+        val out = FloatArray(written)
+        buffer.asFloatBuffer().get(out)
+        return out
+    }
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,
