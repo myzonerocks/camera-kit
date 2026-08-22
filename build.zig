@@ -212,6 +212,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("media_recording", recordingModule(b, target, optimize));
     abi_module.addImport("photo", photoModule(b, target, optimize));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
+    abi_module.addImport("audio_mix", audioMixModule(b, target, optimize));
     const have_jolt = blk: {
         b.build_root.handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
         break :blk true;
@@ -335,6 +336,7 @@ pub fn build(b: *std.Build) void {
     const jpeg_tests = b.addTest(.{ .root_module = jpegModule(b, target, optimize) });
     const color_tests = b.addTest(.{ .root_module = colorModule(b, target, optimize) });
     const audio_analysis_tests = b.addTest(.{ .root_module = audioAnalysisModule(b, target, optimize) });
+    const audio_mix_tests = b.addTest(.{ .root_module = audioMixModule(b, target, optimize) });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
@@ -365,6 +367,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(jpeg_tests).step);
     test_step.dependOn(&b.addRunArtifact(color_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
+    test_step.dependOn(&b.addRunArtifact(audio_mix_tests).step);
     if (have_jolt) {
         const physics_tests = b.addTest(.{ .root_module = physicsModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(physics_tests).step);
@@ -551,7 +554,7 @@ pub fn build(b: *std.Build) void {
                 });
                 const libc_txt = b.addWriteFiles().add("android-libc-beauty.txt", b.fmt("include_dir={s}/usr/include\nsys_include_dir={s}/usr/include/aarch64-linux-android\ncrt_dir={s}/usr/lib/aarch64-linux-android/29\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n", .{ sysroot, sysroot, sysroot }));
                 const beauty_android = buildGpupixelLib(b, android_target, optimize, libc_txt);
-                addNdkPaths(b, beauty_android.root_module, sysroot);
+                addNdkPaths(b, beauty_android.root_module, sysroot, androidTriple(android_target.result.cpu.arch));
                 beauty_step.dependOn(&b.addInstallArtifact(beauty_android, .{ .dest_dir = .{ .override = .{ .custom = "android-beauty" } } }).step);
             }
         } else {
@@ -669,6 +672,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("media_recording", recordingModule(b, target, optimize));
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
+        abi_tracking_module.addImport("audio_mix", audioMixModule(b, target, optimize));
         abi_tracking_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_tracking_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         abi_tracking_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
@@ -880,6 +884,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("media_recording", recordingModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
@@ -1052,6 +1057,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("media_recording", recordingModule(b, target, optimize));
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
+        abi_conformance_module.addImport("audio_mix", audioMixModule(b, target, optimize));
         abi_conformance_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_conformance_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         abi_conformance_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
@@ -1236,10 +1242,22 @@ fn ndkSysroot(b: *std.Build) ?[]const u8 {
     return sysroot;
 }
 
-fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8) void {
+/// The NDK toolchain triple naming an arch's per-arch include and lib
+/// directories under the sysroot.
+fn androidTriple(arch: std.Target.Cpu.Arch) []const u8 {
+    return switch (arch) {
+        .aarch64 => "aarch64-linux-android",
+        .x86_64 => "x86_64-linux-android",
+        .x86 => "i686-linux-android",
+        .arm => "arm-linux-androideabi",
+        else => "aarch64-linux-android",
+    };
+}
+
+fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8, triple: []const u8) void {
     module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include" }) });
-    module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include", "aarch64-linux-android" }) });
-    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "lib", "aarch64-linux-android", "29" }) });
+    module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "include", triple }) });
+    module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sysroot, "usr", "lib", triple, "29" }) });
 }
 
 /// Gives a module that compiles vendored C its target's sysroot include
@@ -1249,7 +1267,7 @@ fn addNdkPaths(b: *std.Build, module: *std.Build.Module, sysroot: []const u8) vo
 fn addCTargetSysroot(b: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget) void {
     if (target.result.abi.isAndroid()) {
         module.pic = true;
-        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot, androidTriple(target.result.cpu.arch));
     } else if (target.result.os.tag == .ios) {
         addAppleSdkPaths(b, module);
     } else if (target.result.os.tag == .emscripten) {
@@ -1257,8 +1275,10 @@ fn addCTargetSysroot(b: *std.Build, module: *std.Build.Module, target: std.Build
     }
 }
 
+const AndroidAbi = struct { cpu: std.Target.Cpu.Arch, dir: []const u8 };
+
 fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe: ?*std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) void {
-    const android_step = b.step("android", "Build libgosslens.so for android arm64-v8a");
+    const android_step = b.step("android", "Build libgosslens.so for android arm64-v8a and x86_64");
     const shaderc_tool = shaderc_exe orelse {
         android_step.dependOn(&b.addFail("gosslens: shader compiler unavailable, run zig build vendor-sync").step);
         return;
@@ -1268,12 +1288,32 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         android_step.dependOn(&missing.step);
         return;
     };
-    const android_target = b.resolveTargetQuery(.{
-        .cpu_arch = .aarch64,
+    // arm64-v8a covers every current device and an arm64 emulator; x86_64
+    // covers an Intel-host emulator. Each abi installs its own libgosslens.so
+    // under its jniLibs directory.
+    for ([_]AndroidAbi{
+        .{ .cpu = .aarch64, .dir = "arm64-v8a" },
+        .{ .cpu = .x86_64, .dir = "x86_64" },
+    }) |abi_target| {
+        const so = addAndroidSlice(b, abi_target, sysroot, optimize, shaderc_tool, flatc_exe);
+        android_step.dependOn(&b.addInstallArtifact(so, .{ .dest_dir = .{ .override = .{ .custom = b.fmt("android/{s}", .{abi_target.dir}) } } }).step);
+    }
+}
+
+fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, optimize: std.builtin.OptimizeMode, shaderc_tool: *std.Build.Step.Compile, flatc_exe: ?*std.Build.Step.Compile) *std.Build.Step.Compile {
+    const abi_triple = androidTriple(abi_target.cpu);
+    var android_query: std.Target.Query = .{
+        .cpu_arch = abi_target.cpu,
         .os_tag = .linux,
         .abi = .android,
         .android_api_level = 29,
-    });
+    };
+    // The Android x86_64 ABI guarantees SSE4.2 + POPCNT (the x86-64-v2 level);
+    // bx's x86 SIMD path needs SSE4.1, which the bare baseline x86_64 model
+    // lacks. Pin v2 so the vendored C SIMD compiles against the real device
+    // baseline rather than SSE2-only.
+    if (abi_target.cpu == .x86_64) android_query.cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v2 };
+    const android_target = b.resolveTargetQuery(android_query);
 
     const math_android = b.createModule(.{ .root_source_file = b.path("core/math/math.zig"), .target = android_target, .optimize = optimize });
     const graph_android = b.createModule(.{ .root_source_file = b.path("core/graph/graph.zig"), .target = android_target, .optimize = optimize });
@@ -1292,7 +1332,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     render_android.addIncludePath(b.path(".vendor/bgfx/include"));
     render_android.addIncludePath(b.path(".vendor/bx/include"));
     render_android.link_libc = true;
-    addNdkPaths(b, render_android, sysroot);
+    addNdkPaths(b, render_android, sysroot, abi_triple);
     // Bionic annotates array parameters with nullability keywords that
     // translate-c rejects; neutralizing them costs only the annotations.
     render_android.addCMacro("_Nonnull", "");
@@ -1308,7 +1348,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
             .{ .name = "render", .module = render_android },
         },
     });
-    const libc_txt = b.addWriteFiles().add("android-libc.txt", b.fmt("include_dir={s}/usr/include\nsys_include_dir={s}/usr/include/aarch64-linux-android\ncrt_dir={s}/usr/lib/aarch64-linux-android/29\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n", .{ sysroot, sysroot, sysroot }));
+    const libc_txt = b.addWriteFiles().add(b.fmt("android-libc-{s}.txt", .{abi_target.dir}), b.fmt("include_dir={s}/usr/include\nsys_include_dir={s}/usr/include/{s}\ncrt_dir={s}/usr/lib/{s}/29\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n", .{ sysroot, sysroot, abi_triple, sysroot, abi_triple }));
 
     const tracking_cores_android = trackingCoreModules(b, android_target, optimize, math_android);
     abi_android.addImport("face", tracking_cores_android.face);
@@ -1321,6 +1361,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_android.addImport("media_recording", recordingModule(b, android_target, optimize));
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
+    abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
     abi_android.addImport("physics", physicsModule(b, android_target, optimize, true));
     abi_android.addImport("script", scriptModule(b, android_target, optimize, true));
     abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, true));
@@ -1372,7 +1413,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         });
         runtime_android.link_libc = true;
         runtime_android.addIncludePath(b.path(".vendor/litert"));
-        addNdkPaths(b, runtime_android, sysroot);
+        addNdkPaths(b, runtime_android, sysroot, abi_triple);
         runtime_android.addCMacro("_Nonnull", "");
         runtime_android.addCMacro("_Nullable", "");
         const tracking_android = b.createModule(.{
@@ -1467,7 +1508,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         .imports = &.{.{ .name = "abi", .module = abi_android }},
     });
     jni_module.link_libc = true;
-    addNdkPaths(b, jni_module, sysroot);
+    addNdkPaths(b, jni_module, sysroot, abi_triple);
     if (inference_android) {
         jni_module.link_libcpp = true;
         jni_module.linkLibrary(buildTfliteLib(b, android_target, optimize, flatc_android.?, libc_txt));
@@ -1480,7 +1521,7 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
         jni_module.linkLibrary(buildCpuinfoLib(b, android_target, optimize, libc_txt));
         jni_module.linkLibrary(buildPthreadpoolLib(b, android_target, optimize, libc_txt));
         const beauty_archive = buildGpupixelLib(b, android_target, optimize, libc_txt);
-        addNdkPaths(b, beauty_archive.root_module, sysroot);
+        addNdkPaths(b, beauty_archive.root_module, sysroot, abi_triple);
         jni_module.linkLibrary(beauty_archive);
     }
 
@@ -1492,14 +1533,13 @@ fn addAndroidStep(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     for ([_][]const u8{ "android", "log", "EGL", "GLESv3", "vulkan" }) |lib| {
         jni_module.linkSystemLibrary(lib, .{});
     }
-
-    android_step.dependOn(&b.addInstallArtifact(so, .{ .dest_dir = .{ .override = .{ .custom = "android/arm64-v8a" } } }).step);
+    return so;
 }
 
 fn buildBgfxAndroid(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, sysroot: []const u8) *std.Build.Step.Compile {
     const lib = buildBgfxLib(b, target, optimize);
     lib.root_module.pic = true;
-    addNdkPaths(b, lib.root_module, sysroot);
+    addNdkPaths(b, lib.root_module, sysroot, androidTriple(target.result.cpu.arch));
     // Bionic annotates array parameters with nullability keywords that
     // clang rejects in C++ translation units; neutralizing the keywords
     // costs only the annotations.
@@ -1538,6 +1578,10 @@ fn colorModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 fn audioAnalysisModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/audio_analysis.zig"), .target = target, .optimize = optimize });
+}
+
+fn audioMixModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/media/audio_mix.zig"), .target = target, .optimize = optimize });
 }
 
 // The rigid-body world: Jolt and its shim on targets we build it for,
@@ -1677,7 +1721,7 @@ fn recordingModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
         // Translation-only sysroot includes: link_libc here would mix
         // zig's bundled bionic headers with the sysroot's and conflict;
         // libc itself links at the shared-library level.
-        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot, androidTriple(target.result.cpu.arch));
         module.linkSystemLibrary("mediandk", .{});
         module.linkSystemLibrary("android", .{});
     }
@@ -2403,7 +2447,7 @@ fn buildLibyuvLib(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std
         // The pinned libyuv pulls libc headers gpupixel's older bundled
         // copy never did; like every other android C++ module, it needs
         // the NDK sysroot includes.
-        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot);
+        if (ndkSysroot(b)) |sysroot| addNdkPaths(b, module, sysroot, androidTriple(target.result.cpu.arch));
     }
     if (target.result.os.tag == .ios) addAppleSdkPaths(b, module);
     module.addIncludePath(b.path(b.fmt("{s}/include", .{root})));
@@ -3261,6 +3305,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("media_recording", recordingModule(b, ios_target, optimize));
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
+    abi_ios.addImport("audio_mix", audioMixModule(b, ios_target, optimize));
     // Physics, scripting and audio follow their vendor the same way the host
     // build does, so hiding a vendor turns that subsystem into its stub
     // instead of leaving an empty library target that fails to link.
@@ -3825,6 +3870,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("media_recording", recordingModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));

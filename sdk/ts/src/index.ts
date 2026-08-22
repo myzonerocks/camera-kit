@@ -668,6 +668,32 @@ export class GossSession {
     return out;
   }
 
+  /// Folds the active lens sound into the caller's outgoing call/live track:
+  /// `mic` (interleaved f32 at `sampleRate`/`channels`, or null for silence)
+  /// summed with the 48 kHz mono lens mixer resampled to that rate; returns the
+  /// mixed interleaved s16. Advances the mixer once, replacing `pullAudio`.
+  mixOutputAudio(mic: Float32Array | null, frameCount: number, sampleRate: number, channels: number): Int16Array {
+    const outLen = frameCount * channels;
+    const outBytes = outLen * 2;
+    const outPtr = this.mod.ccall("goss_alloc", "number", ["number"], [outBytes]);
+    let micPtr = 0;
+    const micBytes = mic ? mic.length * 4 : 0;
+    if (mic) {
+      micPtr = this.mod.ccall("goss_alloc", "number", ["number"], [micBytes]);
+      this.mod.HEAPF32.set(mic, micPtr >> 2);
+    }
+    this.mod.ccall(
+      "goss_session_mix_output_audio",
+      "number",
+      ["number", "number", "number", "number", "number", "number"],
+      [this.handle, micPtr, outPtr, frameCount, sampleRate, channels],
+    );
+    const out = new Int16Array(this.mod.HEAP16.buffer, outPtr, outLen).slice();
+    this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, outBytes]);
+    if (mic) this.mod.ccall("goss_free", null, ["number", "number"], [micPtr, micBytes]);
+    return out;
+  }
+
   setVideoFlip(enabled: boolean): void {
     this.videoFlipped = enabled;
   }

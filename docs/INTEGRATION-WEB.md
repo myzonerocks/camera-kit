@@ -97,8 +97,11 @@ LiveKit or any WebRTC peer:
 Keep the render loop running (`renderFrame` per frame) and the track carries
 every composited frame. Reach for `captureLiveFrame` only when you need the
 raw pixels (BGRA by default) rather than a track. For audio, `submitAudio`
-feeds mic samples in for audio-reactive lenses and `pullAudio` pulls a lens's
-own sound out to mix into your outgoing WebRTC audio track.
+feeds mic samples in for audio-reactive lenses, and `mixOutputAudio` folds the
+lens's own sound into the mic block you are about to publish and returns the
+mixed interleaved s16 for your outgoing WebRTC audio track (pass `null` for the
+mic to send the lens sound over silence). `pullAudio` still pulls the lens sound
+alone for local WebAudio playback with no call in progress.
 
 ## Method names
 

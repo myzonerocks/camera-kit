@@ -73,6 +73,7 @@ object Gosslens {
     internal external fun nativeTickLens(session: Long, dtUs: Int, signalsBuffer: ByteBuffer): Int
     internal external fun nativeParameterValue(session: Long, nameBuffer: ByteBuffer, nameLen: Int, outBuffer: ByteBuffer): Int
     internal external fun nativePullAudio(session: Long, outBuffer: ByteBuffer, frames: Int): Int
+    internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -563,6 +564,13 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
      * to route to platform audio out. */
     fun pullAudio(out: ByteBuffer, frames: Int): Boolean =
         Gosslens.nativePullAudio(handle, out, frames) == 0
+
+    /** Folds the active lens sound into the caller's outgoing call/live track:
+     * [mic] (interleaved f32 at [sampleRate]/[channels], or null for silence)
+     * summed with the 48 kHz mono lens mixer resampled to that rate, into [out]
+     * (frameCount*channels s16). Advances the mixer once, replacing [pullAudio]. */
+    fun mixOutputAudio(mic: ByteBuffer?, out: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Boolean =
+        Gosslens.nativeMixOutputAudio(handle, mic, out, frameCount, sampleRate, channels) == 0
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,

@@ -109,9 +109,18 @@ If you would rather own the pixels, `captureLiveFrame(format:)` reads the
 frame back in BGRA, RGBA, or NV12 - one copy, for a software encoder or a
 frame you inspect. The zero-copy `GossLiveOutput` is the broadcast default.
 
-For audio, `submitAudio` feeds the mic in so audio-reactive lenses respond, and
-`pullAudio` pulls a lens's own sound out. Mix that PCM into your outgoing
-LiveKit audio track's buffer the way you would any custom audio source.
+For audio, `submitAudio` feeds the mic in so audio-reactive lenses respond. For
+the outgoing track, `mixOutputAudio` folds the lens's own sound into the mic
+block you are about to publish and hands back the mixed interleaved s16 - the
+engine resamples the lens sound to your track's rate and sums it in, so there
+is nothing to hand-mix:
+
+    let mixed = try session.mixOutputAudio(mic: micSamples, frameCount: n,
+                                           sampleRate: 48000, channels: 1)
+    audioTrack.send(mixed)   // publish; pass mic: nil for lens sound over silence
+
+`pullAudio` still pulls the lens sound on its own for local playback with no
+call in progress; in a call, `mixOutputAudio` replaces it.
 
 ## Method names
 

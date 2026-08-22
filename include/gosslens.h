@@ -582,6 +582,12 @@ goss_status goss_session_parameter_value(goss_session *session, const uint8_t *n
  * the platform audio output. Writes silence when no lens sound is active. */
 goss_status goss_session_pull_audio(goss_session *session, int16_t *out, uint32_t frames);
 
+/* Graph thread. Folds the active lens sound into the caller's outgoing
+ * call/live track: mic (interleaved f32 at sample_rate/channels, or NULL for
+ * silence) summed with the 48 kHz mono lens mixer resampled to that rate, into
+ * out (frame_count*channels s16). Advances the mixer once, replacing pull_audio. */
+goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels);
+
 #if !defined(__cplusplus) && (__STDC_VERSION__ >= 201112L)
 _Static_assert(sizeof(goss_frame_desc) == 32, "goss_frame_desc layout is frozen");
 _Static_assert(sizeof(goss_landmarks) == 24, "goss_landmarks layout is frozen");

@@ -1134,6 +1134,108 @@ fn proveAudio(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the engine-side outgoing mix: at the native 48 kHz, the lens over a
+/// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
+/// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
+/// across runs.
+fn proveOutputMix(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const block: u32 = 512;
+
+    // Helper: a fresh session with the sound lens active and its trigger fired,
+    // ready for the first audio block to carry the voice from sample zero.
+    const S = struct {
+        const dir = ".lens-packages/sound-beat";
+        fn armed(e: *abi.Engine) !*abi.Session {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            if (abi.goss_session_activate_lens_from_directory(session, dir, dir.len) != .ok) return error.Activate;
+            var present = std.mem.zeroes(abi.LensSignals);
+            present.has_face = true;
+            _ = abi.goss_session_tick_lens(session, 16000, &present);
+            return session;
+        }
+    };
+
+    // The reference lens PCM, pulled straight from the mixer.
+    var lens_ref: [block]i16 = undefined;
+    {
+        const session = try S.armed(engine);
+        defer abi.destroySession(session);
+        _ = abi.goss_session_pull_audio(session, &lens_ref, block);
+    }
+    var ref_energy: u64 = 0;
+    for (lens_ref) |s| ref_energy += @abs(@as(i32, s));
+    if (ref_energy == 0) {
+        std.debug.print("conformance: FAIL the reference lens sound is silent\n", .{});
+        return false;
+    }
+
+    // Native-rate mix over a silent mic equals the pulled lens PCM exactly.
+    var mix_silence: [block]i16 = undefined;
+    {
+        const session = try S.armed(engine);
+        defer abi.destroySession(session);
+        if (abi.goss_session_mix_output_audio(session, null, &mix_silence, block, 48_000, 1) != .ok) {
+            std.debug.print("conformance: FAIL mix_output_audio returned non-ok\n", .{});
+            return false;
+        }
+    }
+    if (!std.mem.eql(i16, &mix_silence, &lens_ref)) {
+        std.debug.print("conformance: FAIL native-rate mix over silence differs from the pulled lens PCM\n", .{});
+        return false;
+    }
+
+    // A steady mic sums in with saturation: out == clamp(mic_s16 + lens).
+    const mic_val: f32 = 0.25;
+    const mic_s16: i32 = @intFromFloat(@round(@as(f64, mic_val) * 32767.0)); // 8192
+    var mic_block: [block]f32 = undefined;
+    @memset(&mic_block, mic_val);
+    var mix_mic: [2][block]i16 = undefined;
+    for (0..2) |run| {
+        const session = try S.armed(engine);
+        defer abi.destroySession(session);
+        if (abi.goss_session_mix_output_audio(session, &mic_block, &mix_mic[run], block, 48_000, 1) != .ok) {
+            std.debug.print("conformance: FAIL mix_output_audio with a mic returned non-ok\n", .{});
+            return false;
+        }
+    }
+    for (mix_mic[0], 0..) |got, i| {
+        const want: i16 = @intCast(std.math.clamp(mic_s16 + @as(i32, lens_ref[i]), @as(i32, -32768), @as(i32, 32767)));
+        if (got != want) {
+            std.debug.print("conformance: FAIL outgoing mix sample {d} = {d}, want {d}\n", .{ i, got, want });
+            return false;
+        }
+    }
+    if (!std.mem.eql(i16, &mix_mic[0], &mix_mic[1])) {
+        std.debug.print("conformance: FAIL outgoing mix is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    // The resampled path (44.1 kHz outgoing) is non-silent and bit-stable.
+    var mix_resampled: [2][block]i16 = undefined;
+    for (0..2) |run| {
+        const session = try S.armed(engine);
+        defer abi.destroySession(session);
+        if (abi.goss_session_mix_output_audio(session, null, &mix_resampled[run], block, 44_100, 1) != .ok) {
+            std.debug.print("conformance: FAIL resampled mix returned non-ok\n", .{});
+            return false;
+        }
+    }
+    var res_energy: u64 = 0;
+    for (mix_resampled[0]) |s| res_energy += @abs(@as(i32, s));
+    if (res_energy == 0) {
+        std.debug.print("conformance: FAIL resampled outgoing mix is silent\n", .{});
+        return false;
+    }
+    if (!std.mem.eql(i16, &mix_resampled[0], &mix_resampled[1])) {
+        std.debug.print("conformance: FAIL resampled outgoing mix is not deterministic across runs\n", .{});
+        return false;
+    }
+
+    std.debug.print("conformance: PROOF the engine mixes lens sound into the outgoing track - native-rate mix equals the pulled PCM, a mic sums with saturation, resampled and bit-stable\n", .{});
+    return true;
+}
+
 /// Proves physics chains: a dynamic pendant chained to a static anchor
 /// swings out under gravity to hang at the chain length, the settled
 /// frame differs from the initial frame, and two runs are identical.
@@ -2912,6 +3014,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveColorManagedCapture(gpa, engine)) return 1;
     if (!try proveScript(gpa, engine)) return 1;
     if (!try proveAudio(gpa, engine)) return 1;
+    if (!try proveOutputMix(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;
