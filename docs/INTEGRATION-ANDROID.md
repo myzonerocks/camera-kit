@@ -14,10 +14,11 @@ gradle packages your app.
 
     zig build android
 
-This writes `zig-out/android/arm64-v8a/libgosslens.so`. The library is arm64
-only. That covers real devices and the arm64 emulator images an Apple-silicon
-machine runs by default; an Intel-host emulator wants an x86_64 slice, which is
-not built yet, so develop against an arm64 emulator or a device.
+This writes `zig-out/android/arm64-v8a/libgosslens.so` and
+`zig-out/android/x86_64/libgosslens.so`. arm64-v8a covers every current device
+and the arm64 emulator an Apple-silicon machine runs by default; x86_64 covers
+an Intel-host emulator. gradle picks the right one per ABI, so a device and
+either emulator all link and run the engine.
 
 ## Add the SDK
 
