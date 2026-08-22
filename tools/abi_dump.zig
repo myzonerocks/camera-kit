@@ -38,6 +38,7 @@ const abi_functions = [_][]const u8{
     "goss_status goss_session_mix_output_audio(goss_session *session, const float *mic, int16_t *out, uint32_t frame_count, uint32_t sample_rate, uint32_t channels)",
     "goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls)",
     "goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out)",
+    "goss_status goss_session_fire_event(goss_session *session, const uint8_t *name, size_t name_len)",
     "goss_status goss_session_submit_frame(goss_session *session, const goss_frame_desc *desc, const goss_frame_planes *planes)",
     "goss_status goss_session_submit_hardware_buffer(goss_session *session, const goss_frame_desc *desc, void *hardware_buffer)",
     "goss_status goss_session_submit_frame_copy(goss_session *session, const goss_frame_desc *desc, const uint8_t *y, uint32_t y_stride, const uint8_t *uv, uint32_t uv_stride)",

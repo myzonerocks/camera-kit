@@ -477,6 +477,12 @@ export fn Java_com_gosslens_Gosslens_nativeCameraControls(env: *JniEnv, cls: job
     return @intFromEnum(abi.goss_session_camera_controls(sessionFromHandle(session), @ptrCast(@alignCast(bytes))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeFireEvent(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_fire_event(sessionFromHandle(session), name, @intCast(@max(name_len, 0))));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;

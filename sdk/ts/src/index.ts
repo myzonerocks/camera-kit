@@ -749,6 +749,17 @@ export class GossSession {
     return c;
   }
 
+  /// Fires a named event the next `tickLens` delivers to the lens's
+  /// `event('name')` triggers for one tick.
+  fireEvent(name: string): void {
+    const bytes = new TextEncoder().encode(name);
+    if (bytes.length === 0) return;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    this.mod.HEAPU8.set(bytes, ptr);
+    this.mod.ccall("goss_session_fire_event", "number", ["number", "number", "number"], [this.handle, ptr, bytes.length]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+  }
+
   setVideoFlip(enabled: boolean): void {
     this.videoFlipped = enabled;
   }

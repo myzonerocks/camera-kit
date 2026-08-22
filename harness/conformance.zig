@@ -1172,6 +1172,60 @@ fn proveCameraControls(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves the host-fired event trigger through the public ABI: a lens with an
+/// event('celebrate') trigger leaves its parameter at default until the exact
+/// event is fired, ignores a non-matching event, fires the action on the next
+/// tick, and does so bit-identically across runs.
+fn proveEventTrigger(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const manifest =
+        \\{"glf":"1.0","id":"goss.reference.event-burst","version":"1.0.0","display_name":"Event Burst","engine_compat":">=0.5","capabilities":[],"parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],"nodes":[{"id":"grade","type":"grade.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[{"when":"event('celebrate')","action":{"kind":"param_set","target":"intensity","to":1.0}}]}
+    ;
+    const pname = "intensity";
+    var results: [2]f32 = undefined;
+    for (0..2) |run| {
+        const session = try abi.createSession(engine, .{ .frame_budget_us = 0, .reserved = 0 });
+        defer abi.destroySession(session);
+        if (abi.goss_session_activate_lens(session, manifest.ptr, manifest.len) != .ok) {
+            std.debug.print("conformance: FAIL event lens activation\n", .{});
+            return false;
+        }
+        var sig = std.mem.zeroes(abi.LensSignals);
+        var value: f32 = -1;
+
+        // No event: the trigger never fires, the parameter stays at default.
+        _ = abi.goss_session_tick_lens(session, 16000, &sig);
+        _ = abi.goss_session_parameter_value(session, pname, pname.len, &value);
+        if (value != 0.0) {
+            std.debug.print("conformance: FAIL event trigger fired with no event ({d})\n", .{value});
+            return false;
+        }
+        // A non-matching event is ignored.
+        _ = abi.goss_session_fire_event(session, "other", "other".len);
+        _ = abi.goss_session_tick_lens(session, 16000, &sig);
+        _ = abi.goss_session_parameter_value(session, pname, pname.len, &value);
+        if (value != 0.0) {
+            std.debug.print("conformance: FAIL a non-matching event fired the trigger ({d})\n", .{value});
+            return false;
+        }
+        // The matching event fires the action on the next tick.
+        _ = abi.goss_session_fire_event(session, "celebrate", "celebrate".len);
+        _ = abi.goss_session_tick_lens(session, 16000, &sig);
+        _ = abi.goss_session_parameter_value(session, pname, pname.len, &value);
+        results[run] = value;
+    }
+    if (results[0] != 1.0) {
+        std.debug.print("conformance: FAIL the matching event did not fire the action ({d})\n", .{results[0]});
+        return false;
+    }
+    if (results[0] != results[1]) {
+        std.debug.print("conformance: FAIL event trigger is not deterministic across runs\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a host-fired event fires a lens trigger for exactly one tick, ignores non-matching names, and is bit-stable\n", .{});
+    return true;
+}
+
 fn proveOutputMix(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     _ = gpa;
     const block: u32 = 512;
@@ -3050,6 +3104,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveAudio(gpa, engine)) return 1;
     if (!try proveOutputMix(gpa, engine)) return 1;
     if (!try proveCameraControls(gpa, engine)) return 1;
+    if (!try proveEventTrigger(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;

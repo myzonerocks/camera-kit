@@ -71,7 +71,7 @@ pub const HandResult = hand.Result;
 pub const PoseResult = pose.Result;
 
 pub const abi_major: u16 = 0;
-pub const abi_minor: u16 = 21;
+pub const abi_minor: u16 = 22;
 
 // As a library embedded in someone else's process the core never
 // symbolizes its own stack: the hosting app owns crash reporting, and the
@@ -104,6 +104,11 @@ pub const FrameDesc = extern struct {
 pub const frame_flag_mirror: u32 = 1 << 0;
 pub const frame_rotation_shift: u5 = 8;
 pub const frame_rotation_mask: u32 = 0x3 << 8;
+
+/// The host may fire up to this many named events per tick; each name is
+/// truncated to this many bytes. Bounded so firing allocates nothing.
+const max_pending_events: usize = 8;
+const max_event_name: usize = 31;
 
 pub const Landmarks = extern struct {
     points: ?[*]const f32,
@@ -451,6 +456,12 @@ pub const Session = struct {
     /// The caller's normalized camera-hardware intent (validated at set-time);
     /// the SDK reads it back and drives the platform camera. Inline POD.
     camera_controls: CameraControls = .{},
+    /// Host-fired event names buffered until the next tick, where they reach
+    /// the trigger rail for exactly one tick and then clear. Fixed-size, so
+    /// firing an event allocates nothing.
+    pending_event_buf: [max_pending_events][max_event_name]u8 = undefined,
+    pending_event_len: [max_pending_events]u8 = undefined,
+    pending_event_count: u8 = 0,
     /// One bgfx program per currently-spliced shader.pass node, keyed by
     /// its graph index. Created at activation (goss_session_activate_lens_
     /// from_directory only - the bytes-based activate has no bundle path
@@ -4084,6 +4095,23 @@ pub export fn goss_session_parameter_value(session: ?*Session, name: ?[*]const u
 /// effect value its triggers/ramps changed to the beauty chain, if one
 /// is enabled. Reports GOSS_AGAIN with no active lens, matching the
 /// no-chain-yet convention goss_session_set_beauty already uses.
+/// Fires a named event the next tick delivers to the lens's event('name')
+/// triggers for exactly one tick - drives an on-screen effect from an app
+/// moment; the engine knows the name, never its meaning. Buffered without
+/// allocation; a full buffer or over-long name is dropped/truncated, not error.
+pub export fn goss_session_fire_event(session: ?*Session, name: ?[*]const u8, name_len: usize) Status {
+    const s = session orelse return .invalid_argument;
+    const n = name orelse return .invalid_argument;
+    if (name_len == 0) return .invalid_argument;
+    if (s.pending_event_count >= max_pending_events) return .ok; // dropped this tick
+    const copy_len = @min(name_len, max_event_name);
+    const slot = s.pending_event_count;
+    @memcpy(s.pending_event_buf[slot][0..copy_len], n[0..copy_len]);
+    s.pending_event_len[slot] = @intCast(copy_len);
+    s.pending_event_count += 1;
+    return .ok;
+}
+
 pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*const LensSignals) Status {
     const s = session orelse return .invalid_argument;
     const sig = signals orelse return .invalid_argument;
@@ -4098,12 +4126,19 @@ pub export fn goss_session_tick_lens(session: ?*Session, dt_us: u32, signals: ?*
     if (s.world_engine_fed) {
         live_signals.world_tracking_state = @floatFromInt(s.world.state.tracking_state);
     }
+    // The events fired since the last tick reach the triggers for this tick
+    // only, then clear below - a one-tick pulse an edge-triggered action reads
+    // once. The view borrows the session's fixed buffer, valid for this call.
+    var event_view: [max_pending_events][]const u8 = undefined;
+    for (0..s.pending_event_count) |i| event_view[i] = s.pending_event_buf[i][0..s.pending_event_len[i]];
+    live_signals.events = event_view[0..s.pending_event_count];
     // The script drives parameters before triggers and ramps read them, so
     // its writes flow into this tick's effects.
     runScript(s, &live_signals);
     const effects = runtime.tick(&s.active_lens.?, dt_us, live_signals);
     applyLensEffects(s, effects);
     playFiredSounds(s);
+    s.pending_event_count = 0;
     return .ok;
 }
 

@@ -76,6 +76,7 @@ object Gosslens {
     internal external fun nativeMixOutputAudio(session: Long, micBuffer: ByteBuffer?, outBuffer: ByteBuffer, frameCount: Int, sampleRate: Int, channels: Int): Int
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
     internal external fun nativeCameraControls(session: Long, buffer: ByteBuffer): Int
+    internal external fun nativeFireEvent(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -615,6 +616,14 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
             buf.getFloat(28), buf.getFloat(32), buf.getFloat(36),
             buf.getFloat(40), buf.getFloat(44), buf.getInt(48),
         )
+    }
+
+    /** Fires a named event the next [tickLens] delivers to the lens's
+     * event('name') triggers for one tick. */
+    fun fireEvent(name: String): Boolean {
+        val bytes = name.toByteArray(Charsets.UTF_8)
+        val buf = ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); rewind() }
+        return Gosslens.nativeFireEvent(handle, buf, bytes.size) == 0
     }
 
     fun submitHardwareBuffer(

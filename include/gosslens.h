@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 21u
+#define GOSS_ABI_MINOR 22u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -597,6 +597,12 @@ void goss_session_deactivate_lens(goss_session *session);
  * effect value that changed as a result to the beauty chain, if one is
  * enabled. Reports GOSS_AGAIN with no active lens. */
 goss_status goss_session_tick_lens(goss_session *session, uint32_t dt_us, const goss_lens_signals *signals);
+
+/* Graph thread. Fires a named event the next goss_session_tick_lens delivers
+ * to the lens's event('name') triggers for exactly one tick, then clears -
+ * drives an on-screen effect from an app moment; the engine knows the name,
+ * never its meaning. Buffered without allocation; over-long names truncate. */
+goss_status goss_session_fire_event(goss_session *session, const uint8_t *name, size_t name_len);
 
 /* Graph thread. Reads a live parameter of the active lens by name,
  * including whatever a script node last wrote, into out_value. Reports
