@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 19u
+#define GOSS_ABI_MINOR 21u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -377,6 +377,33 @@ typedef struct goss_capture_config {
  * platform photo backend. */
 goss_status goss_engine_capture_still(goss_engine *engine, goss_session *session, const goss_capture_config *config, uint8_t *out_data, size_t out_capacity, size_t *out_len, uint32_t *out_width, uint32_t *out_height);
 
+/* Declarative camera-hardware intent. The engine validates and normalizes
+ * every field and stores it on the session; the SDK reads the normalized
+ * values back and drives the platform camera. The core never touches camera
+ * hardware. Layout: 56 bytes, static-asserted below. */
+typedef struct goss_camera_controls {
+  uint32_t flash_mode;         /* 0 off, 1 on, 2 auto (still-capture LED) */
+  uint32_t torch;              /* 0 off, 1 on (continuous LED) */
+  uint32_t focus_mode;         /* 0 continuous-auto, 1 locked, 2 point-single */
+  uint32_t exposure_mode;      /* 0 continuous-auto, 1 locked */
+  float    focus_point_x;      /* tap POI, normalized 0..1 (clamped) */
+  float    focus_point_y;
+  uint32_t exposure_linked;    /* 1 exposure POI follows focus POI, 0 decoupled */
+  float    exposure_point_x;   /* used when decoupled, 0..1 (clamped) */
+  float    exposure_point_y;
+  float    exposure_bias_ev;   /* clamped to [-8, 8]; SDK re-clamps to device */
+  float    zoom_factor;        /* >= 1; clamped to [1, max_zoom_factor or 128] */
+  float    max_zoom_factor;    /* SDK-reported device ceiling; 0 = unknown */
+  uint32_t mirror_save_policy; /* 0 uniform (front mirrors every surface) */
+  uint32_t reserved;           /* zero */
+} goss_camera_controls;
+
+/* Graph thread. Validates and normalizes controls into the session; the SDK
+ * reads them back with goss_session_camera_controls and applies them to the
+ * platform camera. */
+goss_status goss_session_set_camera_controls(goss_session *session, const goss_camera_controls *controls);
+goss_status goss_session_camera_controls(goss_session *session, goss_camera_controls *out);
+
 /* Graph thread. config may be null for defaults. */
 goss_status goss_session_create(goss_engine *engine, const goss_session_config *config, goss_session **out_session);
 void goss_session_destroy(goss_session *session);
@@ -603,6 +630,7 @@ _Static_assert(offsetof(goss_pose_result, landmarks) == 24, "goss_pose_result la
 _Static_assert(sizeof(goss_renderer_desc) == (sizeof(void *) == 8 ? 16 : 12), "goss_renderer_desc layout is frozen");
 _Static_assert(sizeof(goss_frame_planes) == 32, "goss_frame_planes layout is frozen");
 _Static_assert(sizeof(goss_lens_signals) == 232, "goss_lens_signals layout is frozen");
+_Static_assert(sizeof(goss_camera_controls) == 56, "goss_camera_controls layout is frozen");
 _Static_assert(offsetof(goss_lens_signals, world_tracking_state) == 8, "goss_lens_signals layout is frozen");
 _Static_assert(offsetof(goss_lens_signals, blendshapes) == 24, "goss_lens_signals layout is frozen");
 #endif

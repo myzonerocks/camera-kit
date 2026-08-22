@@ -517,6 +517,26 @@ export class GossEngine {
   }
 }
 
+/// Declarative camera-hardware intent. The engine normalizes every field; the
+/// page reads it back and applies it via getUserMedia track constraints. Modes:
+/// flash 0 off/1 on/2 auto; focus 0 auto/1 locked/2 point; exposure 0 auto/1
+/// locked. Points normalized 0..1.
+export interface GossCameraControls {
+  flashMode: number;
+  torch: number;
+  focusMode: number;
+  exposureMode: number;
+  focusPointX: number;
+  focusPointY: number;
+  exposureLinked: number;
+  exposurePointX: number;
+  exposurePointY: number;
+  exposureBiasEv: number;
+  zoomFactor: number;
+  maxZoomFactor: number;
+  mirrorSavePolicy: number;
+}
+
 /// Per-preview runtime: frame submission, beauty, tracking, lens. Owns
 /// its own scratch allocations (frame descriptor, pixel buffer,
 /// landmarks) rather than one shared per-engine pool - matches every
@@ -692,6 +712,41 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [outPtr, outBytes]);
     if (mic) this.mod.ccall("goss_free", null, ["number", "number"], [micPtr, micBytes]);
     return out;
+  }
+
+  /// Stores validated camera-hardware intent; the engine normalizes it. Read it
+  /// back with `cameraControls` and apply it via getUserMedia track constraints.
+  setCameraControls(c: GossCameraControls): void {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [56]) as number;
+    const w = ptr >> 2;
+    this.mod.HEAP32[w] = c.flashMode; this.mod.HEAP32[w + 1] = c.torch;
+    this.mod.HEAP32[w + 2] = c.focusMode; this.mod.HEAP32[w + 3] = c.exposureMode;
+    this.mod.HEAPF32[w + 4] = c.focusPointX; this.mod.HEAPF32[w + 5] = c.focusPointY;
+    this.mod.HEAP32[w + 6] = c.exposureLinked;
+    this.mod.HEAPF32[w + 7] = c.exposurePointX; this.mod.HEAPF32[w + 8] = c.exposurePointY;
+    this.mod.HEAPF32[w + 9] = c.exposureBiasEv; this.mod.HEAPF32[w + 10] = c.zoomFactor;
+    this.mod.HEAPF32[w + 11] = c.maxZoomFactor; this.mod.HEAP32[w + 12] = c.mirrorSavePolicy;
+    this.mod.HEAP32[w + 13] = 0;
+    this.mod.ccall("goss_session_set_camera_controls", "number", ["number", "number"], [this.handle, ptr]);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 56]);
+  }
+
+  /// The normalized camera controls for the page to apply to the media track.
+  cameraControls(): GossCameraControls {
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [56]) as number;
+    this.mod.ccall("goss_session_camera_controls", "number", ["number", "number"], [this.handle, ptr]);
+    const w = ptr >> 2;
+    const c: GossCameraControls = {
+      flashMode: this.mod.HEAP32[w], torch: this.mod.HEAP32[w + 1],
+      focusMode: this.mod.HEAP32[w + 2], exposureMode: this.mod.HEAP32[w + 3],
+      focusPointX: this.mod.HEAPF32[w + 4], focusPointY: this.mod.HEAPF32[w + 5],
+      exposureLinked: this.mod.HEAP32[w + 6],
+      exposurePointX: this.mod.HEAPF32[w + 7], exposurePointY: this.mod.HEAPF32[w + 8],
+      exposureBiasEv: this.mod.HEAPF32[w + 9], zoomFactor: this.mod.HEAPF32[w + 10],
+      maxZoomFactor: this.mod.HEAPF32[w + 11], mirrorSavePolicy: this.mod.HEAP32[w + 12],
+    };
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, 56]);
+    return c;
   }
 
   setVideoFlip(enabled: boolean): void {

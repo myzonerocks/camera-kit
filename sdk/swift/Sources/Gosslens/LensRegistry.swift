@@ -111,4 +111,21 @@ extension GossSession {
         }
         return out
     }
+
+    /// Stores validated camera-hardware intent on the session; the engine
+    /// normalizes every field. Read it back with `cameraControls` and apply it
+    /// to the platform camera - the engine never touches camera hardware.
+    public func setCameraControls(_ controls: goss_camera_controls) throws {
+        var c = controls
+        try checked(goss_session_set_camera_controls(handle, &c))
+    }
+
+    /// The normalized camera controls for the SDK to apply to the platform camera.
+    public var cameraControls: goss_camera_controls {
+        get throws {
+            var out = goss_camera_controls()
+            try checked(goss_session_camera_controls(handle, &out))
+            return out
+        }
+    }
 }
