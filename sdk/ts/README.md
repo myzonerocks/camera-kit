@@ -1,8 +1,8 @@
-# Gosslens — TypeScript SDK
+# Gosslens - TypeScript SDK
 
 TypeScript SDK for [Gosslens](../../include/gosslens.h), a camera engine
 with a Zig core behind one C ABI, compiled to `wasm32`. Wraps it as
-`GossEngine`, `GossSession`, and `Gosslens` — the same names the
+`GossEngine`, `GossSession`, and `Gosslens`, the same names the
 [Swift](../swift/README.md) and [Kotlin](../kotlin/README.md) SDKs use.
 
 This SDK owns camera capture through `getUserMedia`, the render loop,
@@ -42,7 +42,7 @@ session.activateLens(manifestJson);
 ```
 
 `GossPreviewSession.create(canvas, wasmJsUrl, events)` does all three setup
-steps and owns the capture loop too — most app code wants this one.
+steps and owns the capture loop too; most app code wants this one.
 
 WebGPU and WebGL2 are two separate build artifacts, not a runtime
 toggle; `pickEngineUrl` picks the right one after confirming a real
@@ -66,7 +66,7 @@ tour is in the [root README](../../README.md#using-gosslens).
 
 ## Demo app
 
-[`demo/`](demo/), a real web page — see [`demo/README.md`](demo/README.md).
+[`demo/`](demo/) is a real web page; see [`demo/README.md`](demo/README.md).
 
 ## Tests
 

@@ -319,6 +319,29 @@ const Gate = struct {
         }
     }
 
+    // A long dash (em-dash always, en-dash outside a number range) is a machine
+    // writing tell. Flags each hit with a quote and the fix. Runs on doc prose,
+    // commit messages, and PR bodies.
+    fn checkClauseDashes(g: *Gate, text: []const u8, context: []const u8) !void {
+        var from: usize = 0;
+        while (nextBadDash(text, from)) |idx| {
+            const snippet = clauseSnippet(text, idx);
+            try g.flag("long-dash: {s} uses a long dash (\"{s}\"); a long dash reads as AI-written, so use a plain hyphen '-' or restructure the sentence. En-dashes are only for number ranges.", .{ context, snippet });
+            from = idx + 3;
+        }
+    }
+
+    fn checkProseDashes(g: *Gate, paths: []const []const u8) !void {
+        for (paths) |path| {
+            if (!isMarkdownDoc(path)) continue;
+            const stat = Io.Dir.cwd().statFile(g.io, path, .{}) catch continue;
+            if (stat.size > max_file_scan_bytes) continue;
+            const content = Io.Dir.cwd().readFileAlloc(g.io, path, g.arena, .limited(max_file_scan_bytes)) catch continue;
+            const ctx = try std.fmt.allocPrint(g.arena, "'{s}'", .{path});
+            try g.checkClauseDashes(content, ctx);
+        }
+    }
+
     fn stagedPaths(g: *Gate) ![][]const u8 {
         const out = try g.git(&.{ "git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z" }, &.{0});
         return g.nulSeparated(out);
@@ -338,6 +361,7 @@ const Gate = struct {
             const body = rec[sep + 1 ..];
             const ctx = try std.fmt.allocPrint(g.arena, "commit {s}", .{sha[0..@min(sha.len, 12)]});
             try g.checkMessage(body, ctx);
+            try g.checkClauseDashes(body, ctx);
         }
     }
 };
@@ -359,11 +383,13 @@ pub fn main(init: std.process.Init) !u8 {
         try g.checkInbound(paths);
         try g.checkFileProvenance(paths);
         try g.checkCommentHygiene(&.{"--cached"});
+        try g.checkProseDashes(paths);
     } else if (std.mem.eql(u8, mode, "--tree")) {
         const paths = try g.trackedPaths();
         try g.checkIgnoreIntegrity();
         try g.checkInbound(paths);
         try g.checkFileProvenance(paths);
+        try g.checkProseDashes(paths);
     } else if (std.mem.eql(u8, mode, "--commit-msg")) {
         const file = args.next() orelse {
             std.debug.print("gate: --commit-msg needs a file argument\n", .{});
@@ -371,6 +397,7 @@ pub fn main(init: std.process.Init) !u8 {
         };
         const message = try Io.Dir.cwd().readFileAlloc(g.io, file, arena, .limited(max_file_scan_bytes));
         try g.checkMessage(message, "commit message");
+        try g.checkClauseDashes(message, "commit message");
     } else if (std.mem.eql(u8, mode, "--log")) {
         const range = args.next() orelse {
             std.debug.print("gate: --log needs a rev range argument\n", .{});
@@ -391,6 +418,7 @@ pub fn main(init: std.process.Init) !u8 {
         const body = try Io.Dir.cwd().readFileAlloc(g.io, file, arena, .limited(max_file_scan_bytes));
         try g.checkMessage(body, "PR body");
         try g.checkProseShape(body, "PR body");
+        try g.checkClauseDashes(body, "PR body");
     } else {
         std.debug.print("gate: unknown mode '{s}'\n", .{mode});
         return 2;
@@ -558,6 +586,59 @@ fn findVerboseMarker(line: []const u8) ?[]const u8 {
     return null;
 }
 
+// A long dash at the start of s: the em-dash (U+2014) or en-dash (U+2013),
+// both three bytes under E2 80. Returns the third byte (0x94 or 0x93) or null.
+fn dashByte(s: []const u8) ?u8 {
+    if (s.len >= 3 and s[0] == 0xE2 and s[1] == 0x80 and (s[2] == 0x94 or s[2] == 0x93)) return s[2];
+    return null;
+}
+
+fn isAsciiDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
+// Index of the next long dash that reads as AI-written, or null. The em-dash
+// is always the tell. The en-dash is allowed only as a numeric range (a digit
+// on both sides, like 2013-2015); anywhere else it is flagged too. A plain
+// ascii hyphen '-' is never a hit.
+fn nextBadDash(text: []const u8, from: usize) ?usize {
+    var i: usize = from;
+    while (i < text.len) : (i += 1) {
+        const kind = dashByte(text[i..]) orelse continue;
+        if (kind == 0x94) return i; // em-dash: always the tell
+        const range = i > 0 and isAsciiDigit(text[i - 1]) and i + 3 < text.len and isAsciiDigit(text[i + 3]);
+        if (!range) return i; // en-dash outside a numeric range
+        i += 2;
+    }
+    return null;
+}
+
+fn hasBadDash(text: []const u8) bool {
+    return nextBadDash(text, 0) != null;
+}
+
+// A short quote around the dash, bounded to its own line and a small
+// window so a violation shows the joined clause, not the paragraph.
+fn clauseSnippet(text: []const u8, dash_index: usize) []const u8 {
+    var line_start: usize = dash_index;
+    while (line_start > 0 and text[line_start - 1] != '\n') line_start -= 1;
+    var line_end: usize = dash_index;
+    while (line_end < text.len and text[line_end] != '\n') line_end += 1;
+    const window: usize = 24;
+    const start = if (dash_index - line_start > window) dash_index - window else line_start;
+    const stop = if (line_end - dash_index > window) dash_index + window else line_end;
+    return std.mem.trim(u8, text[start..stop], " \t\r");
+}
+
+// Authored markdown prose, the only files scanned for clause dashes. The
+// private docs tree is gitignored and never scanned; source keeps its
+// own spaced hyphens and is out of scope.
+fn isMarkdownDoc(path: []const u8) bool {
+    if (!std.mem.endsWith(u8, path, ".md")) return false;
+    if (std.mem.startsWith(u8, path, "docs/private/")) return false;
+    return true;
+}
+
 test "top-level trees require their re-include line" {
     const ignore = "!core/**\n!tools/**\ndocs/private/\n";
     try std.testing.expect(hasLine(ignore, "!core/**"));
@@ -672,4 +753,29 @@ test "checklist lines are recognized" {
     try std.testing.expect(isChecklistLine("- [ ] zig build ci green"));
     try std.testing.expect(isChecklistLine("- [x] real device run"));
     try std.testing.expect(!isChecklistLine("- a plain bullet"));
+}
+
+test "any long dash is the AI tell; only a hyphen and a numeric range are fine" {
+    // The em-dash is always the tell, before a lowercase clause...
+    try std.testing.expect(hasBadDash("someone \xE2\x80\x94 every thread stays end-to-end encrypted"));
+    // ...and equally before a capital (an appositive is not an exception).
+    try std.testing.expect(hasBadDash("Melbourne \xE2\x80\x94 A city located in Victoria, AU."));
+    try std.testing.expect(hasBadDash("Gosslens \xE2\x80\x94 Kotlin SDK"));
+    // An en-dash between two digits is a numeric range, allowed.
+    try std.testing.expect(!hasBadDash("2013\xE2\x80\x9315"));
+    try std.testing.expect(!hasBadDash("10\xE2\x80\x9320"));
+    // An en-dash anywhere else is flagged too.
+    try std.testing.expect(hasBadDash("it stopped \xE2\x80\x93 then it resumed"));
+    // A plain hyphen, spaced or in a range, is never a hit.
+    try std.testing.expect(!hasBadDash("Melbourne - a city in Victoria, AU."));
+    try std.testing.expect(!hasBadDash("a real web page - see the demo"));
+}
+
+test "only authored markdown prose is scanned for clause dashes" {
+    try std.testing.expect(isMarkdownDoc("README.md"));
+    try std.testing.expect(isMarkdownDoc("lenses/format.md"));
+    try std.testing.expect(isMarkdownDoc("sdk/ts/README.md"));
+    try std.testing.expect(!isMarkdownDoc("docs/private/notes.md"));
+    try std.testing.expect(!isMarkdownDoc("core/graph/node.zig"));
+    try std.testing.expect(!isMarkdownDoc("adapters/beauty/beauty_shim.cc"));
 }

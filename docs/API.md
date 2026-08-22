@@ -210,7 +210,7 @@ complete parameter list.**
 
 | ABI function | Public operation | Scope |
 |---|---|---|
-| `goss_session_enable_segmentation` | `enableSegmentation(...)` — reserved, parameters not yet frozen | pending contract |
+| `goss_session_enable_segmentation` | `enableSegmentation(...)` (reserved, parameters not yet frozen) | pending contract |
 | `goss_session_disable_segmentation` | `disableSegmentation()` | all SDKs once exposed |
 
 ### Beauty
