@@ -21,11 +21,12 @@ pub const SignalKind = enum {
     tap,
     param,
     event,
+    geo_in_region,
 };
 
 fn signalIsBoolean(kind: SignalKind) bool {
     return switch (kind) {
-        .face_present, .hands_present, .tap, .audio_beat, .event => true,
+        .face_present, .hands_present, .tap, .audio_beat, .event, .geo_in_region => true,
         .face_blendshape, .world_tracking_state, .audio_level, .timer, .param => false,
     };
 }
@@ -86,6 +87,10 @@ pub const Signals = struct {
     /// event is present only for the tick it is fired, so an edge-triggered
     /// action fires exactly once.
     events: []const []const u8 = &.{},
+    /// Whether the submitted location is inside the session's geofence, computed
+    /// on-device from goss_session_submit_location; the location never crosses
+    /// the ABI, only this boolean.
+    geo_in_region: bool = false,
 };
 
 pub fn evaluate(node: *const Node, signals: Signals) bool {
@@ -110,6 +115,7 @@ fn readBool(s: Signal, signals: Signals) bool {
             }
             return false;
         },
+        .geo_in_region => signals.geo_in_region,
         else => unreachable,
     };
 }
@@ -489,6 +495,9 @@ const Parser = struct {
         if (std.mem.eql(u8, head, "world") and std.mem.eql(u8, tail, "tracking_state")) {
             return .{ .kind = .world_tracking_state };
         }
+        if (std.mem.eql(u8, head, "geo") and std.mem.eql(u8, tail, "in_region")) {
+            return .{ .kind = .geo_in_region };
+        }
         if (std.mem.eql(u8, head, "audio") and std.mem.eql(u8, tail, "level")) {
             return .{ .kind = .audio_level };
         }
@@ -674,4 +683,11 @@ test "event fires only when its name is in the tick's fired set" {
     try t.expect(!evaluate(expr.root, .{ .events = &.{"other"} }));
     try t.expect(evaluate(expr.root, .{ .events = &.{"celebrate"} }));
     try t.expect(evaluate(expr.root, .{ .events = &.{ "other", "celebrate" } }));
+}
+
+test "geo.in_region reads the on-device membership boolean" {
+    var expr = try compileOk("geo.in_region");
+    defer expr.deinit();
+    try t.expect(!evaluate(expr.root, .{}));
+    try t.expect(evaluate(expr.root, .{ .geo_in_region = true }));
 }

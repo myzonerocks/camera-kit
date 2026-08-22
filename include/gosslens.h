@@ -33,7 +33,7 @@ extern "C" {
 #endif
 
 #define GOSS_ABI_MAJOR 0u
-#define GOSS_ABI_MINOR 23u
+#define GOSS_ABI_MINOR 24u
 #define GOSS_ABI_VERSION ((GOSS_ABI_MAJOR << 16) | GOSS_ABI_MINOR)
 
 /* Any-thread. Compare the high 16 bits against GOSS_ABI_MAJOR. */
@@ -570,6 +570,14 @@ goss_status goss_session_remove_source(goss_session *session, const uint8_t *nam
 goss_status goss_session_submit_source_frame_rgba_copy(goss_session *session, const uint8_t *name, size_t name_len, const goss_frame_desc *desc, const uint8_t *rgba, uint32_t stride);
 goss_status goss_session_set_layout(goss_session *session, uint32_t arrangement);
 goss_status goss_session_clear_layout(goss_session *session);
+
+/* Graph thread. Geofilters: location-gated overlay lenses. set_geofence sets a
+ * circle the app derives from a lens's intended place; submit_location feeds a
+ * fix. The engine computes geo.in_region on-device and only that boolean
+ * crosses the trigger rail, so the location never leaves the process. */
+goss_status goss_session_submit_location(goss_session *session, double latitude, double longitude, float horizontal_accuracy_m, int64_t timestamp_us);
+goss_status goss_session_set_geofence(goss_session *session, double latitude, double longitude, double radius_m);
+goss_status goss_session_clear_geofence(goss_session *session);
 
 /* Graph thread. Runs the beauty chain over one RGBA frame on the calling
  * thread, reading the newest tracking result for the landmark driven

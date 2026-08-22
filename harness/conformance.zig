@@ -1292,6 +1292,53 @@ fn proveLayoutComposite(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
     return true;
 }
 
+/// Proves geofilters through the public ABI: a lens with a geo.in_region trigger
+/// fires its action when a submitted location is inside the geofence, not when
+/// it is outside, deterministically, with the location computed on-device and
+/// never crossing back over the ABI.
+fn proveGeofilter(gpa: std.mem.Allocator, engine: *abi.Engine) !bool {
+    _ = gpa;
+    const manifest =
+        \\{"glf":"1.0","id":"goss.reference.geofilter","version":"1.0.0","display_name":"Geofilter","engine_compat":">=0.5","capabilities":[],"parameters":[{"name":"intensity","type":"float","default":0.0,"min":0.0,"max":1.0}],"nodes":[{"id":"grade","type":"grade.pass","inputs":{"frame":"camera"},"params":{}}],"triggers":[{"when":"geo.in_region","action":{"kind":"param_set","target":"intensity","to":1.0}}]}
+    ;
+    const c_lat: f64 = 37.7749;
+    const c_lon: f64 = -122.4194;
+
+    const S = struct {
+        fn run(e: *abi.Engine, m: []const u8, clat: f64, clon: f64, lat: f64) !f32 {
+            const session = try abi.createSession(e, .{ .frame_budget_us = 0, .reserved = 0 });
+            defer abi.destroySession(session);
+            if (abi.goss_session_activate_lens(session, m.ptr, m.len) != .ok) return error.Activate;
+            if (abi.goss_session_set_geofence(session, clat, clon, 100) != .ok) return error.Geofence;
+            if (abi.goss_session_submit_location(session, lat, clon, 5.0, 1000) != .ok) return error.Location;
+            var sig = std.mem.zeroes(abi.LensSignals);
+            _ = abi.goss_session_tick_lens(session, 16000, &sig);
+            var v: f32 = -1;
+            _ = abi.goss_session_parameter_value(session, "intensity", "intensity".len, &v);
+            return v;
+        }
+    };
+
+    const inside_a = S.run(engine, manifest, c_lat, c_lon, c_lat + 0.0001) catch return false; // ~11 m north, inside 100 m
+    const inside_b = S.run(engine, manifest, c_lat, c_lon, c_lat + 0.0001) catch return false;
+    const outside = S.run(engine, manifest, c_lat, c_lon, c_lat + 0.01) catch return false; // ~1.1 km north, outside
+
+    if (inside_a != 1.0) {
+        std.debug.print("conformance: FAIL geo.in_region did not fire inside the geofence ({d})\n", .{inside_a});
+        return false;
+    }
+    if (outside != 0.0) {
+        std.debug.print("conformance: FAIL geo.in_region fired outside the geofence ({d})\n", .{outside});
+        return false;
+    }
+    if (inside_a != inside_b) {
+        std.debug.print("conformance: FAIL geofilter is not deterministic across runs\n", .{});
+        return false;
+    }
+    std.debug.print("conformance: PROOF a geo.in_region trigger fires inside its geofence and not outside, deterministically, with the location never leaving the engine\n", .{});
+    return true;
+}
+
 /// Proves the engine-side outgoing mix: at the native 48 kHz, the lens over a
 /// silent mic is bit-identical to pull_audio, a non-zero mic sums in with
 /// saturation, and the resampled 44.1 kHz path is non-silent and deterministic
@@ -3176,6 +3223,7 @@ pub fn main(init_args: std.process.Init) !u8 {
     if (!try proveCameraControls(gpa, engine)) return 1;
     if (!try proveEventTrigger(gpa, engine)) return 1;
     if (!try proveLayoutComposite(gpa, engine)) return 1;
+    if (!try proveGeofilter(gpa, engine)) return 1;
     if (!try proveBlur(gpa, engine)) return 1;
     if (!try proveGrade(gpa, engine)) return 1;
     if (!try proveBloom(gpa, engine)) return 1;
