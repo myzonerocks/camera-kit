@@ -761,6 +761,68 @@ export class GossSession {
     this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
   }
 
+  private withName(name: string, fn: (ptr: number, len: number) => void): void {
+    const bytes = new TextEncoder().encode(name);
+    if (bytes.length === 0) return;
+    const ptr = this.mod.ccall("goss_alloc", "number", ["number"], [bytes.length]) as number;
+    this.mod.HEAPU8.set(bytes, ptr);
+    fn(ptr, bytes.length);
+    this.mod.ccall("goss_free", null, ["number", "number"], [ptr, bytes.length]);
+  }
+
+  /// Registers a named RGBA source for multi-source composition (Duet, Stitch,
+  /// live grids). The camera is the implicit source 0.
+  defineSource(name: string): void {
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_define_source", "number", ["number", "number", "number"], [this.handle, ptr, len]));
+  }
+
+  removeSource(name: string): void {
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_remove_source", "number", ["number", "number", "number"], [this.handle, ptr, len]));
+  }
+
+  /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
+  submitSourceFrameRgba(name: string, rgba: Uint8Array, width: number, height: number, stride: number, pixelFormat: GossPixelFormat = GossPixelFormat.Rgba8): void {
+    const byteLen = stride * height;
+    const rgbaPtr = this.mod.ccall("goss_alloc", "number", ["number"], [byteLen]) as number;
+    this.mod.HEAPU8.set(rgba.subarray(0, byteLen), rgbaPtr);
+    this.mod.setValue(this.frameDescPtr, width, "i32");
+    this.mod.setValue(this.frameDescPtr + 4, height, "i32");
+    this.mod.setValue(this.frameDescPtr + 8, pixelFormat, "i32");
+    this.mod.setValue(this.frameDescPtr + 12, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 16, 1, "i32");
+    this.mod.setValue(this.frameDescPtr + 20, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 24, 0, "i32");
+    this.mod.setValue(this.frameDescPtr + 28, 0, "i32");
+    this.withName(name, (ptr, len) =>
+      this.mod.ccall("goss_session_submit_source_frame_rgba_copy", "number", ["number", "number", "number", "number", "number", "number"], [this.handle, ptr, len, this.frameDescPtr, rgbaPtr, stride]));
+    this.mod.ccall("goss_free", null, ["number", "number"], [rgbaPtr, byteLen]);
+  }
+
+  /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
+  setLayout(arrangement: number): void {
+    this.mod.ccall("goss_session_set_layout", "number", ["number", "number"], [this.handle, arrangement]);
+  }
+
+  clearLayout(): void {
+    this.mod.ccall("goss_session_clear_layout", "number", ["number"], [this.handle]);
+  }
+
+  /// Feeds a location fix for on-device geo.in_region membership; the location never leaves the engine.
+  submitLocation(latitude: number, longitude: number, accuracyM: number, timestampUs: number): void {
+    this.mod.ccall("goss_session_submit_location", "number", ["number", "number", "number", "number", "number"], [this.handle, latitude, longitude, accuracyM, timestampUs]);
+  }
+
+  /// Sets the geofence circle the app derives from a lens's intended place.
+  setGeofence(latitude: number, longitude: number, radiusM: number): void {
+    this.mod.ccall("goss_session_set_geofence", "number", ["number", "number", "number", "number"], [this.handle, latitude, longitude, radiusM]);
+  }
+
+  clearGeofence(): void {
+    this.mod.ccall("goss_session_clear_geofence", "number", ["number"], [this.handle]);
+  }
+
   setVideoFlip(enabled: boolean): void {
     this.videoFlipped = enabled;
   }

@@ -77,6 +77,14 @@ object Gosslens {
     internal external fun nativeSetCameraControls(session: Long, buffer: ByteBuffer): Int
     internal external fun nativeCameraControls(session: Long, buffer: ByteBuffer): Int
     internal external fun nativeFireEvent(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
+    internal external fun nativeDefineSource(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
+    internal external fun nativeRemoveSource(session: Long, nameBuffer: ByteBuffer, nameLen: Int): Int
+    internal external fun nativeSubmitSourceFrameRgba(session: Long, nameBuffer: ByteBuffer, nameLen: Int, rgbaBuffer: ByteBuffer, width: Int, height: Int, stride: Int, pixelFormat: Int): Int
+    internal external fun nativeSetLayout(session: Long, arrangement: Int): Int
+    internal external fun nativeClearLayout(session: Long): Int
+    internal external fun nativeSubmitLocation(session: Long, latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Int
+    internal external fun nativeSetGeofence(session: Long, latitude: Double, longitude: Double, radiusM: Double): Int
+    internal external fun nativeClearGeofence(session: Long): Int
     internal external fun nativeSubmitHardwareBuffer(
         session: Long,
         hardwareBuffer: android.hardware.HardwareBuffer,
@@ -625,6 +633,44 @@ class GossSession private constructor(internal val handle: Long) : AutoCloseable
         val buf = ByteBuffer.allocateDirect(bytes.size).apply { put(bytes); rewind() }
         return Gosslens.nativeFireEvent(handle, buf, bytes.size) == 0
     }
+
+    private fun nameBuf(name: String): Pair<ByteBuffer, Int> {
+        val b = name.toByteArray(Charsets.UTF_8)
+        return ByteBuffer.allocateDirect(b.size).apply { put(b); rewind() } to b.size
+    }
+
+    /** Registers a named RGBA source for multi-source composition. */
+    fun defineSource(name: String): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeDefineSource(handle, buf, n) == 0
+    }
+
+    /** Removes a named source. */
+    fun removeSource(name: String): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeRemoveSource(handle, buf, n) == 0
+    }
+
+    /** Uploads one RGBA/BGRA frame into a named source ([pixelFormat] 3 BGRA, 4 RGBA). */
+    fun submitSourceFrameRgba(name: String, rgba: ByteBuffer, width: Int, height: Int, stride: Int, pixelFormat: Int = 4): Boolean {
+        val (buf, n) = nameBuf(name)
+        return Gosslens.nativeSubmitSourceFrameRgba(handle, buf, n, rgba, width, height, stride, pixelFormat) == 0
+    }
+
+    /** Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid. */
+    fun setLayout(arrangement: Int): Boolean = Gosslens.nativeSetLayout(handle, arrangement) == 0
+
+    fun clearLayout(): Boolean = Gosslens.nativeClearLayout(handle) == 0
+
+    /** Feeds a location fix for on-device geo.in_region membership. */
+    fun submitLocation(latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Long): Boolean =
+        Gosslens.nativeSubmitLocation(handle, latitude, longitude, accuracyM, timestampUs) == 0
+
+    /** Sets the geofence circle the app derives from a lens's intended place. */
+    fun setGeofence(latitude: Double, longitude: Double, radiusM: Double): Boolean =
+        Gosslens.nativeSetGeofence(handle, latitude, longitude, radiusM) == 0
+
+    fun clearGeofence(): Boolean = Gosslens.nativeClearGeofence(handle) == 0
 
     fun submitHardwareBuffer(
         buffer: android.hardware.HardwareBuffer,

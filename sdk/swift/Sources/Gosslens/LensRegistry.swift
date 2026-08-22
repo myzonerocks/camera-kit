@@ -138,4 +138,54 @@ extension GossSession {
             try checked(goss_session_fire_event(handle, buf.baseAddress, buf.count))
         }
     }
+
+    /// Registers a named RGBA source for multi-source composition (Duet, Stitch,
+    /// live grids). The camera is the implicit source 0.
+    public func defineSource(_ name: String) throws {
+        var b = Array(name.utf8)
+        try b.withUnsafeMutableBufferPointer { buf in
+            try checked(goss_session_define_source(handle, buf.baseAddress, buf.count))
+        }
+    }
+
+    public func removeSource(_ name: String) throws {
+        var b = Array(name.utf8)
+        try b.withUnsafeMutableBufferPointer { buf in
+            try checked(goss_session_remove_source(handle, buf.baseAddress, buf.count))
+        }
+    }
+
+    /// Uploads one RGBA/BGRA frame into a named source (pixelFormat 3 BGRA, 4 RGBA).
+    public func submitSourceFrame(_ name: String, rgba: [UInt8], width: UInt32, height: UInt32, stride: UInt32, pixelFormat: UInt32 = 4) throws {
+        var nameBytes = Array(name.utf8)
+        var desc = goss_frame_desc(width: width, height: height, pixel_format: pixelFormat, color_standard: 0, color_range: 1, flags: 0, timestamp_us: 0)
+        try nameBytes.withUnsafeMutableBufferPointer { nb in
+            try rgba.withUnsafeBufferPointer { rb in
+                try checked(goss_session_submit_source_frame_rgba_copy(handle, nb.baseAddress, nb.count, &desc, rb.baseAddress, stride))
+            }
+        }
+    }
+
+    /// Arranges the camera and named sources: 0 custom, 1 side-by-side, 2 top-bottom, 3 pip, 4 grid.
+    public func setLayout(_ arrangement: UInt32) throws {
+        try checked(goss_session_set_layout(handle, arrangement))
+    }
+
+    public func clearLayout() throws {
+        try checked(goss_session_clear_layout(handle))
+    }
+
+    /// Feeds a location fix for on-device geo.in_region membership; the location never leaves the engine.
+    public func submitLocation(latitude: Double, longitude: Double, accuracyM: Float, timestampUs: Int64) throws {
+        try checked(goss_session_submit_location(handle, latitude, longitude, accuracyM, timestampUs))
+    }
+
+    /// Sets the geofence circle the app derives from a lens's intended place.
+    public func setGeofence(latitude: Double, longitude: Double, radiusM: Double) throws {
+        try checked(goss_session_set_geofence(handle, latitude, longitude, radiusM))
+    }
+
+    public func clearGeofence() throws {
+        try checked(goss_session_clear_geofence(handle))
+    }
 }

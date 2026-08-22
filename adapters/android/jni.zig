@@ -483,6 +483,56 @@ export fn Java_com_gosslens_Gosslens_nativeFireEvent(env: *JniEnv, cls: jobject,
     return @intFromEnum(abi.goss_session_fire_event(sessionFromHandle(session), name, @intCast(@max(name_len, 0))));
 }
 
+export fn Java_com_gosslens_Gosslens_nativeDefineSource(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_define_source(sessionFromHandle(session), name, @intCast(@max(name_len, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeRemoveSource(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    return @intFromEnum(abi.goss_session_remove_source(sessionFromHandle(session), name, @intCast(@max(name_len, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitSourceFrameRgba(env: *JniEnv, cls: jobject, session: i64, name_buffer: jobject, name_len: i32, rgba_buffer: jobject, width: i32, height: i32, stride: i32, pixel_format: i32) i32 {
+    _ = cls;
+    const name = getDirectBufferAddress(env, name_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const rgba = getDirectBufferAddress(env, rgba_buffer) orelse return @intFromEnum(abi.Status.invalid_argument);
+    const desc: abi.FrameDesc = .{ .width = @intCast(@max(width, 0)), .height = @intCast(@max(height, 0)), .pixel_format = @intCast(@max(pixel_format, 0)), .color_standard = 0, .color_range = 1, .flags = 0, .timestamp_us = 0 };
+    return @intFromEnum(abi.goss_session_submit_source_frame_rgba_copy(sessionFromHandle(session), name, @intCast(@max(name_len, 0)), &desc, rgba, @intCast(@max(stride, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetLayout(env: *JniEnv, cls: jobject, session: i64, arrangement: i32) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_set_layout(sessionFromHandle(session), @intCast(@max(arrangement, 0))));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeClearLayout(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_clear_layout(sessionFromHandle(session)));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSubmitLocation(env: *JniEnv, cls: jobject, session: i64, latitude: f64, longitude: f64, accuracy_m: f32, timestamp_us: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_submit_location(sessionFromHandle(session), latitude, longitude, accuracy_m, timestamp_us));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeSetGeofence(env: *JniEnv, cls: jobject, session: i64, latitude: f64, longitude: f64, radius_m: f64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_set_geofence(sessionFromHandle(session), latitude, longitude, radius_m));
+}
+
+export fn Java_com_gosslens_Gosslens_nativeClearGeofence(env: *JniEnv, cls: jobject, session: i64) i32 {
+    _ = env;
+    _ = cls;
+    return @intFromEnum(abi.goss_session_clear_geofence(sessionFromHandle(session)));
+}
+
 export fn Java_com_gosslens_Gosslens_nativeReportFrame(env: *JniEnv, cls: jobject, session: i64, frame_time_us: i32, thermal: i32) i32 {
     _ = env;
     _ = cls;
