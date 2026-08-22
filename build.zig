@@ -213,6 +213,7 @@ pub fn build(b: *std.Build) void {
     abi_module.addImport("photo", photoModule(b, target, optimize));
     abi_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
     abi_module.addImport("audio_mix", audioMixModule(b, target, optimize));
+    abi_module.addImport("layout", compositeLayoutModule(b, target, optimize));
     const have_jolt = blk: {
         b.build_root.handle.access(b.graph.io, ".vendor/jolt/Jolt/Jolt.h", .{}) catch break :blk false;
         break :blk true;
@@ -337,6 +338,7 @@ pub fn build(b: *std.Build) void {
     const color_tests = b.addTest(.{ .root_module = colorModule(b, target, optimize) });
     const audio_analysis_tests = b.addTest(.{ .root_module = audioAnalysisModule(b, target, optimize) });
     const audio_mix_tests = b.addTest(.{ .root_module = audioMixModule(b, target, optimize) });
+    const composite_layout_tests = b.addTest(.{ .root_module = compositeLayoutModule(b, target, optimize) });
     const graph_tests = b.addTest(.{ .root_module = graph_module });
     const abi_tests = b.addTest(.{ .root_module = abi_module });
     const abi_dump_tests = b.addTest(.{ .root_module = abi_dump_module });
@@ -368,6 +370,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(color_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_analysis_tests).step);
     test_step.dependOn(&b.addRunArtifact(audio_mix_tests).step);
+    test_step.dependOn(&b.addRunArtifact(composite_layout_tests).step);
     if (have_jolt) {
         const physics_tests = b.addTest(.{ .root_module = physicsModule(b, target, optimize, true) });
         test_step.dependOn(&b.addRunArtifact(physics_tests).step);
@@ -673,6 +676,7 @@ pub fn build(b: *std.Build) void {
         abi_tracking_module.addImport("photo", photoModule(b, target, optimize));
         abi_tracking_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_tracking_module.addImport("audio_mix", audioMixModule(b, target, optimize));
+        abi_tracking_module.addImport("layout", compositeLayoutModule(b, target, optimize));
         abi_tracking_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_tracking_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         abi_tracking_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
@@ -885,6 +889,7 @@ pub fn build(b: *std.Build) void {
     abi_wasm.addImport("photo", photoModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_analysis", audioAnalysisModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("audio_mix", audioMixModule(b, wasm_target, .ReleaseSmall));
+    abi_wasm.addImport("layout", compositeLayoutModule(b, wasm_target, .ReleaseSmall));
     abi_wasm.addImport("physics", physicsModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("script", scriptModule(b, wasm_target, .ReleaseSmall, false));
     abi_wasm.addImport("audio_playback", audioPlaybackModule(b, wasm_target, .ReleaseSmall, false));
@@ -1058,6 +1063,7 @@ pub fn build(b: *std.Build) void {
         abi_conformance_module.addImport("photo", photoModule(b, target, optimize));
         abi_conformance_module.addImport("audio_analysis", audioAnalysisModule(b, target, optimize));
         abi_conformance_module.addImport("audio_mix", audioMixModule(b, target, optimize));
+        abi_conformance_module.addImport("layout", compositeLayoutModule(b, target, optimize));
         abi_conformance_module.addImport("physics", physicsModule(b, target, optimize, have_jolt));
         abi_conformance_module.addImport("script", scriptModule(b, target, optimize, have_quickjs));
         abi_conformance_module.addImport("audio_playback", audioPlaybackModule(b, target, optimize, have_miniaudio));
@@ -1362,6 +1368,7 @@ fn addAndroidSlice(b: *std.Build, abi_target: AndroidAbi, sysroot: []const u8, o
     abi_android.addImport("photo", photoModule(b, android_target, optimize));
     abi_android.addImport("audio_analysis", audioAnalysisModule(b, android_target, optimize));
     abi_android.addImport("audio_mix", audioMixModule(b, android_target, optimize));
+    abi_android.addImport("layout", compositeLayoutModule(b, android_target, optimize));
     abi_android.addImport("physics", physicsModule(b, android_target, optimize, true));
     abi_android.addImport("script", scriptModule(b, android_target, optimize, true));
     abi_android.addImport("audio_playback", audioPlaybackModule(b, android_target, optimize, true));
@@ -1582,6 +1589,10 @@ fn audioAnalysisModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 
 fn audioMixModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("core/media/audio_mix.zig"), .target = target, .optimize = optimize });
+}
+
+fn compositeLayoutModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("core/composite/layout.zig"), .target = target, .optimize = optimize });
 }
 
 // The rigid-body world: Jolt and its shim on targets we build it for,
@@ -3306,6 +3317,7 @@ fn addIosStepImpl(b: *std.Build, optimize: std.builtin.OptimizeMode, shaderc_exe
     abi_ios.addImport("photo", photoModule(b, ios_target, optimize));
     abi_ios.addImport("audio_analysis", audioAnalysisModule(b, ios_target, optimize));
     abi_ios.addImport("audio_mix", audioMixModule(b, ios_target, optimize));
+    abi_ios.addImport("layout", compositeLayoutModule(b, ios_target, optimize));
     // Physics, scripting and audio follow their vendor the same way the host
     // build does, so hiding a vendor turns that subsystem into its stub
     // instead of leaving an empty library target that fails to link.
@@ -3871,6 +3883,7 @@ fn addWasmEmscriptenStep(b: *std.Build, step: *std.Build.Step, shaderc_exe: ?*st
     abi_em.addImport("photo", photoModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_analysis", audioAnalysisModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("audio_mix", audioMixModule(b, em_target, .ReleaseSmall));
+    abi_em.addImport("layout", compositeLayoutModule(b, em_target, .ReleaseSmall));
     abi_em.addImport("physics", physicsModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("script", scriptModule(b, em_target, .ReleaseSmall, true));
     abi_em.addImport("audio_playback", audioPlaybackModule(b, em_target, .ReleaseSmall, true));
