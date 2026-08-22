@@ -128,4 +128,14 @@ extension GossSession {
             return out
         }
     }
+
+    /// Fires a named event the next `tickLens` delivers to the lens's
+    /// `event('name')` triggers for one tick. Drive an on-screen effect from an
+    /// app moment; the engine knows the name, never its meaning.
+    public func fireEvent(_ name: String) throws {
+        var bytes = Array(name.utf8)
+        try bytes.withUnsafeMutableBufferPointer { buf in
+            try checked(goss_session_fire_event(handle, buf.baseAddress, buf.count))
+        }
+    }
 }
